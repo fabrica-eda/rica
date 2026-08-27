@@ -53,13 +53,15 @@ module Top (
     always_comb {
         // At 150 MHz, x31 advances about twice per second. A moving binary
         // count proves that the PLL, instruction flow, branch redirect, and
-        // integer writeback path are all alive on the board.
+        // integer writeback path are all alive on the board. x31 counts down
+        // from all ones so the active-low LEDs display an ordinary count up
+        // without spending eight LUTs on output inversion.
         case core_pc {
-            32'h0000_0000: instruction = 32'h0000_0f93; // addi x31, x0, 0
+            32'h0000_0000: instruction = 32'hfff0_0f93; // addi x31, x0, -1
             32'h0000_0004: instruction = 32'h0400_00b7; // lui  x1, 0x4000
             32'h0000_0008: instruction = 32'hfff0_8093; // addi x1, x1, -1
             32'h0000_000c: instruction = 32'hfe00_9ee3; // bne  x1, x0, -4
-            32'h0000_0010: instruction = 32'h001f_8f93; // addi x31, x31, 1
+            32'h0000_0010: instruction = 32'hffff_8f93; // addi x31, x31, -1
             32'h0000_0014: instruction = 32'hff1f_f06f; // jal  x0, -16
             default      : instruction = 32'h0000_0073; // ecall
         }

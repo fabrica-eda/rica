@@ -41,7 +41,7 @@ slack with all 1746 modeled endpoints checked. The pre-CPPR `d776ddc` result
 must not be used for this design.
 
 The complete EVN wrapper, including the 12-to-150 MHz PLL, ROM, and package
-pins, closes at +0.017 ns setup and +0.290 ns hold with all 1838 modeled
+pins, closes at +0.026 ns setup and +0.290 ns hold with all 1914 modeled
 endpoints checked. This board-level margin is valid but narrow.
 
 ## Verification
@@ -72,7 +72,9 @@ cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv
 ```
 
 The board wrapper binds the EVN's 12 MHz reference to a 150 MHz EHXPLLL and
-runs a small ROM program whose x31 binary count is shown on the eight LEDs.
+runs a small ROM program whose x31 binary count is shown on the eight
+active-low LEDs. The firmware counts x31 downward from all ones, so the visible
+LED pattern counts upward without adding output-inversion LUTs.
 Build and program it with the pinned Texo revision using:
 
 ```sh
