@@ -52,6 +52,26 @@ Run RTL simulation, Struo mapping, and equivalence checks:
 cargo run --locked --offline -p verify-riscv
 ```
 
+Build and run the independent self-checking RV32 ELF suite:
+
+```sh
+cargo run --locked --offline -p verify-riscv --bin rv32-riscv-tests
+```
+
+The official ACT4 tests are pinned as the `third_party/riscv-arch-test`
+submodule. The runner discovers the complete RV32I catalog there and reports
+tests not yet enabled by `tests/act4-enabled.txt` as `IGNORE`:
+
+```sh
+git submodule update --init
+cargo run --locked --offline -p verify-riscv --bin rv32-riscv-tests -- --act4
+```
+
+It also accepts externally generated self-checking ELFs. See
+`tests/README.md` for the `tohost` contract, ACT4 ELF directory option, and the
+exact implemented ISA subset; this is not yet a full RV32I certification
+claim.
+
 Compiling the post-map simulation model can take several minutes. Run that
 regression explicitly when needed:
 

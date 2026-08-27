@@ -1,0 +1,7 @@
+# ACT4 RV32I tests become runnable by adding their stem here, one per line.
+#
+# Keep this empty until the Core implements the instructions used by ACT4's
+# common bootstrap as well as the instruction under test. In particular, the
+# current bootstrap uses SLLI and SRLI while initializing registers. Tests not
+# listed here are discovered from the pinned submodule and reported as IGNORE;
+# they are not copied or renamed in this repository.

@@ -501,17 +501,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if register_file_only {
         return Ok(());
     }
-    let core_source = [
-        "PipelineInterfaces.veryl",
-        "RegisterFile.veryl",
-        "Decoder.veryl",
-        "ExecuteUnit.veryl",
-        "Core.veryl",
-    ]
-    .into_iter()
-    .map(|file| fs::read_to_string(project.join("src").join(file)))
-    .collect::<Result<Vec<_>, _>>()?
-    .join("\n");
+    let core_source = verify_riscv::core_source(project)?;
 
     let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
     verify_rtl(&mut rtl, "Celox RTL simulation")?;

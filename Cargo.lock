@@ -4071,6 +4071,7 @@ version = "0.1.0"
 dependencies = [
  "celox 0.3.1",
  "celox 0.4.1",
+ "object 0.37.3",
  "struo-celox",
  "struo-frontend-veryl",
  "struo-synth",

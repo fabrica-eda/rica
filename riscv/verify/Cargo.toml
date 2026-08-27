@@ -9,6 +9,7 @@ default-run = "verify-riscv"
 [dependencies]
 celox.workspace = true
 celox03.workspace = true
+object.workspace = true
 struo-celox.workspace = true
 struo-frontend-veryl.workspace = true
 struo-synth.workspace = true
@@ -17,3 +18,7 @@ struo-target-ecp5.workspace = true
 [[bin]]
 name = "nextpnr-riscv"
 path = "src/bin/nextpnr.rs"
+
+[[bin]]
+name = "rv32-riscv-tests"
+path = "src/bin/rv32_tests.rs"
