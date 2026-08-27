@@ -1,0 +1,516 @@
+/// Overlapped in-order RV32I-subset core for the 150 MHz implementation.
+///
+/// Fetch/decode, synchronous register read, execute, memory, and writeback
+/// overlap. Consecutive dependent ALU instructions use a registered EX bypass
+/// without a bubble; a load-use dependency stalls once. Taken control flow is
+/// squashed one cycle after resolution; unsupported encodings retire as a halt.
+module Core (
+    clk             : input  clock    ,
+    rst_n           : input  reset    ,
+    instr           : input  logic<32>,
+    data_rdata      : input  logic<32>,
+    pc              : output logic<32>,
+    data_addr       : output logic<32>,
+    data_wdata      : output logic<32>,
+    data_we         : output logic    ,
+    halted          : output logic    ,
+    commit_valid    : output logic    ,
+    commit_pc       : output logic<32>,
+    commit_instr    : output logic<32>,
+    commit_rd       : output logic<5> ,
+    commit_data     : output logic<32>,
+    commit_mem_we   : output logic    ,
+    commit_mem_addr : output logic<32>,
+    commit_mem_wdata: output logic<32>,
+    debug_x31       : output logic<32>,
+) {
+    // Keep the redirect base and the sequential offset in separate registers.
+    // The hot sequential path is then only offset + 4; a taken branch updates
+    // the mostly-static base instead of feeding a wide redirect/hold/increment
+    // mux back into every PC bit.
+    var fetch_base_q  : logic<32>;
+    var fetch_offset_q: logic<32>;
+    var fetch_pc      : logic<32>;
+    var halted_q      : logic    ;
+    var debug_x31_q   : logic<32>;
+
+    var fd_valid_q: logic    ;
+    var fd_pc_q   : logic<32>;
+    var fd_instr_q: logic<32>;
+
+    var rx_valid_q        : logic    ;
+    var rx_pc_q           : logic<32>;
+    var rx_instr_q        : logic<32>;
+    var rx_rs1_q          : logic<5> ;
+    var rx_rs2_q          : logic<5> ;
+    var rx_rd_q           : logic<5> ;
+    var rx_immediate_q    : logic<32>;
+    var rx_alu_op_q       : logic<3> ;
+    var rx_use_pc_q       : logic    ;
+    var rx_use_immediate_q: logic    ;
+    var rx_use_rs1_q      : logic    ;
+    var rx_use_rs2_q      : logic    ;
+    var rx_write_enable_q : logic    ;
+    var rx_is_load_q      : logic    ;
+    var rx_is_store_q     : logic    ;
+    var rx_is_branch_q    : logic    ;
+    var rx_branch_ne_q    : logic    ;
+    var rx_is_jal_q       : logic    ;
+    var rx_is_jalr_q      : logic    ;
+    var rx_halt_q         : logic    ;
+    var rx_stalled_q      : logic    ;
+    var rx_stall_data_a_q : logic<32>;
+    var rx_stall_data_b_q : logic<32>;
+
+    var ex_valid_q             : logic    ;
+    var ex_pc_q                : logic<32>;
+    var ex_instr_q             : logic<32>;
+    var ex_rd_q                : logic<5> ;
+    var ex_alu_op_q            : logic<3> ;
+    var ex_write_enable_q      : logic    ;
+    var ex_is_load_q           : logic    ;
+    var ex_is_store_q          : logic    ;
+    var ex_is_branch_q         : logic    ;
+    var ex_branch_ne_q         : logic    ;
+    var ex_link_q              : logic    ;
+    var ex_halt_q              : logic    ;
+    var ex_operand_a_q         : logic<32>;
+    var ex_operand_b_q         : logic<32>;
+    var ex_store_data_q        : logic<32>;
+    var ex_redirect_base_q     : logic<32>;
+    var ex_redirect_offset_q   : logic<32>;
+    var ex_redirect_clear_lsb_q: logic    ;
+    struct BypassState {
+        arithmetic  : logic<32>,
+        logic_result: logic<32>,
+        use_logic   : logic    ,
+        operand_a   : logic    ,
+        operand_b   : logic    ,
+        store_data  : logic    ,
+        redirect    : logic    ,
+    }
+    var ex_bypass_q: BypassState;
+
+    var mem_valid_q       : logic    ;
+    var mem_pc_q          : logic<32>;
+    var mem_instr_q       : logic<32>;
+    var mem_rd_q          : logic<5> ;
+    var mem_write_enable_q: logic    ;
+    var mem_is_load_q     : logic    ;
+    var mem_is_store_q    : logic    ;
+    var mem_halt_q        : logic    ;
+    var mem_result_q      : logic<32>;
+    var mem_logic_result_q: logic<32>;
+    var mem_use_logic_q   : logic    ;
+    var mem_address_q     : logic<32>;
+    var mem_wdata_q       : logic<32>;
+
+    var wb_valid_q       : logic    ;
+    var wb_pc_q          : logic<32>;
+    var wb_instr_q       : logic<32>;
+    var wb_rd_q          : logic<5> ;
+    var wb_write_enable_q: logic    ;
+    var wb_halt_q        : logic    ;
+    var wb_result_q      : logic<32>;
+    var wb_mem_we_q      : logic    ;
+    var wb_mem_addr_q    : logic<32>;
+    var wb_mem_wdata_q   : logic<32>;
+
+    var rf_write_enable: logic    ;
+    var rf_read_data_a : logic<32>;
+    var rf_read_data_b : logic<32>;
+
+    var mem_forward_data   : logic<32>;
+    var forwarded_rs1      : logic<32>;
+    var forwarded_rs2      : logic<32>;
+    var rx_operand_a       : logic<32>;
+    var rx_operand_b       : logic<32>;
+    var alu_operand_a      : logic<32>;
+    var alu_operand_b      : logic<32>;
+    var bypass_data        : logic<32>;
+    var execute_store_data : logic<32>;
+    var ex_bypass_hit_rs1  : logic    ;
+    var ex_bypass_hit_rs2  : logic    ;
+    var mem_selected_result: logic<32>;
+    var redirect_sum       : logic<32>;
+    var branch_taken       : logic    ;
+    var redirect_valid     : logic    ;
+    var redirect_target    : logic<32>;
+    var redirect_pending_q : logic    ;
+    var redirect_target_q  : logic<32>;
+    var execution_hazard   : logic    ;
+    var stop_frontend      : logic    ;
+
+    inst registers: RegisterFile (
+        clk           : clk              ,
+        write_enable  : rf_write_enable  ,
+        write_address : wb_rd_q          ,
+        write_data    : wb_result_q      ,
+        read_address_a: fd_instr_q[19:15],
+        read_address_b: fd_instr_q[24:20],
+        read_data_a   : rf_read_data_a   ,
+        read_data_b   : rf_read_data_b   ,
+    );
+
+    inst decode_bus: DecodeBus;
+    inst decoder: Decoder (
+        decode: decode_bus,
+    );
+
+    inst execute_bus : ExecuteBus;
+    inst execute_unit: ExecuteUnit (
+        execute: execute_bus,
+    );
+
+    always_comb {
+        rf_write_enable  = wb_valid_q && wb_write_enable_q && (wb_rd_q != 5'd0);
+        decode_bus.instr = fd_instr_q;
+
+        if ex_bypass_q.use_logic {
+            bypass_data = ex_bypass_q.logic_result;
+        } else {
+            bypass_data = ex_bypass_q.arithmetic;
+        }
+        if mem_use_logic_q {
+            mem_selected_result = mem_logic_result_q;
+        } else {
+            mem_selected_result = mem_result_q;
+        }
+
+        if mem_is_load_q {
+            mem_forward_data = data_rdata;
+        } else {
+            mem_forward_data = mem_selected_result;
+        }
+
+        if rx_stalled_q {
+            forwarded_rs1 = rx_stall_data_a_q;
+        } else {
+            forwarded_rs1 = rf_read_data_a;
+        }
+        if rx_rs1_q != 5'd0 {
+            if mem_valid_q && mem_write_enable_q && (mem_rd_q == rx_rs1_q) {
+                forwarded_rs1 = mem_forward_data;
+            } else if wb_valid_q && wb_write_enable_q && (wb_rd_q == rx_rs1_q) {
+                forwarded_rs1 = wb_result_q;
+            }
+        }
+
+        if rx_stalled_q {
+            forwarded_rs2 = rx_stall_data_b_q;
+        } else {
+            forwarded_rs2 = rf_read_data_b;
+        }
+        if rx_rs2_q != 5'd0 {
+            if mem_valid_q && mem_write_enable_q && (mem_rd_q == rx_rs2_q) {
+                forwarded_rs2 = mem_forward_data;
+            } else if wb_valid_q && wb_write_enable_q && (wb_rd_q == rx_rs2_q) {
+                forwarded_rs2 = wb_result_q;
+            }
+        }
+
+        if rx_use_pc_q {
+            rx_operand_a = rx_pc_q;
+        } else {
+            rx_operand_a = forwarded_rs1;
+        }
+        if rx_use_immediate_q {
+            rx_operand_b = rx_immediate_q;
+        } else {
+            rx_operand_b = forwarded_rs2;
+        }
+
+        ex_bypass_hit_rs1 = rx_valid_q && ex_valid_q && ex_write_enable_q && !ex_is_load_q && (ex_rd_q != 5'd0)
+            && (ex_rd_q == rx_rs1_q);
+        ex_bypass_hit_rs2 = rx_valid_q && ex_valid_q && ex_write_enable_q && !ex_is_load_q && (ex_rd_q != 5'd0)
+            && (ex_rd_q == rx_rs2_q);
+
+        if ex_bypass_q.operand_a {
+            alu_operand_a = bypass_data;
+        } else {
+            alu_operand_a = ex_operand_a_q;
+        }
+        if ex_bypass_q.operand_b {
+            alu_operand_b = bypass_data;
+        } else {
+            alu_operand_b = ex_operand_b_q;
+        }
+
+        execute_bus.alu_op    = ex_alu_op_q;
+        execute_bus.link      = ex_link_q;
+        execute_bus.operand_a = alu_operand_a;
+        execute_bus.operand_b = alu_operand_b;
+        if ex_bypass_q.store_data {
+            execute_store_data = bypass_data;
+        } else {
+            execute_store_data = ex_store_data_q;
+        }
+
+        if ex_branch_ne_q {
+            branch_taken = alu_operand_a != alu_operand_b;
+        } else {
+            branch_taken = alu_operand_a == alu_operand_b;
+        }
+        if ex_bypass_q.redirect {
+            redirect_sum = bypass_data + ex_redirect_offset_q;
+        } else {
+            redirect_sum = ex_redirect_base_q + ex_redirect_offset_q;
+        }
+        redirect_valid = ex_valid_q && (ex_link_q || (ex_is_branch_q && branch_taken));
+        if ex_redirect_clear_lsb_q {
+            redirect_target = redirect_sum & 32'hffff_fffe;
+        } else {
+            redirect_target = redirect_sum;
+        }
+        execution_hazard = rx_valid_q && ex_valid_q && ex_write_enable_q && ex_is_load_q && (ex_rd_q != 5'd0)
+            && ((rx_use_rs1_q && (rx_rs1_q == ex_rd_q)) || (rx_use_rs2_q && (rx_rs2_q == ex_rd_q)));
+        stop_frontend    = rx_valid_q && rx_halt_q;
+
+        fetch_pc   = fetch_base_q + fetch_offset_q;
+        pc         = fetch_pc;
+        data_addr  = mem_address_q;
+        data_wdata = mem_wdata_q;
+        data_we    = mem_valid_q && mem_is_store_q;
+        halted     = halted_q;
+        debug_x31  = debug_x31_q;
+
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            fetch_base_q       = 32'h0000_0000;
+            fetch_offset_q     = 32'h0000_0000;
+            halted_q           = 1'b0;
+            debug_x31_q        = 32'h0000_0000;
+            redirect_pending_q = 1'b0;
+            redirect_target_q  = 32'h0000_0000;
+
+            fd_valid_q = 1'b0;
+            fd_pc_q    = 32'h0000_0000;
+            fd_instr_q = 32'h0000_0013;
+
+            rx_valid_q         = 1'b0;
+            rx_pc_q            = 32'h0000_0000;
+            rx_instr_q         = 32'h0000_0013;
+            rx_rs1_q           = 5'd0;
+            rx_rs2_q           = 5'd0;
+            rx_rd_q            = 5'd0;
+            rx_immediate_q     = 32'h0000_0000;
+            rx_alu_op_q        = 4'd0;
+            rx_use_pc_q        = 1'b0;
+            rx_use_immediate_q = 1'b0;
+            rx_use_rs1_q       = 1'b0;
+            rx_use_rs2_q       = 1'b0;
+            rx_write_enable_q  = 1'b0;
+            rx_is_load_q       = 1'b0;
+            rx_is_store_q      = 1'b0;
+            rx_is_branch_q     = 1'b0;
+            rx_branch_ne_q     = 1'b0;
+            rx_is_jal_q        = 1'b0;
+            rx_is_jalr_q       = 1'b0;
+            rx_halt_q          = 1'b0;
+            rx_stalled_q       = 1'b0;
+            rx_stall_data_a_q  = 32'h0000_0000;
+            rx_stall_data_b_q  = 32'h0000_0000;
+
+            ex_valid_q               = 1'b0;
+            ex_pc_q                  = 32'h0000_0000;
+            ex_instr_q               = 32'h0000_0013;
+            ex_rd_q                  = 5'd0;
+            ex_alu_op_q              = 4'd0;
+            ex_write_enable_q        = 1'b0;
+            ex_is_load_q             = 1'b0;
+            ex_is_store_q            = 1'b0;
+            ex_is_branch_q           = 1'b0;
+            ex_branch_ne_q           = 1'b0;
+            ex_link_q                = 1'b0;
+            ex_halt_q                = 1'b0;
+            ex_operand_a_q           = 32'h0000_0000;
+            ex_operand_b_q           = 32'h0000_0000;
+            ex_store_data_q          = 32'h0000_0000;
+            ex_redirect_base_q       = 32'h0000_0000;
+            ex_redirect_offset_q     = 32'h0000_0000;
+            ex_redirect_clear_lsb_q  = 1'b0;
+            ex_bypass_q.arithmetic   = 32'h0000_0000;
+            ex_bypass_q.logic_result = 32'h0000_0000;
+            ex_bypass_q.use_logic    = 1'b0;
+            ex_bypass_q.operand_a    = 1'b0;
+            ex_bypass_q.operand_b    = 1'b0;
+            ex_bypass_q.store_data   = 1'b0;
+            ex_bypass_q.redirect     = 1'b0;
+
+            mem_valid_q        = 1'b0;
+            mem_pc_q           = 32'h0000_0000;
+            mem_instr_q        = 32'h0000_0013;
+            mem_rd_q           = 5'd0;
+            mem_write_enable_q = 1'b0;
+            mem_is_load_q      = 1'b0;
+            mem_is_store_q     = 1'b0;
+            mem_halt_q         = 1'b0;
+            mem_result_q       = 32'h0000_0000;
+            mem_logic_result_q = 32'h0000_0000;
+            mem_use_logic_q    = 1'b0;
+            mem_address_q      = 32'h0000_0000;
+            mem_wdata_q        = 32'h0000_0000;
+
+            wb_valid_q        = 1'b0;
+            wb_pc_q           = 32'h0000_0000;
+            wb_instr_q        = 32'h0000_0013;
+            wb_rd_q           = 5'd0;
+            wb_write_enable_q = 1'b0;
+            wb_halt_q         = 1'b0;
+            wb_result_q       = 32'h0000_0000;
+            wb_mem_we_q       = 1'b0;
+            wb_mem_addr_q     = 32'h0000_0000;
+            wb_mem_wdata_q    = 32'h0000_0000;
+
+            commit_valid     = 1'b0;
+            commit_pc        = 32'h0000_0000;
+            commit_instr     = 32'h0000_0013;
+            commit_rd        = 5'd0;
+            commit_data      = 32'h0000_0000;
+            commit_mem_we    = 1'b0;
+            commit_mem_addr  = 32'h0000_0000;
+            commit_mem_wdata = 32'h0000_0000;
+        } else {
+            redirect_pending_q = redirect_valid;
+            if redirect_valid {
+                redirect_target_q = redirect_target;
+            }
+
+            commit_valid = wb_valid_q;
+            commit_pc    = wb_pc_q;
+            commit_instr = wb_instr_q;
+            commit_rd    = 5'd0;
+            commit_data  = 32'h0000_0000;
+            if wb_write_enable_q && (wb_rd_q != 5'd0) {
+                commit_rd   = wb_rd_q;
+                commit_data = wb_result_q;
+            }
+            commit_mem_we    = wb_valid_q && wb_mem_we_q;
+            commit_mem_addr  = wb_mem_addr_q;
+            commit_mem_wdata = wb_mem_wdata_q;
+
+            if wb_valid_q && wb_halt_q {
+                halted_q = 1'b1;
+            }
+            if rf_write_enable && (wb_rd_q == 5'd31) {
+                debug_x31_q = wb_result_q;
+            }
+
+            wb_valid_q        = mem_valid_q;
+            wb_pc_q           = mem_pc_q;
+            wb_instr_q        = mem_instr_q;
+            wb_rd_q           = mem_rd_q;
+            wb_write_enable_q = mem_write_enable_q;
+            wb_halt_q         = mem_halt_q;
+            if mem_is_load_q {
+                wb_result_q = data_rdata;
+            } else {
+                wb_result_q = mem_selected_result;
+            }
+            wb_mem_we_q    = mem_is_store_q;
+            wb_mem_addr_q  = mem_address_q;
+            wb_mem_wdata_q = mem_wdata_q;
+
+            mem_valid_q        = ex_valid_q;
+            mem_pc_q           = ex_pc_q;
+            mem_instr_q        = ex_instr_q;
+            mem_rd_q           = ex_rd_q;
+            mem_write_enable_q = ex_write_enable_q;
+            mem_is_load_q      = ex_is_load_q;
+            mem_is_store_q     = ex_is_store_q;
+            mem_halt_q         = ex_halt_q;
+            mem_result_q       = execute_bus.arithmetic;
+            mem_logic_result_q = execute_bus.logic_result;
+            mem_use_logic_q    = execute_bus.result_use_logic;
+            mem_address_q      = alu_operand_a + alu_operand_b;
+            mem_wdata_q        = execute_store_data;
+
+            // Capture the current EX result independently from its consumer.
+            // On the next cycle the consumer selects this registered bypass
+            // before its ALU, avoiding an ALU-to-ALU combinational chain.
+            ex_bypass_q.arithmetic   = execute_bus.arithmetic;
+            ex_bypass_q.logic_result = execute_bus.logic_result;
+            ex_bypass_q.use_logic    = execute_bus.result_use_logic;
+            ex_bypass_q.operand_a    = ex_bypass_hit_rs1 && rx_use_rs1_q && !(rx_is_jal_q || rx_is_jalr_q);
+            ex_bypass_q.operand_b    = ex_bypass_hit_rs2 && rx_use_rs2_q && !rx_use_immediate_q;
+            ex_bypass_q.store_data   = ex_bypass_hit_rs2 && rx_is_store_q;
+            ex_bypass_q.redirect     = ex_bypass_hit_rs1 && rx_is_jalr_q;
+
+            ex_valid_q        = rx_valid_q;
+            ex_pc_q           = rx_pc_q;
+            ex_instr_q        = rx_instr_q;
+            ex_rd_q           = rx_rd_q;
+            ex_alu_op_q       = rx_alu_op_q;
+            ex_write_enable_q = rx_write_enable_q;
+            ex_is_load_q      = rx_is_load_q;
+            ex_is_store_q     = rx_is_store_q;
+            ex_is_branch_q    = rx_is_branch_q;
+            ex_branch_ne_q    = rx_branch_ne_q;
+            ex_link_q         = rx_is_jal_q || rx_is_jalr_q;
+            ex_halt_q         = rx_halt_q;
+            if rx_is_jal_q || rx_is_jalr_q {
+                ex_operand_a_q = rx_pc_q;
+                ex_operand_b_q = 32'd4;
+            } else {
+                ex_operand_a_q = rx_operand_a;
+                ex_operand_b_q = rx_operand_b;
+            }
+            ex_store_data_q = forwarded_rs2;
+            if rx_is_jalr_q {
+                ex_redirect_base_q = forwarded_rs1;
+            } else {
+                ex_redirect_base_q = rx_pc_q;
+            }
+            ex_redirect_offset_q    = rx_immediate_q;
+            ex_redirect_clear_lsb_q = rx_is_jalr_q;
+
+            if redirect_pending_q {
+                fetch_base_q   = redirect_target_q;
+                fetch_offset_q = 32'h0000_0000;
+                fd_valid_q     = 1'b0;
+                rx_valid_q     = 1'b0;
+                ex_valid_q     = 1'b0;
+                mem_valid_q    = 1'b0;
+                rx_stalled_q   = 1'b0;
+            } else if stop_frontend || halted_q {
+                fd_valid_q   = 1'b0;
+                rx_valid_q   = 1'b0;
+                rx_stalled_q = 1'b0;
+            } else if execution_hazard {
+                ex_valid_q        = 1'b0;
+                rx_stalled_q      = 1'b1;
+                rx_stall_data_a_q = forwarded_rs1;
+                rx_stall_data_b_q = forwarded_rs2;
+            } else {
+                rx_stalled_q       = 1'b0;
+                rx_valid_q         = fd_valid_q;
+                rx_pc_q            = fd_pc_q;
+                rx_instr_q         = fd_instr_q;
+                rx_rs1_q           = decode_bus.rs1;
+                rx_rs2_q           = decode_bus.rs2;
+                rx_rd_q            = decode_bus.rd;
+                rx_immediate_q     = decode_bus.immediate;
+                rx_alu_op_q        = decode_bus.alu_op;
+                rx_use_pc_q        = decode_bus.use_pc;
+                rx_use_immediate_q = decode_bus.use_immediate;
+                rx_use_rs1_q       = decode_bus.use_rs1;
+                rx_use_rs2_q       = decode_bus.use_rs2;
+                rx_write_enable_q  = decode_bus.write_enable;
+                rx_is_load_q       = decode_bus.is_load;
+                rx_is_store_q      = decode_bus.is_store;
+                rx_is_branch_q     = decode_bus.is_branch;
+                rx_branch_ne_q     = decode_bus.branch_ne;
+                rx_is_jal_q        = decode_bus.is_jal;
+                rx_is_jalr_q       = decode_bus.is_jalr;
+                rx_halt_q          = decode_bus.halt;
+
+                fd_valid_q     = 1'b1;
+                fd_pc_q        = fetch_pc;
+                fd_instr_q     = instr;
+                fetch_offset_q = fetch_offset_q + 32'd4;
+            }
+        }
+    }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "verify-i2c"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "verify-i2c"
+
+[dependencies]
+serde_json.workspace = true
+celox.workspace = true
+struo-frontend-veryl.workspace = true
+struo-synth.workspace = true
+struo-target-ecp5.workspace = true
+texo-cli.workspace = true
+texo-struo.workspace = true
+
+[[bin]]
+name = "bitgen-i2c"
+path = "src/bin/bitgen.rs"
+
+[[bin]]
+name = "hardware-i2c"
+path = "src/bin/hardware.rs"
+
+[[bin]]
+name = "nextpnr-i2c"
+path = "src/bin/nextpnr.rs"

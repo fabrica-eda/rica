@@ -1,0 +1,20 @@
+! Verify the ER1 bridge without involving the I2C target state machine.
+TRST OFF;
+ENDIR IDLE;
+ENDDR IDLE;
+STATE RESET;
+STATE IDLE;
+SIR 8 TDI (32);
+
+! SCL high, drive SDA low.
+SDR 3 TDI (3);
+RUNTEST 32 TCK;
+SDR 3 TDI (3) TDO (0) MASK (7);
+RUNTEST 32 TCK;
+
+! SCL high, release SDA.
+SDR 3 TDI (2);
+RUNTEST 32 TCK;
+SDR 3 TDI (2) TDO (7) MASK (7);
+RUNTEST 32 TCK;
+STATE IDLE;

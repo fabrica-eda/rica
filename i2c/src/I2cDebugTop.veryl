@@ -1,0 +1,73 @@
+/// Minimal hardware endpoint for the I2C debug transport.
+///
+/// The split SDA ports are bound to one open-drain pad after ECP5 mapping.
+/// Register 0x10 is also shown on the board LEDs for a first hardware check.
+module I2cDebugTop (
+    clk          : input  clock   ,
+    rst_n        : input  reset   ,
+    scl_i        : input  logic   ,
+    sda_i        : input  logic   ,
+    clock_status : input  logic<8>,
+    sda_drive_low: output logic   ,
+    probe_address : output logic<8>,
+    led          : output logic<8>,
+) {
+    var debug_address     : logic<8>;
+    var debug_write_data  : logic<8>;
+    var debug_write_strobe: logic   ;
+    var debug_read_data   : logic<8>;
+
+    var scratch_0    : logic<8>;
+    var identity_read: logic<8>;
+
+    inst target: I2cTarget250 (
+        clk               : clk               ,
+        rst_n             : rst_n             ,
+        scl_i             : scl_i             ,
+        sda_i             : sda_i             ,
+        sda_drive_low     : sda_drive_low     ,
+        debug_address     : debug_address     ,
+        debug_write_data  : debug_write_data  ,
+        debug_write_strobe: debug_write_strobe,
+        debug_read_data   : debug_read_data   ,
+    );
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            scratch_0 = 8'h00;
+        } else if debug_write_strobe {
+            case debug_address {
+                8'h10  : scratch_0 = debug_write_data;
+                default: {}
+            }
+        }
+    }
+
+    always_comb {
+        case debug_address[1:0] {
+            2'd0   : identity_read = 8'h52;
+            2'd1   : identity_read = 8'h02;
+            2'd2   : identity_read = 8'h42;
+            default: identity_read = clock_status;
+        }
+        case debug_address[7:4] {
+            4'h0: {
+                if debug_address[3:2] == 2'd0 {
+                    debug_read_data = identity_read;
+                } else {
+                    debug_read_data = 8'hff;
+                }
+            }
+            4'h1: {
+                if debug_address[3:0] == 4'd0 {
+                    debug_read_data = scratch_0;
+                } else {
+                    debug_read_data = 8'hff;
+                }
+            }
+            default: debug_read_data = 8'hff;
+        }
+        led = scratch_0;
+        probe_address = debug_address;
+    }
+}

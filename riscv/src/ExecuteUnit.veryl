@@ -1,0 +1,38 @@
+/// RV32 integer execution unit with a 16+16-bit carry-select adder.
+module ExecuteUnit (
+    execute: modport ExecuteBus::execute,
+) {
+    var arithmetic_b      : logic<32>;
+    var arithmetic_low    : logic<17>;
+    var arithmetic_high_c0: logic<17>;
+    var arithmetic_high_c1: logic<17>;
+
+    always_comb {
+        if execute.alu_op == 4'd1 {
+            arithmetic_b = ~execute.operand_b;
+        } else {
+            arithmetic_b = execute.operand_b;
+        }
+        arithmetic_low = {1'b0, execute.operand_a[15:0]} + {1'b0, arithmetic_b[15:0]};
+        if execute.alu_op == 4'd1 {
+            arithmetic_low = arithmetic_low + 17'd1;
+        }
+        arithmetic_high_c0 = {1'b0, execute.operand_a[31:16]} + {1'b0, arithmetic_b[31:16]};
+        arithmetic_high_c1 = arithmetic_high_c0 + 17'd1;
+        if arithmetic_low[16] {
+            execute.arithmetic = {arithmetic_high_c1[15:0], arithmetic_low[15:0]};
+        } else {
+            execute.arithmetic = {arithmetic_high_c0[15:0], arithmetic_low[15:0]};
+        }
+
+        case execute.alu_op {
+            4'd2   : execute.logic_result = execute.operand_a ^ execute.operand_b;
+            4'd3   : execute.logic_result = execute.operand_a | execute.operand_b;
+            4'd4   : execute.logic_result = execute.operand_a & execute.operand_b;
+            default: execute.logic_result = execute.operand_b;
+        }
+        execute.result_use_logic = !execute.link
+            && ((execute.alu_op == 4'd2) || (execute.alu_op == 4'd3) || (execute.alu_op == 4'd4)
+                || (execute.alu_op == 4'd5));
+    }
+}

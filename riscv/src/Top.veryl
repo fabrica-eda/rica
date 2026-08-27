@@ -1,0 +1,68 @@
+/// ECP5 Versa 5G board wrapper with a tiny RISC-V LED firmware in ROM.
+module Top (
+    clk       : input  'reference clock   ,
+    clk_150   : input  'cpu       clock   ,
+    pll_locked: input  'cpu       logic   ,
+    btn       : input  'reference reset   ,
+    led       : output 'cpu       logic<8>,
+) {
+    var core_rst_n           : 'cpu reset_async_low    ;
+    var core_pc              : 'cpu logic          <32>;
+    var instruction          : 'cpu logic          <32>;
+    var unused_data_addr     : 'cpu logic          <32>;
+    var unused_data_wdata    : 'cpu logic          <32>;
+    var unused_data_we       : 'cpu logic              ;
+    var unused_halted        : 'cpu logic              ;
+    var unused_commit_valid  : 'cpu logic              ;
+    var unused_commit_pc     : 'cpu logic          <32>;
+    var unused_commit_instr  : 'cpu logic          <32>;
+    var unused_commit_rd     : 'cpu logic          <5> ;
+    var unused_commit_data   : 'cpu logic          <32>;
+    var unused_commit_mem_we : 'cpu logic              ;
+    var unused_commit_address: 'cpu logic          <32>;
+    var unused_commit_wdata  : 'cpu logic          <32>;
+    var x31                  : 'cpu logic          <32>;
+
+    inst core: Core (
+        clk             : clk_150              ,
+        rst_n           : core_rst_n           ,
+        instr           : instruction          ,
+        data_rdata      : 32'h0000_0000        ,
+        pc              : core_pc              ,
+        data_addr       : unused_data_addr     ,
+        data_wdata      : unused_data_wdata    ,
+        data_we         : unused_data_we       ,
+        halted          : unused_halted        ,
+        commit_valid    : unused_commit_valid  ,
+        commit_pc       : unused_commit_pc     ,
+        commit_instr    : unused_commit_instr  ,
+        commit_rd       : unused_commit_rd     ,
+        commit_data     : unused_commit_data   ,
+        commit_mem_we   : unused_commit_mem_we ,
+        commit_mem_addr : unused_commit_address,
+        commit_mem_wdata: unused_commit_wdata  ,
+        debug_x31       : x31                  ,
+    );
+
+    // clk_150 and pll_locked are logical PLL boundary ports. Texo replaces
+    // them with one EHXPLLL using pll-12-to-150.json before placement.
+    unsafe (cdc) {
+        assign core_rst_n = btn && pll_locked;
+    }
+
+    always_comb {
+        // At 150 MHz, x31 advances about twice per second. A moving binary
+        // count proves that the PLL, instruction flow, branch redirect, and
+        // integer writeback path are all alive on the board.
+        case core_pc {
+            32'h0000_0000: instruction = 32'h0000_0f93; // addi x31, x0, 0
+            32'h0000_0004: instruction = 32'h0400_00b7; // lui  x1, 0x4000
+            32'h0000_0008: instruction = 32'hfff0_8093; // addi x1, x1, -1
+            32'h0000_000c: instruction = 32'hfe00_9ee3; // bne  x1, x0, -4
+            32'h0000_0010: instruction = 32'h001f_8f93; // addi x31, x31, 1
+            32'h0000_0014: instruction = 32'hff1f_f06f; // jal  x0, -16
+            default      : instruction = 32'h0000_0073; // ecall
+        }
+        led = x31[7:0];
+    }
+}

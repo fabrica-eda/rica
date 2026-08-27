@@ -1,0 +1,238 @@
+/// Register-oriented I2C target for hardware debug access.
+///
+/// The bidirectional SDA pin is intentionally split into an input and an
+/// active-high "drive low" output. The board wrapper must implement the
+/// open-drain buffer; this core never drives a logic-high value.
+module I2cTarget (
+    clk               : input  clock   ,
+    rst_n             : input  reset   ,
+    scl_i             : input  logic   ,
+    sda_i             : input  logic   ,
+    sda_drive_low     : output logic   ,
+    debug_address     : output logic<8>,
+    debug_write_data  : output logic<8>,
+    debug_write_strobe: output logic   ,
+    debug_read_data   : input  logic<8>,
+) {
+    var scl_meta: logic;
+    var scl_sync: logic;
+    var scl_prev: logic;
+    var sda_meta: logic;
+    var sda_sync: logic;
+    var sda_prev: logic;
+
+    var state          : logic<4>;
+    var bit_count      : logic<3>;
+    var shift_register : logic<8>;
+    var register_index : logic<8>;
+    var read_data_latch: logic<8>;
+    var selected       : logic   ;
+    var read_direction : logic   ;
+    var drive_low_q    : logic   ;
+
+    var scl_rise    : logic;
+    var scl_fall    : logic;
+    var start_detect: logic;
+    var stop_detect : logic;
+
+    always_comb {
+        scl_rise     = scl_sync && !scl_prev;
+        scl_fall     = !scl_sync && scl_prev;
+        start_detect = scl_sync && sda_prev && !sda_sync;
+        stop_detect  = scl_sync && !sda_prev && sda_sync;
+
+        sda_drive_low = drive_low_q;
+        debug_address = register_index;
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            scl_meta = 1'b1;
+            scl_sync = 1'b1;
+            scl_prev = 1'b1;
+            sda_meta = 1'b1;
+            sda_sync = 1'b1;
+            sda_prev = 1'b1;
+
+            state              = 4'd0;
+            bit_count          = 3'd0;
+            shift_register     = 8'h00;
+            register_index     = 8'h00;
+            read_data_latch    = 8'h00;
+            selected           = 1'b0;
+            read_direction     = 1'b0;
+            drive_low_q        = 1'b0;
+            debug_write_data   = 8'h00;
+            debug_write_strobe = 1'b0;
+        } else {
+            scl_meta = scl_i;
+            scl_sync = scl_meta;
+            scl_prev = scl_sync;
+            sda_meta = sda_i;
+            sda_sync = sda_meta;
+            sda_prev = sda_sync;
+
+            debug_write_strobe = 1'b0;
+
+            if start_detect {
+                state          = 4'd1;
+                bit_count      = 3'd0;
+                shift_register = 8'h00;
+                selected       = 1'b0;
+                drive_low_q    = 1'b0;
+            } else if stop_detect {
+                state       = 4'd0;
+                selected    = 1'b0;
+                drive_low_q = 1'b0;
+            } else {
+                case state {
+                    4'd0: {
+                        drive_low_q = 1'b0;
+                    }
+                    4'd1: {
+                        if scl_rise {
+                            shift_register = {shift_register[6:0], sda_sync};
+                            if bit_count == 3'd7 {
+                                selected       = shift_register[6:0] == 7'h42;
+                                read_direction = sda_sync;
+                                state          = 4'd2;
+                            } else {
+                                bit_count = bit_count + 3'd1;
+                            }
+                        }
+                    }
+                    4'd2: {
+                        if scl_fall {
+                            if selected {
+                                drive_low_q = 1'b1;
+                                state       = 4'd3;
+                            } else {
+                                drive_low_q = 1'b0;
+                                state       = 4'd14;
+                            }
+                        }
+                    }
+                    4'd3: {
+                        if scl_fall {
+                            if read_direction {
+                                read_data_latch = debug_read_data;
+                                bit_count       = 3'd7;
+                                drive_low_q     = !debug_read_data[7];
+                                state           = 4'd10;
+                            } else {
+                                bit_count      = 3'd0;
+                                shift_register = 8'h00;
+                                drive_low_q    = 1'b0;
+                                state          = 4'd4;
+                            }
+                        }
+                    }
+                    4'd4: {
+                        if scl_rise {
+                            shift_register = {shift_register[6:0], sda_sync};
+                            if bit_count == 3'd7 {
+                                register_index = {shift_register[6:0], sda_sync};
+                                state          = 4'd5;
+                            } else {
+                                bit_count = bit_count + 3'd1;
+                            }
+                        }
+                    }
+                    4'd5: {
+                        if scl_fall {
+                            drive_low_q = 1'b1;
+                            state       = 4'd6;
+                        }
+                    }
+                    4'd6: {
+                        if scl_fall {
+                            bit_count      = 3'd0;
+                            shift_register = 8'h00;
+                            drive_low_q    = 1'b0;
+                            state          = 4'd7;
+                        }
+                    }
+                    4'd7: {
+                        if scl_rise {
+                            shift_register = {shift_register[6:0], sda_sync};
+                            if bit_count == 3'd7 {
+                                debug_write_data   = {shift_register[6:0], sda_sync};
+                                debug_write_strobe = 1'b1;
+                                state              = 4'd8;
+                            } else {
+                                bit_count = bit_count + 3'd1;
+                            }
+                        }
+                    }
+                    4'd8: {
+                        if scl_fall {
+                            drive_low_q = 1'b1;
+                            state       = 4'd9;
+                        }
+                    }
+                    4'd9: {
+                        if scl_fall {
+                            register_index = register_index + 8'd1;
+                            bit_count      = 3'd0;
+                            shift_register = 8'h00;
+                            drive_low_q    = 1'b0;
+                            state          = 4'd7;
+                        }
+                    }
+                    4'd10: {
+                        if scl_rise {
+                            if bit_count == 3'd0 {
+                                // The byte has been consumed at this edge.
+                                // Advance before the ACK phase so the next
+                                // falling edge can reload from a stable
+                                // address; ACK only selects continue/stop.
+                                register_index = register_index + 8'd1;
+                                state          = 4'd11;
+                            }
+                        }
+                        if scl_fall && (bit_count != 3'd0) {
+                            case bit_count {
+                                3'd7   : drive_low_q = !read_data_latch[6];
+                                3'd6   : drive_low_q = !read_data_latch[5];
+                                3'd5   : drive_low_q = !read_data_latch[4];
+                                3'd4   : drive_low_q = !read_data_latch[3];
+                                3'd3   : drive_low_q = !read_data_latch[2];
+                                3'd2   : drive_low_q = !read_data_latch[1];
+                                3'd1   : drive_low_q = !read_data_latch[0];
+                                default: drive_low_q = 1'b0;
+                            }
+                            bit_count = bit_count - 3'd1;
+                        }
+                    }
+                    4'd11: {
+                        if scl_fall {
+                            drive_low_q = 1'b0;
+                            state       = 4'd12;
+                        }
+                    }
+                    4'd12: {
+                        if scl_rise {
+                            if !sda_sync {
+                                state = 4'd13;
+                            } else {
+                                state = 4'd14;
+                            }
+                        }
+                    }
+                    4'd13: {
+                        if scl_fall {
+                            read_data_latch = debug_read_data;
+                            bit_count       = 3'd7;
+                            drive_low_q     = !debug_read_data[7];
+                            state           = 4'd10;
+                        }
+                    }
+                    default: {
+                        drive_low_q = 1'b0;
+                        state       = 4'd14;
+                    }
+                }
+            }
+        }
+    }
+}

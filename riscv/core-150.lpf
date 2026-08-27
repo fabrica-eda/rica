@@ -1,0 +1,3 @@
+# Out-of-context timing constraint for the CPU core. All data and debug ports
+# intentionally remain unplaced; only the sequential clock is constrained.
+FREQUENCY PORT "clk" 150 MHZ;

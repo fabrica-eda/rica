@@ -1,0 +1,4 @@
+/target/
+/i2c/build/
+/riscv/build/
+/riscv/verify/target/

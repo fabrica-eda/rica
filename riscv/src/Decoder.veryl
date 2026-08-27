@@ -1,0 +1,187 @@
+/// Combinational decoder for the currently implemented RV32I subset.
+module Decoder (
+    decode: modport DecodeBus::decoder,
+) {
+    var opcode: logic<7> ;
+    var funct3: logic<3> ;
+    var funct7: logic<7> ;
+    var imm_i : logic<32>;
+    var imm_s : logic<32>;
+    var imm_b : logic<32>;
+    var imm_u : logic<32>;
+    var imm_j : logic<32>;
+
+    always_comb {
+        opcode = decode.instr[6:0];
+        funct3 = decode.instr[14:12];
+        funct7 = decode.instr[31:25];
+
+        decode.rs1 = decode.instr[19:15];
+        decode.rs2 = decode.instr[24:20];
+        decode.rd  = decode.instr[11:7];
+
+        imm_i = {decode.instr[31] repeat 21, decode.instr[30:20]};
+        imm_s = {decode.instr[31] repeat 21, decode.instr[30:25], decode.instr[11:7]};
+        imm_b = {decode.instr[31] repeat 20, decode.instr[7], decode.instr[30:25], decode.instr[11:8], 1'b0};
+        imm_u = {decode.instr[31:12], 12'h000};
+        imm_j = {decode.instr[31] repeat 12, decode.instr[19:12], decode.instr[20], decode.instr[30:21], 1'b0};
+
+        decode.immediate     = imm_i;
+        decode.alu_op        = 4'd0;
+        decode.use_pc        = 1'b0;
+        decode.use_immediate = 1'b0;
+        decode.use_rs1       = 1'b0;
+        decode.use_rs2       = 1'b0;
+        decode.write_enable  = 1'b0;
+        decode.is_load       = 1'b0;
+        decode.is_store      = 1'b0;
+        decode.is_branch     = 1'b0;
+        decode.branch_ne     = 1'b0;
+        decode.is_jal        = 1'b0;
+        decode.is_jalr       = 1'b0;
+        // Unsupported encodings retire as a halt.
+        decode.halt = 1'b1;
+
+        case opcode {
+            7'b0110111: { // LUI
+                decode.immediate     = imm_u;
+                decode.alu_op        = 4'd5;
+                decode.use_immediate = 1'b1;
+                decode.write_enable  = 1'b1;
+                decode.halt          = 1'b0;
+            }
+            7'b0010111: { // AUIPC
+                decode.immediate     = imm_u;
+                decode.use_pc        = 1'b1;
+                decode.use_immediate = 1'b1;
+                decode.write_enable  = 1'b1;
+                decode.halt          = 1'b0;
+            }
+            7'b1101111: { // JAL
+                decode.immediate    = imm_j;
+                decode.write_enable = 1'b1;
+                decode.is_jal       = 1'b1;
+                decode.halt         = 1'b0;
+            }
+            7'b1100111: { // JALR
+                if funct3 == 3'b000 {
+                    decode.immediate    = imm_i;
+                    decode.use_rs1      = 1'b1;
+                    decode.write_enable = 1'b1;
+                    decode.is_jalr      = 1'b1;
+                    decode.halt         = 1'b0;
+                }
+            }
+            7'b1100011: { // BEQ/BNE
+                decode.immediate = imm_b;
+                if funct3 == 3'b000 {
+                    decode.is_branch = 1'b1;
+                    decode.use_rs1   = 1'b1;
+                    decode.use_rs2   = 1'b1;
+                    decode.halt      = 1'b0;
+                } else if funct3 == 3'b001 {
+                    decode.is_branch = 1'b1;
+                    decode.branch_ne = 1'b1;
+                    decode.use_rs1   = 1'b1;
+                    decode.use_rs2   = 1'b1;
+                    decode.halt      = 1'b0;
+                }
+            }
+            7'b0000011: { // LW
+                if funct3 == 3'b010 {
+                    decode.immediate     = imm_i;
+                    decode.use_immediate = 1'b1;
+                    decode.use_rs1       = 1'b1;
+                    decode.write_enable  = 1'b1;
+                    decode.is_load       = 1'b1;
+                    decode.halt          = 1'b0;
+                }
+            }
+            7'b0100011: { // SW
+                if funct3 == 3'b010 {
+                    decode.immediate     = imm_s;
+                    decode.use_immediate = 1'b1;
+                    decode.use_rs1       = 1'b1;
+                    decode.use_rs2       = 1'b1;
+                    decode.is_store      = 1'b1;
+                    decode.halt          = 1'b0;
+                }
+            }
+            7'b0010011: { // OP-IMM
+                case funct3 {
+                    3'b000: {
+                        decode.alu_op        = 4'd0;
+                        decode.use_immediate = 1'b1;
+                        decode.use_rs1       = 1'b1;
+                        decode.write_enable  = 1'b1;
+                        decode.halt          = 1'b0;
+                    }
+                    3'b100: {
+                        decode.alu_op        = 4'd2;
+                        decode.use_immediate = 1'b1;
+                        decode.use_rs1       = 1'b1;
+                        decode.write_enable  = 1'b1;
+                        decode.halt          = 1'b0;
+                    }
+                    3'b110: {
+                        decode.alu_op        = 4'd3;
+                        decode.use_immediate = 1'b1;
+                        decode.use_rs1       = 1'b1;
+                        decode.write_enable  = 1'b1;
+                        decode.halt          = 1'b0;
+                    }
+                    3'b111: {
+                        decode.alu_op        = 4'd4;
+                        decode.use_immediate = 1'b1;
+                        decode.use_rs1       = 1'b1;
+                        decode.write_enable  = 1'b1;
+                        decode.halt          = 1'b0;
+                    }
+                    default: {}
+                }
+            }
+            7'b0110011: { // OP
+                case funct3 {
+                    3'b000: {
+                        if funct7 == 7'b0000000 {
+                            decode.alu_op       = 4'd0;
+                            decode.use_rs1      = 1'b1;
+                            decode.use_rs2      = 1'b1;
+                            decode.write_enable = 1'b1;
+                            decode.halt         = 1'b0;
+                        } else if funct7 == 7'b0100000 {
+                            decode.alu_op       = 4'd1;
+                            decode.use_rs1      = 1'b1;
+                            decode.use_rs2      = 1'b1;
+                            decode.write_enable = 1'b1;
+                            decode.halt         = 1'b0;
+                        }
+                    }
+                    3'b100: {
+                        decode.alu_op       = 4'd2;
+                        decode.use_rs1      = 1'b1;
+                        decode.use_rs2      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.halt         = 1'b0;
+                    }
+                    3'b110: {
+                        decode.alu_op       = 4'd3;
+                        decode.use_rs1      = 1'b1;
+                        decode.use_rs2      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.halt         = 1'b0;
+                    }
+                    3'b111: {
+                        decode.alu_op       = 4'd4;
+                        decode.use_rs1      = 1'b1;
+                        decode.use_rs2      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.halt         = 1'b0;
+                    }
+                    default: {}
+                }
+            }
+            default: {}
+        }
+    }
+}

@@ -1,0 +1,94 @@
+/// JTAG extension-register bridge for the I2C debug target.
+///
+/// ER1 accepts a two-bit command, least-significant bit first:
+///   bit 0: drive SDA low (1 = low, 0 = release)
+///   bit 1: SCL level
+/// JTAGG exports JTDI one TCK late, so the physical DR scan appends one dummy
+/// clock after the two command bits. The command API remains two bits.
+/// The new levels take effect in Update-DR. JTDO1 continuously reports the
+/// wired SDA level, so the host can sample ACK and read data while shifting
+/// the next command. ER2 exposes the PLL lock indication independently.
+module JtagI2cDebugTop (
+    clk         : input  'system clock          ,
+    clk_250     : input  'fast   clock          ,
+    pll_locked  : input  'fast   logic          ,
+    rst_n       : input  'system reset          ,
+    led         : output 'fast   logic<8>       ,
+    jtag_tdi    : input  'tap    logic          ,
+    jtag_tck    : input  'tap    clock          ,
+    jtag_rti1   : input  'tap    logic          ,
+    jtag_rti2   : input  'tap    logic          ,
+    jtag_shift  : input  'tap    logic          ,
+    jtag_update : input  'tap    clock          ,
+    jtag_rst_n  : input  'tap    reset_async_low,
+    jtag_ce1    : input  'tap    logic          ,
+    jtag_ce2    : input  'tap    logic          ,
+    jtag_tdo1   : output 'tap    logic          ,
+    jtag_tdo2   : output 'tap    logic          ,
+) {
+    var shift_register     : logic<2>;
+    var master_scl         : logic;
+    var master_sda_low     : logic;
+    var target_sda_low     : 'fast logic;
+    var target_scl         : 'fast logic;
+    var wired_sda          : 'fast logic;
+    var base_rst_n         : 'system reset_async_low;
+    var target_rst_n       : 'fast reset_async_low;
+    var target_address     : 'fast logic<8>;
+    var clock_status       : 'fast logic<8>;
+    var fast_ready         : 'fast logic;
+
+    inst target: I2cDebugTop (
+        clk          : clk_250       ,
+        // Entering Test-Logic-Reset must also put the JTAG-owned debug
+        // endpoint into a known state; do not depend on a board pushbutton.
+        rst_n        : target_rst_n  ,
+        scl_i        : target_scl    ,
+        sda_i        : wired_sda     ,
+        clock_status : clock_status  ,
+        sda_drive_low: target_sda_low,
+        probe_address : target_address ,
+        led          : led           ,
+    );
+
+    inst clock_probe: ClockDomainProbe (
+        clk_ref      : clk          ,
+        clk_250      : clk_250      ,
+        pll_locked   : pll_locked   ,
+        debug_rst_n  : base_rst_n   ,
+        fast_ready   : fast_ready   ,
+        clock_status : clock_status ,
+    );
+
+    always_ff (jtag_tck, jtag_rst_n) {
+        if_reset {
+            shift_register = 2'b00;
+        } else {
+            if jtag_ce1 && jtag_shift {
+                shift_register = {jtag_tdi, shift_register[1]};
+            }
+        }
+    }
+
+    always_ff (jtag_update, jtag_rst_n) {
+        if_reset {
+            master_scl     = 1'b1;
+            master_sda_low = 1'b0;
+        } else {
+            master_scl     = shift_register[1];
+            master_sda_low = shift_register[0];
+        }
+    }
+
+    // The target immediately synchronizes these asynchronous I2C levels.
+    // The return path is sampled by the external TAP, not by fabric logic.
+    unsafe (cdc) {
+        assign base_rst_n = jtag_rst_n && rst_n;
+        assign target_rst_n = base_rst_n && fast_ready;
+        assign target_scl = master_scl;
+        assign wired_sda  = !(master_sda_low || target_sda_low);
+        assign jtag_tdo1  = wired_sda;
+        // ER2 remains readable even if the generated clock is unavailable.
+        assign jtag_tdo2 = pll_locked;
+    }
+}

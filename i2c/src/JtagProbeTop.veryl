@@ -1,0 +1,47 @@
+/// Hardware isolation test for dedicated JTAGG configuration and TDO routing.
+module JtagProbeTop (
+    clk         : input  'system clock          ,
+    rst_n       : input  'system reset_async_low,
+    led         : output 'system logic<8>       ,
+    jtag_tdi    : input  'tap logic          ,
+    jtag_tck    : input  'tap clock          ,
+    jtag_rti1   : input  'tap logic          ,
+    jtag_rti2   : input  'tap logic          ,
+    jtag_shift  : input  'tap logic          ,
+    jtag_update : input  'tap logic          ,
+    jtag_rst_n  : input  'tap reset_async_low,
+    jtag_ce1    : input  'tap logic          ,
+    jtag_ce2    : input  'tap logic          ,
+    jtag_tdo1   : output 'tap logic          ,
+    jtag_tdo2   : output 'tap logic          ,
+) {
+    var heartbeat: 'system logic<8>;
+    var shift_register: logic<2>;
+    var updated_command: logic<2>;
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            heartbeat = 8'h01;
+        } else {
+            heartbeat = {heartbeat[6:0], heartbeat[7]};
+        }
+    }
+
+    always_ff (jtag_tck, jtag_rst_n) {
+        if_reset {
+            shift_register = 2'b00;
+            updated_command = 2'b00;
+        } else {
+            if jtag_ce1 && jtag_shift {
+                shift_register = {jtag_tdi, shift_register[1]};
+            }
+            if jtag_update {
+                updated_command = {jtag_tdi, shift_register[1]};
+            }
+        }
+    }
+
+    assign led = heartbeat;
+    assign jtag_tdo1 = updated_command[0];
+    assign jtag_tdo2 = 1'b1;
+}

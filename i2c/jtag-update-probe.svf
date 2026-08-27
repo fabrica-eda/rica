@@ -1,0 +1,20 @@
+! Verify JTAGG shift and Update-DR with no I2C target in the path.
+TRST OFF;
+ENDIR IDLE;
+ENDDR IDLE;
+STATE RESET;
+STATE IDLE;
+SIR 8 TDI (32);
+
+! Load 2'b11. The following scan must see updated_command[0] == 1.
+SDR 2 TDI (3);
+RUNTEST 32 TCK;
+SDR 2 TDI (3) TDO (3) MASK (3);
+RUNTEST 32 TCK;
+
+! Load 2'b10. First scan still sees the previous 1, next sees 0.
+SDR 2 TDI (2) TDO (3) MASK (3);
+RUNTEST 32 TCK;
+SDR 2 TDI (2) TDO (0) MASK (3);
+RUNTEST 32 TCK;
+STATE IDLE;

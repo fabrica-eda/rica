@@ -1,0 +1,59 @@
+/// Decoded instruction controls transferred from the decoder to the pipeline.
+interface DecodeBus {
+    var instr        : logic<32>;
+    var rs1          : logic<5> ;
+    var rs2          : logic<5> ;
+    var rd           : logic<5> ;
+    var immediate    : logic<32>;
+    var alu_op       : logic<4> ;
+    var use_pc       : logic    ;
+    var use_immediate: logic    ;
+    var use_rs1      : logic    ;
+    var use_rs2      : logic    ;
+    var write_enable : logic    ;
+    var is_load      : logic    ;
+    var is_store     : logic    ;
+    var is_branch    : logic    ;
+    var branch_ne    : logic    ;
+    var is_jal       : logic    ;
+    var is_jalr      : logic    ;
+    var halt         : logic    ;
+
+    modport core {
+        instr: output,
+        ..input
+    }
+
+    modport decoder {
+        instr: input,
+        ..output
+    }
+}
+
+/// Registered operands enter the execution unit; arithmetic and logical
+/// candidates leave separately so the pipeline can preserve a short bypass.
+interface ExecuteBus {
+    var alu_op          : logic<4> ;
+    var link            : logic    ;
+    var operand_a       : logic<32>;
+    var operand_b       : logic<32>;
+    var arithmetic      : logic<32>;
+    var logic_result    : logic<32>;
+    var result_use_logic: logic    ;
+
+    modport pipeline {
+        alu_op   : output,
+        link     : output,
+        operand_a: output,
+        operand_b: output,
+        ..input
+    }
+
+    modport execute {
+        alu_op   : input,
+        link     : input,
+        operand_a: input,
+        operand_b: input,
+        ..output
+    }
+}

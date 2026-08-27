@@ -1,0 +1,77 @@
+/// Measures and exposes the PLL-generated 250 MHz domain.
+///
+/// The 12 MHz reference input is sampled by the generated clock. During one
+/// 65536-cycle fast window, a correct 250/12 ratio produces about 3146 rising
+/// reference edges. This avoids a second fabric clock tree while still
+/// proving the generated frequency on hardware.
+module ClockDomainProbe (
+    clk_ref       : input  'slow logic          ,
+    clk_250       : input  'fast clock          ,
+    pll_locked    : input  'fast logic          ,
+    debug_rst_n   : input  'slow reset_async_low,
+    fast_ready    : output 'fast logic          ,
+    clock_status  : output 'fast logic<8>       ,
+) {
+    var fast_rst_n    : 'fast reset_async_low;
+    var ref_async    : 'fast logic;
+    var reset_count   : 'fast logic<3>;
+    var counter_0     : 'fast logic<8>;
+    var counter_1     : 'fast logic<8>;
+    var counter_alive : 'fast logic;
+    var ref_meta      : 'fast logic;
+    var ref_sync      : 'fast logic;
+    var ref_previous  : 'fast logic;
+    var ratio_edges   : 'fast logic<12>;
+    var ratio_done    : 'fast logic;
+    var ratio_good    : 'fast logic;
+
+    unsafe (cdc) {
+        assign fast_rst_n = pll_locked && debug_rst_n;
+        assign ref_async = clk_ref;
+    }
+
+    always_ff (clk_250, fast_rst_n) {
+        if_reset {
+            reset_count   = 3'd0;
+            counter_0     = 8'h00;
+            counter_1     = 8'h00;
+            counter_alive = 1'b0;
+            ref_meta      = 1'b0;
+            ref_sync      = 1'b0;
+            ref_previous  = 1'b0;
+            ratio_edges   = 12'd0;
+            ratio_done    = 1'b0;
+            ratio_good    = 1'b0;
+        } else {
+            if !reset_count[2] {
+                reset_count = reset_count + 3'd1;
+            }
+            ref_meta     = ref_async;
+            ref_sync     = ref_meta;
+            ref_previous = ref_sync;
+            if reset_count[2] {
+                counter_0 = counter_0 + 8'd1;
+                counter_alive = 1'b1;
+                if counter_0 == 8'hff {
+                    counter_1 = counter_1 + 8'd1;
+                }
+            }
+            if !ratio_done {
+                if !ref_previous && ref_sync {
+                    ratio_edges = ratio_edges + 12'd1;
+                }
+                if (counter_1 == 8'hff) && (counter_0 == 8'hff) {
+                    ratio_done = 1'b1;
+                    if (ratio_edges >= 12'd3142) && (ratio_edges <= 12'd3149) {
+                        ratio_good = 1'b1;
+                    }
+                }
+            }
+        }
+    }
+
+    always_comb {
+        fast_ready    = reset_count[2];
+        clock_status  = {2'b00, counter_1[7], ratio_good, ratio_done, counter_alive, reset_count[2], pll_locked};
+    }
+}

@@ -1,0 +1,9 @@
+! Confirm SVF instruction/data bit ordering against the known ECP5 IDCODE.
+TRST OFF;
+ENDIR IDLE;
+ENDDR IDLE;
+STATE RESET;
+STATE IDLE;
+SIR 8 TDI (E0);
+SDR 32 TDI (FFFFFFFF) TDO (81113043) MASK (FFFFFFFF);
+STATE IDLE;
