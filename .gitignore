@@ -1,4 +1,7 @@
 /target/
 /i2c/build/
 /riscv/build/
+/riscv/.build/
+/riscv/dependencies/
+/riscv/rica_riscv.f
 /riscv/verify/target/

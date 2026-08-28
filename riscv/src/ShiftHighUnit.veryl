@@ -1,0 +1,29 @@
+/// Completion/EX2 half of the two-stage RV64 funnel shifter (8/16/32).
+module ShiftHighUnit (
+    shift: modport ShiftHighBus::shifter,
+) {
+    var fill      : logic    ;
+    var shifted_8 : logic<64>;
+    var shifted_16: logic<64>;
+    var shifted_32: logic<64>;
+
+    always_comb {
+        fill = shift.arithmetic && shift.operand[63];
+        if shift.amount[0] {
+            shifted_8 = {fill repeat 8, shift.operand[63:8]};
+        } else {
+            shifted_8 = shift.operand;
+        }
+        if shift.amount[1] {
+            shifted_16 = {fill repeat 16, shifted_8[63:16]};
+        } else {
+            shifted_16 = shifted_8;
+        }
+        if shift.amount[2] {
+            shifted_32 = {fill repeat 32, shifted_16[63:32]};
+        } else {
+            shifted_32 = shifted_16;
+        }
+        shift.result = shifted_32;
+    }
+}

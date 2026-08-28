@@ -9,7 +9,7 @@ building blocks:
 - `src/Core.veryl`: pipeline state, hazard control, forwarding, and commit
 - `src/RegisterFile.veryl`: synchronous two-read/one-write register-file
   candidate
-- `src/Top.veryl`: 150 MHz ECP5 EVN PLL/LED bring-up wrapper
+- `src/Top.veryl`: 126 MHz ECP5 EVN PLL/LED bring-up wrapper
 - `verify/`: architectural, synthesis, mapping-equivalence, and optional
   post-map regressions
 
@@ -19,32 +19,34 @@ owned by this repository.
 
 ## Performance target
 
-The nominal CPU target is 150 MHz (6.667 ns). Fmax is not accepted as a
+The nominal CPU target is 126 MHz (7.937 ns). Fmax is not accepted as a
 performance result by itself. The current overlapped implementation has:
 
 - CPI 1 through consecutive dependent ALU instructions using registered EX
   bypasses
-- one localized load-use stall
+- one localized wait for load-use, shift-use, and compare-use dependencies;
+  independent shifts and comparisons still enter every clock
 - synchronous BRAM register reads without a fixed per-instruction tax
-- a pipelined 64-bit branch equality reduction, keeping the comparison and
-  data-dependent flush fanout off the ALU critical path
+- pipelined 16-bit comparison chunks completed in EX2, keeping the comparison
+  reduction and data-dependent flush fanout off the ALU critical path
 - a registered instruction-memory address, keeping the next-PC addition and
   board ROM decode in separate timing stages without reducing fetch throughput
 - 64-bit architectural registers and data with a 32-bit physical address
   space
 
-The architectural regression currently commits 20 instructions in 39 clocks,
-including RV64 word operations, a load-use dependency, and taken BEQ, JAL,
-and JALR redirects.
+The architectural regression currently commits 58 instructions in 102 clocks
+(1.759 CPI), including RV64 word operations, load-use and shift-use
+dependencies, and taken BEQ, JAL, and JALR redirects. The independent RV64
+comparison regression completes 16 commits in 46 clocks; four immediately
+dependent SLT-to-branch pairs each pay the intended single wait.
 
-For the LFE5UM5G-85F speed-8 build, Struo reports a 6.560 ns mapped estimate.
-Texo revision `0cf4b8a` routes the complete EVN wrapper at the 6.667 ns target
-with +0.013 ns setup slack and +0.290 ns hold slack, covering all 2781 modeled
-endpoints. Routing the earlier eight-bit-count `Top` mapping with nextpnr-ecp5
-0.6 produced 148.92, 159.36, 150.74, and 155.30 MHz for seeds 1 through 4:
-three of four seeds close at 150 MHz. The Texo result is the board-level
-acceptance run; the seeded nextpnr spread is retained as a placement-QoR
-diagnostic rather than hidden behind a best seed.
+The EVN has a 12 MHz reference and an integer ECP5 PLL. The board configuration
+generates exactly 126 MHz. The board disables unused commit payload registers
+while retaining `commit_valid` for its heartbeat; the verification build keeps
+the full architectural commit trace. Struo estimates the core at 6.620 ns. The
+complete board wrapper routes at 132.01 MHz in nextpnr seed 1. Texo closes the
+same 7.937 ns target with +0.053 ns setup and +0.290 ns hold slack, with all
+2385 timing endpoints checked.
 
 ## Verification
 
@@ -87,15 +89,40 @@ Test only the reusable synchronous register file:
 cargo run --locked --offline -p verify-riscv -- --regfile-only
 ```
 
-Export either the current core or the complete board wrapper's 150 MHz-targeted
+Export either the current core or the complete board wrapper's 126 MHz-targeted
 ECP5 mapping for nextpnr diagnostics:
 
 ```sh
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- Top
+cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- HardwareTestTop
+nextpnr-ecp5 --um5g-85k --package CABGA381 --speed 8 \
+  --json riscv/build/riscv-hardware-test-126.nextpnr.json \
+  --lpf riscv/lfe5um5g-85f-evn.lpf \
+  --textcfg riscv/build/riscv-hardware-test-126.bit.config \
+  --freq 126.008 --seed 4
+ecppack riscv/build/riscv-hardware-test-126.bit.config \
+  riscv/build/riscv-hardware-test-126.bit --compress --freq 62.0
 ```
 
-The board wrapper binds the EVN's 12 MHz reference to a 150 MHz EHXPLLL. Its
+`HardwareTestTop` adds 4 KiB of JTAG-I2C-loadable Harvard BRAM, CPU run/reset
+control, and a `tohost` result mailbox. After routing and packing
+`riscv/build/riscv-hardware-test-126.bit`, program it and run the bundled RV64
+ELFs on the EVN with:
+
+```sh
+cargo run --locked --offline --release -p verify-riscv \
+  --bin hardware-riscv-tests
+```
+
+Pass `--no-program` to reuse the current SRAM image, or pass ELF paths after
+the options to run external self-checking programs. The host validates the
+debug identity, loads both instruction and data BRAM through ER1, starts the
+CPU, waits, and checks the status and 64-bit `tohost` result. The physical test
+RAM accepts `0x00000000..0x000007ff` and
+`0x80000000..0x800007ff`.
+
+The board wrapper binds the EVN's 12 MHz reference to a 126 MHz EHXPLLL. Its
 ROM increments x31 immediately after reset and then enters a delay/branch loop
 before the next increment. D5 through D10 show x31[5:0] as an active-low binary
 count, D11 toggles from a separately divided retired-instruction count, and D12
@@ -106,23 +133,28 @@ binary-count changes additionally prove that the delay branch and redirect
 completed. The RTL regression uses the same ROM control-flow shape with 4096
 delay iterations and requires every ADDI/BNE pair to retire before x31 may
 advance. `Top` registers the x31 polarity conversion, so its display
-trails by one 150 MHz cycle without putting those LED pads directly on the
+trails by one CPU cycle without putting those LED pads directly on the
 CPU's combinational output path. The PLL lock alone releases CPU reset; the
 generic SW4 input is not required for autonomous bring-up.
-Build and program it with the pinned Texo revision using:
+Build and program it with Texo `81d4335` and its pinned Struo revision using:
 
 ```sh
-../texo/target/release/texo pnr riscv --top Top --package CABGA381 --speed 8 \
+../texo/target/release/texo pnr riscv --top Top --package CABGA381 --speed 8_5G \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
-  --pll-binding riscv/pll-12-to-150.json \
-  --synthesis-goal-mhz 150 \
-  --output riscv/build/riscv-top-150.texo.json
-../texo/target/release/texo bitgen riscv/build/riscv-top-150.texo.json \
-  --bit riscv/build/riscv-top-150.bit
-openFPGALoader -b ecp5_evn --write-sram riscv/build/riscv-top-150.bit
+  --pll-binding riscv/pll-12-to-126.json \
+  --synthesis-goal-mhz 126 \
+  --output riscv/build/riscv-top-126.texo.json
+../texo/target/release/texo bitgen riscv/build/riscv-top-126.texo.json \
+  --bit riscv/build/riscv-top-126.bit
+openFPGALoader -b ecp5_evn --write-sram riscv/build/riscv-top-126.bit
 ```
 
-JTAG device detection, native bitgen, and SRAM programming of this timing-closed
-RV64 build have been verified on the LFE5UM5G-85 EVN. Host-visible CPU state is
-not yet wired into I2C/JTAG; the independently verified transport remains under
-`../i2c`.
+This Texo revision automatically downloads and verifies the corrected ECP5 v4
+target pack; no local `--architecture` or `--target-pack` override is needed.
+
+Native bitgen, JTAG detection, SRAM programming, ELF upload, CPU execution, and
+mailbox readback are verified on the LFE5UM5G-85 EVN at 126 MHz. The complete
+`alu`, `compare`, `control`, `memory`, and `shift` hardware suite passes 5/5.
+The final HardwareTestTop mapping uses 7760 cells and reaches 133.17 MHz in
+nextpnr seed 4. Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and
+produces a bitstream with the wrong device ID and configuration semantics.

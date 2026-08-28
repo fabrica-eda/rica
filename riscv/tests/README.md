@@ -31,6 +31,27 @@ trace.
 The bundled build locates LLVM 20's `llvm-mc` and Rust's bundled `rust-lld`.
 Set `LLVM_MC` or `RUST_LLD` to override either executable.
 
+## EVN hardware runner
+
+The same ELF contract is supported by the JTAG-I2C hardware harness:
+
+```sh
+cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-tests
+```
+
+The default command programs `build/riscv-hardware-test-126.bit` and then runs
+all bundled tests. `--no-program` reuses the programmed image,
+`--bitstream path` selects another image, and `--run-tck count` changes the CPU
+execution window. Positional ELF paths select individual or external tests.
+Each ELF must fit in the two 2 KiB physical windows
+`0x00000000..0x000007ff` and `0x80000000..0x800007ff`.
+
+The runner writes generated SVF files under `build/hardware-rv64`. A successful
+result covers the entire board path: JTAGG ER1, I2C register transport, BRAM
+loading, PLL/reset, RV64 execution, and `tohost` readback. All five bundled
+tests, including the directed `SW; LD; LD; BNE` memory regression, pass on the
+EVN at 126 MHz.
+
 ## Architectural test integration
 
 The current [RISC-V Architectural Certification Test framework][act4] is
@@ -66,16 +87,18 @@ The local `rv64i-subset/` programs remain fast bring-up smoke tests, not a
 replacement for or fork of ACT4. They currently cover:
 
 - `LUI`, `AUIPC`, `JAL`, `JALR`
-- `BEQ`, `BNE`
-- `LW`, `LD`, `SW`, `SD`, including `LW` sign extension and `SW` byte enables
+- `BEQ`, `BNE`, `BLT`, `BGE`, `BLTU`, `BGEU`
+- `LB`, `LH`, `LW`, `LD`, `LBU`, `LHU`, `LWU`, and `SB`, `SH`, `SW`, `SD`
 - `ADDI`, `XORI`, `ORI`, `ANDI`
-- `ADD`, `SUB`, `XOR`, `OR`, `AND`
+- `ADD`, `SUB`, `XOR`, `OR`, `AND`, `SLT`, `SLTU`, `SLTI`, `SLTIU`
 - `ADDIW`, `ADDW`, `SUBW`
+- `SLL`, `SRL`, `SRA` and their immediate and W forms
+- `FENCE` for the current in-order, uncached memory interface
 - dependent ALU forwarding and a load-use dependency
 
-Full ACT4 RV64I runs must wait for the missing shifts, signed/unsigned compare
-and branches, byte/halfword memory operations, `FENCE`, and the required
-exception behavior. Until then, passing the smoke suite means only the listed
-subset works; it does not claim RV64I certification.
+Full ACT4 RV64I certification still requires architectural exception and trap
+behavior. The current bare-metal test convention writes `tohost` and then uses
+`ECALL` as a simulation halt; it is not an implementation of the mandated
+environment-call exception.
 
 [act4]: https://github.com/riscv/riscv-arch-test

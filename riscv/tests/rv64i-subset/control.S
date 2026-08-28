@@ -3,6 +3,7 @@
 .section .text.init, "ax", @progbits
 .globl _start
 _start:
+    fence rw, rw
 auipc_site:
     auipc x1, 0
     la x2, auipc_site

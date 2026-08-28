@@ -1,0 +1,54 @@
+/// EX half of the two-stage RV64 funnel shifter.
+///
+/// The low half normalizes SLL into the shared right-shift domain and applies
+/// shifts 1/2/4. The raw result is registered before the common completion/EX2 half.
+module ShiftUnit (
+    shift: modport ShiftBus::shifter,
+) {
+    var normalized : logic<64>;
+    var reversed   : logic<64>;
+    var shift_input: logic<64>;
+    var low_fill   : logic    ;
+    var low_1      : logic<64>;
+    var low_2      : logic<64>;
+    var low_4      : logic<64>;
+
+    always_comb {
+        if shift.word_op {
+            if shift.alu_op == 4'd8 {
+                normalized = {shift.operand[31] repeat 32, shift.operand[31:0]};
+            } else {
+                normalized = {32'h0000_0000, shift.operand[31:0]};
+            }
+        } else {
+            normalized = shift.operand;
+        }
+        for i in 0..64 {
+            reversed[i] = normalized[63 - i];
+        }
+        if shift.alu_op == 4'd6 {
+            shift_input = reversed;
+        } else {
+            shift_input = normalized;
+        }
+        low_fill = (shift.alu_op == 4'd8) && shift_input[63];
+
+        if shift.amount[0] {
+            low_1 = {low_fill, shift_input[63:1]};
+        } else {
+            low_1 = shift_input;
+        }
+        if shift.amount[1] {
+            low_2 = {low_fill repeat 2, low_1[63:2]};
+        } else {
+            low_2 = low_1;
+        }
+        if shift.amount[2] {
+            low_4 = {low_fill repeat 4, low_2[63:4]};
+        } else {
+            low_4 = low_2;
+        }
+
+        shift.result = low_4;
+    }
+}

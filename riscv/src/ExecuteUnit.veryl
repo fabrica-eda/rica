@@ -9,6 +9,11 @@ module ExecuteUnit (
     var sum_high    : logic<33>;
     var arithmetic64: logic<64>;
 
+    inst shift_bus : ShiftBus;
+    inst shift_unit: ShiftUnit (
+        shift: shift_bus,
+    );
+
     always_comb {
         if execute.alu_op == 4'd1 {
             arithmetic_b = ~execute.operand_b;
@@ -29,6 +34,12 @@ module ExecuteUnit (
         }
 
         arithmetic64 = {sum_high[31:0], sum_low[31:0]};
+        for i in 0..4 {
+            execute.compare_equal[i] = execute.operand_a[i * 16+:16] == execute.operand_b[i * 16+:16];
+            execute.compare_less[i]  = execute.operand_a[i * 16+:16] <: execute.operand_b[i * 16+:16];
+        }
+        execute.compare_sign_a = execute.operand_a[63];
+        execute.compare_sign_b = execute.operand_b[63];
         if execute.word_op {
             execute.arithmetic = {arithmetic64[31] repeat 32, arithmetic64[31:0]};
         } else {
@@ -36,13 +47,26 @@ module ExecuteUnit (
         }
 
         case execute.alu_op {
-            4'd2   : execute.logic_result = execute.operand_a ^ execute.operand_b;
-            4'd3   : execute.logic_result = execute.operand_a | execute.operand_b;
-            4'd4   : execute.logic_result = execute.operand_a & execute.operand_b;
-            default: execute.logic_result = execute.operand_b;
+            4'd2       : execute.logic_result = execute.operand_a ^ execute.operand_b;
+            4'd3       : execute.logic_result = execute.operand_a | execute.operand_b;
+            4'd4       : execute.logic_result = execute.operand_a & execute.operand_b;
+            4'd9, 4'd11: execute.logic_result = 64'd0;
+            default    : execute.logic_result = execute.operand_b;
         }
-        execute.result_use_logic = !execute.link
+        execute.result_use_logic   = !execute.link
             && ((execute.alu_op == 4'd2) || (execute.alu_op == 4'd3) || (execute.alu_op == 4'd4)
-                || (execute.alu_op == 4'd5));
+                || (execute.alu_op == 4'd5) || (execute.alu_op == 4'd9) || (execute.alu_op == 4'd11));
+        execute.result_use_compare = !execute.link && ((execute.alu_op == 4'd9) || (execute.alu_op == 4'd11));
+        shift_bus.alu_op           = execute.alu_op;
+        shift_bus.word_op          = execute.word_op;
+        shift_bus.operand          = execute.operand_a;
+        if execute.word_op {
+            shift_bus.amount = {1'b0, execute.operand_b[4:0]};
+        } else {
+            shift_bus.amount = execute.operand_b[5:0];
+        }
+        execute.shift_result     = shift_bus.result;
+        execute.result_use_shift = !execute.link
+            && ((execute.alu_op == 4'd6) || (execute.alu_op == 4'd7) || (execute.alu_op == 4'd8));
     }
 }

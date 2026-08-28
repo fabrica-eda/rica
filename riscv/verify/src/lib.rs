@@ -3,14 +3,17 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use celox::{Simulator, SimulatorBuilder};
+use celox::{InterpBackend, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 5] = [
+const CORE_SOURCES: [&str; 8] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "Decoder.veryl",
     "ExecuteUnit.veryl",
+    "ShiftUnit.veryl",
+    "ShiftHighUnit.veryl",
+    "CompletionUnit.veryl",
     "Core.veryl",
 ];
 
@@ -150,6 +153,10 @@ impl ElfImage {
             }
         }
     }
+
+    pub fn load_bytes(&self) -> impl Iterator<Item = (u64, u8)> + '_ {
+        self.memory.iter().map(|(address, byte)| (*address, *byte))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -160,7 +167,7 @@ struct Commit {
     data: u64,
 }
 
-fn value(simulator: &mut Simulator, name: &str) -> u64 {
+fn value(simulator: &mut Simulator<InterpBackend>, name: &str) -> u64 {
     simulator
         .get(simulator.signal(name))
         .to_u64_digits()
@@ -179,7 +186,7 @@ pub fn run_elf(
     mut image: ElfImage,
     max_cycles: usize,
 ) -> Result<ElfRun, Box<dyn Error>> {
-    let mut simulator = SimulatorBuilder::new(core_source, "Core").build_native()?;
+    let mut simulator = SimulatorBuilder::new(core_source, "Core").build_interpreter()?;
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
@@ -213,7 +220,17 @@ pub fn run_elf(
         simulator.tick(clock)?;
 
         if let Some((address, data, mask)) = store {
-            let alignment_mask = if mask == 0x0f { 3 } else { 7 };
+            let alignment_mask = match mask {
+                0x01 => 0,
+                0x03 => 1,
+                0x0f => 3,
+                0xff => 7,
+                _ => {
+                    return Err(
+                        format!("unsupported store mask 0x{mask:02x} at cycle {cycle}").into(),
+                    );
+                }
+            };
             if address & alignment_mask != 0 {
                 return Err(format!(
                     "unaligned store [0x{address:016x}]/0x{mask:02x} = 0x{data:016x} at cycle {cycle}"

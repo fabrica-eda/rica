@@ -12,12 +12,13 @@ interface DecodeBus {
     var use_rs2      : logic    ;
     var write_enable : logic    ;
     var is_load      : logic    ;
-    var load_word    : logic    ;
+    var load_size    : logic<2> ;
+    var load_unsigned: logic    ;
     var is_store     : logic    ;
-    var store_word   : logic    ;
+    var store_size   : logic<2> ;
     var word_op      : logic    ;
     var is_branch    : logic    ;
-    var branch_ne    : logic    ;
+    var branch_op    : logic<3> ;
     var is_jal       : logic    ;
     var is_jalr      : logic    ;
     var halt         : logic    ;
@@ -36,14 +37,21 @@ interface DecodeBus {
 /// Registered operands enter the execution unit; arithmetic and logical
 /// candidates leave separately so the pipeline can preserve a short bypass.
 interface ExecuteBus {
-    var alu_op          : logic<4> ;
-    var link            : logic    ;
-    var word_op         : logic    ;
-    var operand_a       : logic<64>;
-    var operand_b       : logic<64>;
-    var arithmetic      : logic<64>;
-    var logic_result    : logic<64>;
-    var result_use_logic: logic    ;
+    var alu_op            : logic<4> ;
+    var link              : logic    ;
+    var word_op           : logic    ;
+    var operand_a         : logic<64>;
+    var operand_b         : logic<64>;
+    var arithmetic        : logic<64>;
+    var logic_result      : logic<64>;
+    var shift_result      : logic<64>;
+    var compare_equal     : logic<4> ;
+    var compare_less      : logic<4> ;
+    var compare_sign_a    : logic    ;
+    var compare_sign_b    : logic    ;
+    var result_use_logic  : logic    ;
+    var result_use_shift  : logic    ;
+    var result_use_compare: logic    ;
 
     modport pipeline {
         alu_op   : output,
@@ -61,5 +69,134 @@ interface ExecuteBus {
         operand_a: input,
         operand_b: input,
         ..output
+    }
+}
+
+/// Low half of the pipelined RV64 funnel shifter.
+interface ShiftBus {
+    var alu_op : logic<4> ;
+    var word_op: logic    ;
+    var operand: logic<64>;
+    var amount : logic<6> ;
+    var result : logic<64>;
+
+    modport pipeline {
+        alu_op : output,
+        word_op: output,
+        operand: output,
+        amount : output,
+        result : input ,
+    }
+
+    modport shifter {
+        alu_op : input ,
+        word_op: input ,
+        operand: input ,
+        amount : input ,
+        result : output,
+    }
+}
+
+/// High half of the pipelined RV64 funnel shifter.
+interface ShiftHighBus {
+    var arithmetic: logic    ;
+    var operand   : logic<64>;
+    var amount    : logic<3> ;
+    var result    : logic<64>;
+
+    modport pipeline {
+        arithmetic: output,
+        operand   : output,
+        amount    : output,
+        result    : input ,
+    }
+
+    modport shifter {
+        arithmetic: input ,
+        operand   : input ,
+        amount    : input ,
+        result    : output,
+    }
+}
+
+/// Registered EX1 candidates enter the common EX2 completion stage. The stage
+/// finishes pipelined integer units and normalizes LSU read data before WB.
+/// Future pipelined units add a candidate and selection tag here rather than
+/// borrowing an LSU-specific pipeline stage.
+interface CompletionBus {
+    var arithmetic      : logic<64>;
+    var logic_result    : logic<64>;
+    var use_logic       : logic    ;
+    var shift_low       : logic<64>;
+    var shift_amount    : logic<3> ;
+    var shift_arithmetic: logic    ;
+    var shift_left      : logic    ;
+    var shift_word      : logic    ;
+    var use_shift       : logic    ;
+    var compare_equal   : logic<4> ;
+    var compare_less    : logic<4> ;
+    var compare_sign_a  : logic    ;
+    var compare_sign_b  : logic    ;
+    var compare_signed  : logic    ;
+    var use_compare     : logic    ;
+    var load_data       : logic<64>;
+    var load_size       : logic<2> ;
+    var load_unsigned   : logic    ;
+    var use_load        : logic    ;
+    var store_size      : logic<2> ;
+    var result          : logic<64>;
+    var compare_result  : logic    ;
+    var store_mask      : logic<8> ;
+
+    modport pipeline {
+        arithmetic      : output,
+        logic_result    : output,
+        use_logic       : output,
+        shift_low       : output,
+        shift_amount    : output,
+        shift_arithmetic: output,
+        shift_left      : output,
+        shift_word      : output,
+        use_shift       : output,
+        compare_equal   : output,
+        compare_less    : output,
+        compare_sign_a  : output,
+        compare_sign_b  : output,
+        compare_signed  : output,
+        use_compare     : output,
+        load_data       : output,
+        load_size       : output,
+        load_unsigned   : output,
+        use_load        : output,
+        store_size      : output,
+        result          : input ,
+        compare_result  : input ,
+        store_mask      : input ,
+    }
+
+    modport completion {
+        arithmetic      : input ,
+        logic_result    : input ,
+        use_logic       : input ,
+        shift_low       : input ,
+        shift_amount    : input ,
+        shift_arithmetic: input ,
+        shift_left      : input ,
+        shift_word      : input ,
+        use_shift       : input ,
+        compare_equal   : input ,
+        compare_less    : input ,
+        compare_sign_a  : input ,
+        compare_sign_b  : input ,
+        compare_signed  : input ,
+        use_compare     : input ,
+        load_data       : input ,
+        load_size       : input ,
+        load_unsigned   : input ,
+        use_load        : input ,
+        store_size      : input ,
+        result          : output,
+        compare_result  : output,
+        store_mask      : output,
     }
 }

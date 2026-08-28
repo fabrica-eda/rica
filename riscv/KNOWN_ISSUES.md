@@ -9,11 +9,13 @@ not an acceptable CPU architecture.
 
 The RV64 implementation now computes a low 32-bit sum and both possible high
 32-bit sums, then selects the high half with the low carry. Arithmetic and
-logical results are captured into dedicated bypass registers.
-Consumer metadata selects that registered result before the next ALU.
+logical results are captured by the common completion stage. Consumer
+metadata selects that already-registered copy before the next ALU; a duplicate
+128-bit bypass result bank was removed.
 Consecutive RAW ALU dependencies therefore retain CPI 1 without an
-ALU-to-ALU combinational recurrence. Only loads, whose value is not present in
-EX, stall once.
+ALU-to-ALU combinational recurrence. Loads, shifts, and comparisons whose
+final values are not present in EX1 stall a dependent consumer once while
+independent operations retain one-per-clock throughput.
 
 ## Data-dependent flushes must be registered
 
@@ -68,10 +70,36 @@ That latency must be represented by pipeline state and forwarding/stall
 control. It must not become a fixed multi-cycle tax paid by every instruction,
 as it did in the retired Core250 stress design.
 
+## A memory stall must hold the synchronous register-file read result
+
+The directed hardware sequence below originally returned `tohost=7` (fail 3):
+
+```asm
+sw x6, 0(x1)
+ld x8, 0(x1)
+ld x9, 24(x2)
+bne x8, x9, fail_3
+```
+
+The store and first load were correct: x8 contained
+`0x1234567880000001`. The independent `ld x9, 24(x2)` instead returned the
+instruction bytes at address `0x18`, proving that its x2 base had become zero.
+While the completion stage waited for synchronous data BRAM, RX and FD were
+held but the synchronous register file continued consuming FD's younger read
+addresses. When the wait ended, RX therefore captured operands belonging to
+the following branch.
+
+Core now deasserts the register file's native read enable during a memory wait.
+This holds the already-aligned BRAM output without a 128-bit operand feedback
+mux or a new address-mux timing cone. The mapped wrapper grew by three cells
+(7757 to 7760), routes at 133.17 MHz for the 126 MHz constraint, and the exact
+unreordered hardware suite passes `alu`, `compare`, `control`, `memory`, and
+`shift` 5/5 on the LFE5UM5G-85 EVN.
+
 ## Timing and throughput are separate gates
 
-The nominal clock target is 150 MHz, but an implementation is not accepted
-solely because it meets a 6.667 ns period. Regressions must report at least:
+The nominal clock target is 126 MHz, but an implementation is not accepted
+solely because it meets a 7.937 ns period. Regressions must report at least:
 
 - clocks per committed instruction for the architectural trace
 - steady-state ALU instruction throughput
@@ -79,13 +107,10 @@ solely because it meets a 6.667 ns period. Regressions must report at least:
 - load-use penalty
 - mapped resource counts and post-route timing
 
-The current core commits the 20-instruction mixed trace in 39 clocks and keeps
-the first eight dependent ALU/store instructions at one commit per clock.
-Texo revision `0cf4b8a` closes the complete speed-8 EVN wrapper at 150 MHz with
-+0.013 ns setup and +0.290 ns hold slack, checking all 2781 endpoints. The
-earlier eight-bit-count mapping reached 148.92, 159.36, 150.74, and 155.30 MHz
-in nextpnr seeds 1 through 4. This seed spread remains a QoR concern, but it is
-no longer confused with the accepted Texo board run. The retired 250 MHz
-design met timing while taking fifteen clocks per instruction; it remains in
-Texo as a physical-design regression precisely so this CPU is not optimized
-around that result.
+The current core commits the 58-instruction mixed trace in 102 clocks and
+keeps consecutive dependent one-cycle integer ALU operations at one per
+clock. At 126 MHz the complete wrapper reaches 132.01 MHz in nextpnr seed 1;
+Texo reports +0.053 ns setup and +0.290 ns hold slack across all 2385 checked
+endpoints. The retired 250 MHz design met timing while taking fifteen clocks
+per instruction; it remains in Texo as a physical-design regression precisely
+so this CPU is not optimized around that result.

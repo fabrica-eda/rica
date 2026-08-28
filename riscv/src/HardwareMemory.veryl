@@ -1,0 +1,270 @@
+/// 4 KiB Harvard test memory with a byte-wide debug loader.
+///
+/// The CPU produces its instruction and LSU addresses on the rising edge.
+/// Reading the instruction ECP5 block RAMs on the falling edge returns the
+/// instruction before the following rising edge. Data uses full-cycle reads.
+/// Byte banks retain native CPU store masks and remain ordinary 1R1W BRAMs.
+module HardwareMemory (
+    clk              : input  'cpu clock            ,
+    clk_n            : input  'cpu clock_negedge    ,
+    cpu_instr_address: input  'cpu logic        <32>,
+    cpu_instruction  : output 'cpu logic        <32>,
+    cpu_data_address : input  'cpu logic        <32>,
+    cpu_data_read    : output 'cpu logic        <64>,
+    cpu_data_write   : input  'cpu logic        <64>,
+    cpu_data_mask    : input  'cpu logic        <8> ,
+    cpu_data_we      : input  'cpu logic            ,
+    debug_write      : input  'cpu logic            ,
+    debug_address    : input  'cpu logic        <32>,
+    debug_data       : input  'cpu logic        <8> ,
+) {
+    #[sv("struo_memory = \"required\"")]
+    var imem_0: 'cpu logic<8> [1024];
+    #[sv("struo_memory = \"required\"")]
+    var imem_1: 'cpu logic<8> [1024];
+    #[sv("struo_memory = \"required\"")]
+    var imem_2: 'cpu logic<8> [1024];
+    #[sv("struo_memory = \"required\"")]
+    var imem_3: 'cpu logic<8> [1024];
+
+    #[sv("struo_memory = \"required\"")]
+    var dmem_0: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_1: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_2: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_3: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_4: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_5: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_6: 'cpu logic<8> [512];
+    #[sv("struo_memory = \"required\"")]
+    var dmem_7: 'cpu logic<8> [512];
+
+    var imem_read_0       : 'cpu logic<8>     ;
+    var imem_read_1       : 'cpu logic<8>     ;
+    var imem_read_2       : 'cpu logic<8>     ;
+    var imem_read_3       : 'cpu logic<8>     ;
+    var dmem_read_0       : 'cpu logic<8>     ;
+    var dmem_read_1       : 'cpu logic<8>     ;
+    var dmem_read_2       : 'cpu logic<8>     ;
+    var dmem_read_3       : 'cpu logic<8>     ;
+    var dmem_read_4       : 'cpu logic<8>     ;
+    var dmem_read_5       : 'cpu logic<8>     ;
+    var dmem_read_6       : 'cpu logic<8>     ;
+    var dmem_read_7       : 'cpu logic<8>     ;
+    var data_read_mux     : 'cpu logic<64>    ;
+    var data_read_q       : 'cpu logic<64>    ;
+    var store_data_aligned: 'cpu logic<64>    ;
+    var store_mask_aligned: 'cpu logic<8>     ;
+    var dmem_write_address: 'cpu logic<9>     ;
+    var dmem_write_data   : 'cpu logic<8>  [8];
+    var dmem_write_enable : 'cpu logic     [8];
+    var cpu_data_address_q: 'cpu logic<32>    ;
+    var cpu_data_write_q  : 'cpu logic<64>    ;
+    var cpu_data_mask_q   : 'cpu logic<8>     ;
+    var cpu_data_we_q     : 'cpu logic        ;
+    always_comb {
+        case cpu_data_address_q[2:0] {
+            3'd0: {
+                store_data_aligned = cpu_data_write_q;
+                store_mask_aligned = cpu_data_mask_q;
+            }
+            3'd1: {
+                store_data_aligned = {cpu_data_write_q[55:0], 8'h00};
+                store_mask_aligned = {cpu_data_mask_q[6:0], 1'b0};
+            }
+            3'd2: {
+                store_data_aligned = {cpu_data_write_q[47:0], 16'h0000};
+                store_mask_aligned = {cpu_data_mask_q[5:0], 2'b00};
+            }
+            3'd3: {
+                store_data_aligned = {cpu_data_write_q[39:0], 24'h000000};
+                store_mask_aligned = {cpu_data_mask_q[4:0], 3'b000};
+            }
+            3'd4: {
+                store_data_aligned = {cpu_data_write_q[31:0], 32'h0000_0000};
+                store_mask_aligned = {cpu_data_mask_q[3:0], 4'b0000};
+            }
+            3'd5: {
+                store_data_aligned = {cpu_data_write_q[23:0], 40'h0000_0000_00};
+                store_mask_aligned = {cpu_data_mask_q[2:0], 5'b00000};
+            }
+            3'd6: {
+                store_data_aligned = {cpu_data_write_q[15:0], 48'h0000_0000_0000};
+                store_mask_aligned = {cpu_data_mask_q[1:0], 6'b000000};
+            }
+            default: {
+                store_data_aligned = {cpu_data_write_q[7:0], 56'h0000_0000_0000_00};
+                store_mask_aligned = {cpu_data_mask_q[0], 7'b0000000};
+            }
+        }
+
+        if debug_write {
+            dmem_write_address = debug_address[11:3];
+            dmem_write_data[0] = debug_data;
+            dmem_write_data[1] = debug_data;
+            dmem_write_data[2] = debug_data;
+            dmem_write_data[3] = debug_data;
+            dmem_write_data[4] = debug_data;
+            dmem_write_data[5] = debug_data;
+            dmem_write_data[6] = debug_data;
+            dmem_write_data[7] = debug_data;
+        } else {
+            dmem_write_address = {cpu_data_address_q[31], cpu_data_address_q[10:3]};
+            dmem_write_data[0] = store_data_aligned[7:0];
+            dmem_write_data[1] = store_data_aligned[15:8];
+            dmem_write_data[2] = store_data_aligned[23:16];
+            dmem_write_data[3] = store_data_aligned[31:24];
+            dmem_write_data[4] = store_data_aligned[39:32];
+            dmem_write_data[5] = store_data_aligned[47:40];
+            dmem_write_data[6] = store_data_aligned[55:48];
+            dmem_write_data[7] = store_data_aligned[63:56];
+        }
+        dmem_write_enable[0] = (debug_write && (debug_address[2:0] == 3'd0))
+            || (cpu_data_we_q && store_mask_aligned[0]);
+        dmem_write_enable[1] = (debug_write && (debug_address[2:0] == 3'd1))
+            || (cpu_data_we_q && store_mask_aligned[1]);
+        dmem_write_enable[2] = (debug_write && (debug_address[2:0] == 3'd2))
+            || (cpu_data_we_q && store_mask_aligned[2]);
+        dmem_write_enable[3] = (debug_write && (debug_address[2:0] == 3'd3))
+            || (cpu_data_we_q && store_mask_aligned[3]);
+        dmem_write_enable[4] = (debug_write && (debug_address[2:0] == 3'd4))
+            || (cpu_data_we_q && store_mask_aligned[4]);
+        dmem_write_enable[5] = (debug_write && (debug_address[2:0] == 3'd5))
+            || (cpu_data_we_q && store_mask_aligned[5]);
+        dmem_write_enable[6] = (debug_write && (debug_address[2:0] == 3'd6))
+            || (cpu_data_we_q && store_mask_aligned[6]);
+        dmem_write_enable[7] = (debug_write && (debug_address[2:0] == 3'd7))
+            || (cpu_data_we_q && store_mask_aligned[7]);
+
+        cpu_instruction = {imem_read_3, imem_read_2, imem_read_1, imem_read_0};
+        case cpu_data_address[2:0] {
+            3'd0   : data_read_mux = {
+                dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3, dmem_read_2, dmem_read_1, dmem_read_0
+            };
+            3'd1   : data_read_mux = {
+                8'h00, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3, dmem_read_2, dmem_read_1
+            };
+            3'd2   : data_read_mux = {
+                16'h0000, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3, dmem_read_2
+            };
+            3'd3   : data_read_mux = {24'h000000, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3};
+            3'd4   : data_read_mux = {32'h0000_0000, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4};
+            3'd5   : data_read_mux = {40'h0000_0000_00, dmem_read_7, dmem_read_6, dmem_read_5};
+            3'd6   : data_read_mux = {48'h0000_0000_0000, dmem_read_7, dmem_read_6};
+            default: data_read_mux = {56'h0000_0000_0000_00, dmem_read_7};
+        }
+        cpu_data_read = data_read_q;
+    }
+
+    always_ff (clk_n) {
+        if debug_write && (debug_address[1:0] == 2'd0) {
+            imem_0[debug_address[11:2]] = debug_data;
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_address[1:0] == 2'd1) {
+            imem_1[debug_address[11:2]] = debug_data;
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_address[1:0] == 2'd2) {
+            imem_2[debug_address[11:2]] = debug_data;
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_address[1:0] == 2'd3) {
+            imem_3[debug_address[11:2]] = debug_data;
+        }
+    }
+    always_ff (clk_n) {
+        imem_read_0 = imem_0[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+    }
+    always_ff (clk_n) {
+        imem_read_1 = imem_1[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+    }
+    always_ff (clk_n) {
+        imem_read_2 = imem_2[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+    }
+    always_ff (clk_n) {
+        imem_read_3 = imem_3[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+    }
+
+    always_ff (clk) {
+        if dmem_write_enable[0] {
+            dmem_0[dmem_write_address] = dmem_write_data[0];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[1] {
+            dmem_1[dmem_write_address] = dmem_write_data[1];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[2] {
+            dmem_2[dmem_write_address] = dmem_write_data[2];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[3] {
+            dmem_3[dmem_write_address] = dmem_write_data[3];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[4] {
+            dmem_4[dmem_write_address] = dmem_write_data[4];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[5] {
+            dmem_5[dmem_write_address] = dmem_write_data[5];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[6] {
+            dmem_6[dmem_write_address] = dmem_write_data[6];
+        }
+    }
+    always_ff (clk) {
+        if dmem_write_enable[7] {
+            dmem_7[dmem_write_address] = dmem_write_data[7];
+        }
+    }
+    always_ff (clk) {
+        dmem_read_0 = dmem_0[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_1 = dmem_1[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_2 = dmem_2[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_3 = dmem_3[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_4 = dmem_4[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_5 = dmem_5[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_6 = dmem_6[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        dmem_read_7 = dmem_7[{cpu_data_address[31], cpu_data_address[10:3]}];
+    }
+    always_ff (clk) {
+        data_read_q = data_read_mux;
+    }
+    always_ff (clk) {
+        cpu_data_address_q = cpu_data_address;
+        cpu_data_write_q   = cpu_data_write;
+        cpu_data_mask_q    = cpu_data_mask;
+        cpu_data_we_q      = cpu_data_we;
+    }
+}

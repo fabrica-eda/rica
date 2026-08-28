@@ -1,7 +1,7 @@
 /// ECP5 Versa 5G board wrapper with a tiny RISC-V LED firmware in ROM.
 module Top (
     clk       : input  'reference clock   ,
-    clk_150   : input  'cpu       clock   ,
+    clk_126   : input  'cpu       clock   ,
     pll_locked: input  'cpu       logic   ,
     led       : output 'cpu       logic<8>,
 ) {
@@ -26,31 +26,33 @@ module Top (
     var commit_count_q       : 'cpu logic          <25>;
     var led_count_q          : 'cpu logic          <6> ;
 
-    inst core: Core (
-        clk             : clk_150              ,
-        rst_n           : core_rst_n           ,
-        instr           : instruction          ,
-        data_rdata      : 64'h0000_0000_0000_0000        ,
-        pc              : core_pc              ,
-        data_addr       : unused_data_addr     ,
-        data_wdata      : unused_data_wdata    ,
-        data_wmask      : unused_data_wmask    ,
-        data_we         : unused_data_we       ,
-        halted          : unused_halted        ,
-        commit_valid    : unused_commit_valid  ,
-        commit_pc       : unused_commit_pc     ,
-        commit_instr    : unused_commit_instr  ,
-        commit_rd       : unused_commit_rd     ,
-        commit_data     : unused_commit_data   ,
-        commit_mem_we   : unused_commit_mem_we ,
-        commit_mem_addr : unused_commit_address,
-        commit_mem_wdata: unused_commit_wdata  ,
-        commit_mem_wmask: unused_commit_wmask  ,
-        debug_x31       : x31                  ,
+    inst core: Core #(
+        COMMIT_PAYLOAD: 0,
+    ) (
+        clk             : clk_126                ,
+        rst_n           : core_rst_n             ,
+        instr           : instruction            ,
+        data_rdata      : 64'h0000_0000_0000_0000,
+        pc              : core_pc                ,
+        data_addr       : unused_data_addr       ,
+        data_wdata      : unused_data_wdata      ,
+        data_wmask      : unused_data_wmask      ,
+        data_we         : unused_data_we         ,
+        halted          : unused_halted          ,
+        commit_valid    : unused_commit_valid    ,
+        commit_pc       : unused_commit_pc       ,
+        commit_instr    : unused_commit_instr    ,
+        commit_rd       : unused_commit_rd       ,
+        commit_data     : unused_commit_data     ,
+        commit_mem_we   : unused_commit_mem_we   ,
+        commit_mem_addr : unused_commit_address  ,
+        commit_mem_wdata: unused_commit_wdata    ,
+        commit_mem_wmask: unused_commit_wmask    ,
+        debug_x31       : x31                    ,
     );
 
-    // clk_150 and pll_locked are logical PLL boundary ports. Texo replaces
-    // them with one EHXPLLL using pll-12-to-150.json before placement.
+    // clk_126 and pll_locked are logical PLL boundary ports. Texo replaces
+    // them with one EHXPLLL using pll-12-to-126.json before placement.
     assign core_rst_n = pll_locked;
 
     // D5-D10 show the active-low low six bits of the x31 count.
@@ -59,7 +61,7 @@ module Top (
     // progress, and register writeback are therefore independently visible.
     // The x31 display trails by one CPU clock and stays out of the CPU's
     // combinational timing cone.
-    always_ff (clk_150, core_rst_n) {
+    always_ff (clk_126, core_rst_n) {
         if_reset {
             commit_count_q = 25'h000_0000;
             led_count_q    = 6'h3f;
@@ -82,7 +84,7 @@ module Top (
             64'h0000_0000_0000_000c: instruction = 32'hfe00_9ee3; // bne  x1, x0, -4
             64'h0000_0000_0000_0010: instruction = 32'h001f_8f93; // addi x31, x31, 1
             64'h0000_0000_0000_0014: instruction = 32'hff1f_f06f; // jal  x0, -16
-            default      : instruction = 32'h0000_0073; // ecall
+            default                : instruction = 32'h0000_0073; // ecall
         }
         led = {!pll_locked, ~commit_count_q[24], led_count_q};
     }

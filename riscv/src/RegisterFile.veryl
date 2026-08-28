@@ -8,6 +8,7 @@ module RegisterFile (
     write_enable  : input  logic    ,
     write_address : input  logic<5> ,
     write_data    : input  logic<64>,
+    read_enable   : input  logic    ,
     read_address_a: input  logic<5> ,
     read_address_b: input  logic<5> ,
     read_data_a   : output logic<64>,
@@ -34,17 +35,31 @@ module RegisterFile (
     }
 
     always_ff (clk) {
-        read_data_a_raw  = bank_a[read_address_a];
-        read_address_a_q = read_address_a;
-        bypass_a_q       = write_enable && (write_address != 5'd0) && (write_address == read_address_a);
-        bypass_data_a_q  = write_data;
+        if read_enable {
+            read_data_a_raw = bank_a[read_address_a];
+        }
     }
 
     always_ff (clk) {
-        read_data_b_raw  = bank_b[read_address_b];
-        read_address_b_q = read_address_b;
-        bypass_b_q       = write_enable && (write_address != 5'd0) && (write_address == read_address_b);
-        bypass_data_b_q  = write_data;
+        if read_enable {
+            read_address_a_q = read_address_a;
+            bypass_a_q       = write_enable && (write_address != 5'd0) && (write_address == read_address_a);
+            bypass_data_a_q  = write_data;
+        }
+    }
+
+    always_ff (clk) {
+        if read_enable {
+            read_data_b_raw = bank_b[read_address_b];
+        }
+    }
+
+    always_ff (clk) {
+        if read_enable {
+            read_address_b_q = read_address_b;
+            bypass_b_q       = write_enable && (write_address != 5'd0) && (write_address == read_address_b);
+            bypass_data_b_q  = write_data;
+        }
     }
 
     always_comb {

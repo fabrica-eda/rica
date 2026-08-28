@@ -10,3 +10,6 @@ target = { type = "directory", path = "build/veryl" }
 
 [synth]
 top = "Top"
+
+[dependencies]
+rica_i2c = { path = "../i2c" }

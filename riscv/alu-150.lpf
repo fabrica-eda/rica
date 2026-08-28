@@ -1,0 +1,2 @@
+# Out-of-context registered-ALU timing constraint.
+FREQUENCY PORT "clk" 150 MHZ;

@@ -1,0 +1,259 @@
+/// JTAG-I2C loadable RV64 hardware-test system.
+///
+/// ER1 retains the established two-bit I2C bit-bang protocol. The CPU remains
+/// reset while the host fills the 4 KiB Harvard memories, then reports its
+/// self-check result through the programmed `tohost` address.
+module HardwareTestTop (
+    clk        : input  'reference clock             ,
+    clk_126    : input  'cpu       clock             ,
+    pll_locked : input  'cpu       logic             ,
+    led        : output 'cpu       logic          <8>,
+    jtag_tdi   : input  'tap       logic             ,
+    jtag_tck   : input  'tap       clock             ,
+    jtag_rti1  : input  'tap       logic             ,
+    jtag_rti2  : input  'tap       logic             ,
+    jtag_shift : input  'tap       logic             ,
+    jtag_update: input  'tap       clock             ,
+    jtag_rst_n : input  'tap       reset_async_low   ,
+    jtag_ce1   : input  'tap       logic             ,
+    jtag_ce2   : input  'tap       logic             ,
+    jtag_tdo1  : output 'tap       logic             ,
+    jtag_tdo2  : output 'tap       logic             ,
+) {
+    var shift_register: 'tap logic          <2>;
+    var master_scl    : 'tap logic             ;
+    var master_sda_low: 'tap logic             ;
+    var target_scl    : 'cpu logic             ;
+    var target_sda_low: 'cpu logic             ;
+    var wired_sda     : 'cpu logic             ;
+    var debug_rst_n   : 'cpu reset_async_low   ;
+
+    var debug_address       : 'cpu logic<8>;
+    var debug_write_data    : 'cpu logic<8>;
+    var debug_write_strobe  : 'cpu logic   ;
+    var debug_read_data     : 'cpu logic<8>;
+    var debug_read_address_q: 'cpu logic<8>;
+    var debug_identity_mux  : 'cpu logic<8>;
+    var debug_result_mux    : 'cpu logic<8>;
+    var debug_identity_q    : 'cpu logic<8>;
+    var debug_result_q      : 'cpu logic<8>;
+    var debug_read_group_q  : 'cpu logic<2>;
+
+    var run_q               : 'cpu logic              ;
+    var aperture_base_q     : 'cpu logic          <32>;
+    var tohost_address_q    : 'cpu logic          <32>;
+    var result_q            : 'cpu logic          <64>;
+    var result_valid_q      : 'cpu logic              ;
+    var activity_q          : 'cpu logic          <24>;
+    var cpu_rst_n           : 'cpu reset_async_low    ;
+    var memory_debug_write  : 'cpu logic              ;
+    var memory_debug_addr   : 'cpu logic          <32>;
+    var memory_debug_write_q: 'cpu logic              ;
+    var memory_debug_addr_q : 'cpu logic          <32>;
+    var memory_debug_data_q : 'cpu logic          <8> ;
+
+    var instruction            : 'cpu logic<32>;
+    var cpu_pc                 : 'cpu logic<64>;
+    var data_addr              : 'cpu logic<64>;
+    var data_rdata             : 'cpu logic<64>;
+    var data_wdata             : 'cpu logic<64>;
+    var data_wmask             : 'cpu logic<8> ;
+    var data_we                : 'cpu logic    ;
+    var halted                 : 'cpu logic    ;
+    var commit_valid           : 'cpu logic    ;
+    var debug_x31              : 'cpu logic<64>;
+    var unused_commit_pc       : 'cpu logic<64>;
+    var unused_commit_instr    : 'cpu logic<32>;
+    var unused_commit_rd       : 'cpu logic<5> ;
+    var unused_commit_data     : 'cpu logic<64>;
+    var unused_commit_mem_we   : 'cpu logic    ;
+    var unused_commit_mem_addr : 'cpu logic<64>;
+    var unused_commit_mem_wdata: 'cpu logic<64>;
+    var unused_commit_mem_wmask: 'cpu logic<8> ;
+
+    inst i2c_target: rica_i2c::I2cTarget250 (
+        clk               : clk_126           ,
+        rst_n             : debug_rst_n       ,
+        scl_i             : target_scl        ,
+        sda_i             : wired_sda         ,
+        sda_drive_low     : target_sda_low    ,
+        debug_address     : debug_address     ,
+        debug_write_data  : debug_write_data  ,
+        debug_write_strobe: debug_write_strobe,
+        debug_read_data   : debug_read_data   ,
+    );
+
+    inst memory: HardwareMemory (
+        clk              : clk_126                 ,
+        clk_n            : clk_126 as clock_negedge,
+        cpu_instr_address: cpu_pc[31:0]            ,
+        cpu_instruction  : instruction             ,
+        cpu_data_address : data_addr[31:0]         ,
+        cpu_data_read    : data_rdata              ,
+        cpu_data_write   : data_wdata              ,
+        cpu_data_mask    : data_wmask              ,
+        cpu_data_we      : data_we                 ,
+        debug_write      : memory_debug_write_q    ,
+        debug_address    : memory_debug_addr_q     ,
+        debug_data       : memory_debug_data_q     ,
+    );
+
+    inst core: Core #(
+        COMMIT_PAYLOAD  : 0,
+        SYNC_DATA_MEMORY: 1,
+    ) (
+        clk             : clk_126                ,
+        rst_n           : cpu_rst_n              ,
+        instr           : instruction            ,
+        data_rdata      : data_rdata             ,
+        pc              : cpu_pc                 ,
+        data_addr       : data_addr              ,
+        data_wdata      : data_wdata             ,
+        data_wmask      : data_wmask             ,
+        data_we         : data_we                ,
+        halted          : halted                 ,
+        commit_valid    : commit_valid           ,
+        commit_pc       : unused_commit_pc       ,
+        commit_instr    : unused_commit_instr    ,
+        commit_rd       : unused_commit_rd       ,
+        commit_data     : unused_commit_data     ,
+        commit_mem_we   : unused_commit_mem_we   ,
+        commit_mem_addr : unused_commit_mem_addr ,
+        commit_mem_wdata: unused_commit_mem_wdata,
+        commit_mem_wmask: unused_commit_mem_wmask,
+        debug_x31       : debug_x31              ,
+    );
+
+    always_ff (jtag_tck, jtag_rst_n) {
+        if_reset {
+            shift_register = 2'b00;
+        } else if jtag_ce1 && jtag_shift {
+            shift_register = {jtag_tdi, shift_register[1]};
+        }
+    }
+
+    always_ff (jtag_update, jtag_rst_n) {
+        if_reset {
+            master_scl     = 1'b1;
+            master_sda_low = 1'b0;
+        } else {
+            master_scl     = shift_register[1];
+            master_sda_low = shift_register[0];
+        }
+    }
+
+    unsafe (cdc) {
+        assign debug_rst_n = jtag_rst_n && pll_locked;
+        assign target_scl  = master_scl;
+        assign wired_sda   = !(master_sda_low || target_sda_low);
+        assign jtag_tdo1   = wired_sda;
+        assign jtag_tdo2   = pll_locked;
+    }
+
+    always_comb {
+        cpu_rst_n          = debug_rst_n && run_q;
+        memory_debug_write = debug_write_strobe && !run_q && (debug_address >= 8'h20);
+        memory_debug_addr  = aperture_base_q + {24'h000000, debug_address - 8'h20};
+
+        case debug_read_address_q[1:0] {
+            2'd0   : debug_identity_mux = 8'h52;
+            2'd1   : debug_identity_mux = 8'h03;
+            2'd2   : debug_identity_mux = 8'h01;
+            default: debug_identity_mux = {
+                2'b00, activity_q[23], result_q[0], result_valid_q, halted, run_q, pll_locked
+            };
+        }
+        case debug_read_address_q[2:0] {
+            3'd0   : debug_result_mux = result_q[7:0];
+            3'd1   : debug_result_mux = result_q[15:8];
+            3'd2   : debug_result_mux = result_q[23:16];
+            3'd3   : debug_result_mux = result_q[31:24];
+            3'd4   : debug_result_mux = result_q[39:32];
+            3'd5   : debug_result_mux = result_q[47:40];
+            3'd6   : debug_result_mux = result_q[55:48];
+            default: debug_result_mux = result_q[63:56];
+        }
+
+        if result_valid_q {
+            led[5:0] = ~result_q[5:0];
+        } else {
+            led[5:0] = ~debug_x31[5:0];
+        }
+        led[6] = !activity_q[23];
+        led[7] = !pll_locked;
+    }
+
+    always_ff (clk_126, debug_rst_n) {
+        if_reset {
+            debug_read_address_q = 8'h00;
+            debug_identity_q     = 8'hff;
+            debug_result_q       = 8'hff;
+            debug_read_group_q   = 2'd3;
+            debug_read_data      = 8'hff;
+        } else {
+            debug_read_address_q = debug_address;
+            debug_identity_q     = debug_identity_mux;
+            debug_result_q       = debug_result_mux;
+            if debug_read_address_q[7:2] == 6'b000000 {
+                debug_read_group_q = 2'd0;
+            } else if debug_read_address_q[7:3] == 5'b00011 {
+                debug_read_group_q = 2'd1;
+            } else if debug_read_address_q == 8'h10 {
+                debug_read_group_q = 2'd2;
+            } else {
+                debug_read_group_q = 2'd3;
+            }
+            case debug_read_group_q {
+                2'd0   : debug_read_data = debug_identity_q;
+                2'd1   : debug_read_data = debug_result_q;
+                2'd2   : debug_read_data = {6'b000000, result_valid_q, run_q};
+                default: debug_read_data = 8'hff;
+            }
+        }
+    }
+
+    always_ff (clk_126, debug_rst_n) {
+        if_reset {
+            run_q                = 1'b0;
+            aperture_base_q      = 32'h0000_0000;
+            tohost_address_q     = 32'h0000_0000;
+            result_q             = 64'h0000_0000_0000_0000;
+            result_valid_q       = 1'b0;
+            activity_q           = 24'h000000;
+            memory_debug_write_q = 1'b0;
+            memory_debug_addr_q  = 32'h0000_0000;
+            memory_debug_data_q  = 8'h00;
+        } else {
+            activity_q           = activity_q + 24'd1;
+            memory_debug_write_q = memory_debug_write;
+            if memory_debug_write {
+                memory_debug_addr_q = memory_debug_addr;
+                memory_debug_data_q = debug_write_data;
+            }
+            if debug_write_strobe {
+                case debug_address {
+                    8'h04: aperture_base_q[7:0]    = debug_write_data;
+                    8'h05: aperture_base_q[15:8]   = debug_write_data;
+                    8'h06: aperture_base_q[23:16]  = debug_write_data;
+                    8'h07: aperture_base_q[31:24]  = debug_write_data;
+                    8'h08: tohost_address_q[7:0]   = debug_write_data;
+                    8'h09: tohost_address_q[15:8]  = debug_write_data;
+                    8'h0a: tohost_address_q[23:16] = debug_write_data;
+                    8'h0b: tohost_address_q[31:24] = debug_write_data;
+                    8'h10: {
+                        run_q = debug_write_data[0];
+                        if debug_write_data[1] {
+                            result_valid_q = 1'b0;
+                            result_q       = 64'h0000_0000_0000_0000;
+                        }
+                    }
+                    default: {}
+                }
+            }
+            if run_q && data_we && (data_addr[31:0] == tohost_address_q) {
+                result_q       = data_wdata;
+                result_valid_q = data_wdata != 64'h0000_0000_0000_0000;
+            }
+        }
+    }
+}

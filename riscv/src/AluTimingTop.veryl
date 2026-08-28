@@ -1,0 +1,350 @@
+/// Out-of-context timing fixture for the registered RV64 ALU datapath.
+///
+/// Both ends of ExecuteUnit are registers. No register file, decoder,
+/// forwarding network, shifter, memory, or control path is in this cone.
+module AddTimingTop (
+    clk   : input  clock    ,
+    result: output logic<64>,
+) {
+    var operand_a_q: logic<64>;
+    var operand_b_q: logic<64>;
+    var result_q   : logic<64>;
+
+    inst execute_bus : ExecuteBus;
+    inst execute_unit: ExecuteUnit (
+        execute: execute_bus,
+    );
+
+    always_comb {
+        execute_bus.alu_op    = 4'd0;
+        execute_bus.link      = 1'b0;
+        execute_bus.word_op   = 1'b0;
+        execute_bus.operand_a = operand_a_q;
+        execute_bus.operand_b = operand_b_q;
+        result                = result_q;
+    }
+
+    always_ff (clk) {
+        // Feedback keeps every carry bit observable while preserving a
+        // register-to-register timing path through exactly one ADD.
+        operand_a_q = execute_bus.arithmetic;
+        operand_b_q = {operand_b_q[62:0], ~operand_b_q[63]};
+        result_q    = execute_bus.arithmetic;
+    }
+}
+
+/// Out-of-context timing fixture including the ordinary ALU controls and the
+/// arithmetic/logical result mux used by a pipeline result register.
+module MergedAluTimingTop (
+    clk   : input  clock    ,
+    result: output logic<64>,
+) {
+    var operand_a_q    : logic<64>;
+    var operand_b_q    : logic<64>;
+    var alu_op_q       : logic<4> ;
+    var word_op_q      : logic    ;
+    var selected_result: logic<64>;
+    var result_q       : logic<64>;
+
+    inst execute_bus : ExecuteBus;
+    inst execute_unit: ExecuteUnit (
+        execute: execute_bus,
+    );
+
+    always_comb {
+        execute_bus.alu_op    = alu_op_q;
+        execute_bus.link      = 1'b0;
+        execute_bus.word_op   = word_op_q;
+        execute_bus.operand_a = operand_a_q;
+        execute_bus.operand_b = operand_b_q;
+        if execute_bus.result_use_logic {
+            selected_result = execute_bus.logic_result;
+        } else {
+            selected_result = execute_bus.arithmetic;
+        }
+        result = result_q;
+    }
+
+    always_ff (clk) {
+        operand_a_q = selected_result;
+        operand_b_q = {operand_b_q[62:0], ~operand_b_q[63]};
+        if alu_op_q == 4'd4 {
+            alu_op_q = 4'd0;
+        } else {
+            alu_op_q = alu_op_q + 4'd1;
+        }
+        word_op_q = ~word_op_q;
+        result_q  = selected_result;
+    }
+}
+
+/// Exact ExecuteUnit boundary used by the CPU: registered operands and
+/// controls, with arithmetic and logical candidates registered separately.
+module AluTimingTop (
+    clk         : input  clock    ,
+    arithmetic  : output logic<64>,
+    logic_result: output logic<64>,
+    shift_result: output logic<64>,
+    use_logic   : output logic    ,
+    use_shift   : output logic    ,
+) {
+    var operand_a_q   : logic<64>;
+    var operand_b_q   : logic<64>;
+    var alu_op_q      : logic<4> ;
+    var word_op_q     : logic    ;
+    var arithmetic_q  : logic<64>;
+    var logic_result_q: logic<64>;
+    var shift_result_q: logic<64>;
+    var use_logic_q   : logic    ;
+    var use_shift_q   : logic    ;
+
+    inst execute_bus : ExecuteBus;
+    inst execute_unit: ExecuteUnit (
+        execute: execute_bus,
+    );
+
+    always_comb {
+        execute_bus.alu_op    = alu_op_q;
+        execute_bus.link      = 1'b0;
+        execute_bus.word_op   = word_op_q;
+        execute_bus.operand_a = operand_a_q;
+        execute_bus.operand_b = operand_b_q;
+        arithmetic            = arithmetic_q;
+        logic_result          = logic_result_q;
+        shift_result          = shift_result_q;
+        use_logic             = use_logic_q;
+        use_shift             = use_shift_q;
+    }
+
+    always_ff (clk) {
+        operand_a_q = execute_bus.arithmetic;
+        operand_b_q = {operand_b_q[62:0], ~operand_b_q[63]};
+        if alu_op_q == 4'd4 {
+            alu_op_q = 4'd0;
+        } else {
+            alu_op_q = alu_op_q + 4'd1;
+        }
+        word_op_q      = ~word_op_q;
+        arithmetic_q   = execute_bus.arithmetic;
+        logic_result_q = execute_bus.logic_result;
+        shift_result_q = execute_bus.shift_result;
+        use_logic_q    = execute_bus.result_use_logic;
+        use_shift_q    = execute_bus.result_use_shift;
+    }
+}
+
+/// Conventional single-cycle RV64 integer ALU timing fixture.
+///
+/// Registered operands and controls feed ADD/SUB, bitwise logic, and a full
+/// six-level SLL/SRL/SRA barrel shifter.  One result mux then feeds the output
+/// register.  This deliberately contains no register file, forwarding, decode,
+/// or intermediate shift register.
+module FullAluTimingTop (
+    clk   : input  clock    ,
+    result: output logic<64>,
+) {
+    var operand_a_q: logic<64>;
+    var operand_b_q: logic<64>;
+    var alu_op_q   : logic<4> ;
+    var word_op_q  : logic    ;
+    var amount     : logic<6> ;
+
+    var left_source : logic<64>;
+    var right_source: logic<64>;
+    var left_1      : logic<64>;
+    var left_2      : logic<64>;
+    var left_4      : logic<64>;
+    var left_8      : logic<64>;
+    var left_16     : logic<64>;
+    var left_32     : logic<64>;
+    var right_1     : logic<64>;
+    var right_2     : logic<64>;
+    var right_4     : logic<64>;
+    var right_8     : logic<64>;
+    var right_16    : logic<64>;
+    var right_32    : logic<64>;
+    var shift_raw   : logic<64>;
+    var alu_raw     : logic<64>;
+    var result_q    : logic<64>;
+
+    inst execute_bus : ExecuteBus;
+    inst execute_unit: ExecuteUnit (
+        execute: execute_bus,
+    );
+
+    always_comb {
+        execute_bus.alu_op    = alu_op_q;
+        execute_bus.link      = 1'b0;
+        execute_bus.word_op   = word_op_q;
+        execute_bus.operand_a = operand_a_q;
+        execute_bus.operand_b = operand_b_q;
+
+        if word_op_q {
+            amount      = {1'b0, operand_b_q[4:0]};
+            left_source = {32'h0000_0000, operand_a_q[31:0]};
+            if alu_op_q == 4'd8 {
+                right_source = {operand_a_q[31] repeat 32, operand_a_q[31:0]};
+            } else {
+                right_source = {32'h0000_0000, operand_a_q[31:0]};
+            }
+        } else {
+            amount       = operand_b_q[5:0];
+            left_source  = operand_a_q;
+            right_source = operand_a_q;
+        }
+
+        if amount[0] {
+            left_1  = {left_source[62:0], 1'b0};
+            right_1 = {(alu_op_q == 4'd8) && right_source[63], right_source[63:1]};
+        } else {
+            left_1  = left_source;
+            right_1 = right_source;
+        }
+        if amount[1] {
+            left_2  = {left_1[61:0], 2'b00};
+            right_2 = {(alu_op_q == 4'd8) && right_source[63] repeat 2, right_1[63:2]};
+        } else {
+            left_2  = left_1;
+            right_2 = right_1;
+        }
+        if amount[2] {
+            left_4  = {left_2[59:0], 4'h0};
+            right_4 = {(alu_op_q == 4'd8) && right_source[63] repeat 4, right_2[63:4]};
+        } else {
+            left_4  = left_2;
+            right_4 = right_2;
+        }
+        if amount[3] {
+            left_8  = {left_4[55:0], 8'h00};
+            right_8 = {(alu_op_q == 4'd8) && right_source[63] repeat 8, right_4[63:8]};
+        } else {
+            left_8  = left_4;
+            right_8 = right_4;
+        }
+        if amount[4] {
+            left_16  = {left_8[47:0], 16'h0000};
+            right_16 = {(alu_op_q == 4'd8) && right_source[63] repeat 16, right_8[63:16]};
+        } else {
+            left_16  = left_8;
+            right_16 = right_8;
+        }
+        if amount[5] {
+            left_32  = {left_16[31:0], 32'h0000_0000};
+            right_32 = {(alu_op_q == 4'd8) && right_source[63] repeat 32, right_16[63:32]};
+        } else {
+            left_32  = left_16;
+            right_32 = right_16;
+        }
+
+        if alu_op_q == 4'd6 {
+            shift_raw = left_32;
+        } else {
+            shift_raw = right_32;
+        }
+
+        case alu_op_q {
+            4'd0, 4'd1: alu_raw = execute_bus.arithmetic;
+            4'd2      : alu_raw = execute_bus.logic_result;
+            4'd3      : alu_raw = execute_bus.logic_result;
+            4'd4      : alu_raw = execute_bus.logic_result;
+            4'd6      : alu_raw = shift_raw;
+            4'd7      : alu_raw = shift_raw;
+            4'd8      : alu_raw = shift_raw;
+            default   : alu_raw = operand_b_q;
+        }
+        if word_op_q {
+            result = {result_q[31] repeat 32, result_q[31:0]};
+        } else {
+            result = result_q;
+        }
+    }
+
+    always_ff (clk) {
+        operand_a_q = alu_raw;
+        operand_b_q = {operand_b_q[62:0], ~operand_b_q[63]};
+        if alu_op_q == 4'd8 {
+            alu_op_q = 4'd0;
+        } else {
+            alu_op_q = alu_op_q + 4'd1;
+        }
+        word_op_q = ~word_op_q;
+        result_q  = alu_raw;
+    }
+}
+
+/// One-cycle shared RV64 funnel shifter using Veryl's native shift operator.
+///
+/// SLL reverses the operand before and after one right-shift network.  A
+/// 65-bit signed source supplies either zero or the arithmetic sign bit, so
+/// the same `>>>` network implements SLL, SRL, and SRA, including W variants.
+module FunnelShiftTimingTop (
+    clk   : input  clock    ,
+    result: output logic<64>,
+) {
+    var operand_q    : logic       <64>;
+    var amount_q     : logic       <6> ;
+    var shift_op_q   : logic       <2> ;
+    var word_op_q    : logic           ;
+    var normalized   : logic       <64>;
+    var reversed     : logic       <64>;
+    var shift_input  : logic       <64>;
+    var shift_source : signed logic<65>;
+    var shifted      : signed logic<65>;
+    var shifted_bits : logic       <64>;
+    var architectural: logic       <64>;
+    var result_q     : logic       <64>;
+
+    always_comb {
+        if word_op_q {
+            if shift_op_q == 2'd2 {
+                normalized = {operand_q[31] repeat 32, operand_q[31:0]};
+            } else {
+                normalized = {32'h0000_0000, operand_q[31:0]};
+            }
+        } else {
+            normalized = operand_q;
+        }
+        for i in 0..64 {
+            reversed[i] = normalized[63 - i];
+        }
+        if shift_op_q == 2'd0 {
+            shift_input = reversed;
+        } else {
+            shift_input = normalized;
+        }
+        shift_source = {(shift_op_q == 2'd2) && normalized[63], shift_input};
+        if word_op_q {
+            shifted = shift_source >>> {1'b0, amount_q[4:0]};
+        } else {
+            shifted = shift_source >>> amount_q;
+        }
+        if shift_op_q == 2'd0 {
+            for i in 0..64 {
+                shifted_bits[i] = shifted[63 - i];
+            }
+        } else {
+            shifted_bits = shifted[63:0];
+        }
+        if word_op_q {
+            architectural = {shifted_bits[31] repeat 32, shifted_bits[31:0]};
+        } else {
+            architectural = shifted_bits;
+        }
+        result = result_q;
+    }
+
+    always_ff (clk) {
+        // Keep the launch operand independent from the shifter result. A
+        // self-feedback fixture gives every PFUMX output a second fanout and
+        // prevents legal L6MUX21 formation, unlike the CPU's EX pipeline.
+        operand_q = {operand_q[62:0], ~operand_q[63]};
+        amount_q  = {amount_q[4:0], ~amount_q[5]};
+        if shift_op_q == 2'd2 {
+            shift_op_q = 2'd0;
+        } else {
+            shift_op_q = shift_op_q + 2'd1;
+        }
+        word_op_q = ~word_op_q;
+        result_q  = architectural;
+    }
+}

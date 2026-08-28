@@ -1,0 +1,98 @@
+/// Common EX2 completion stage for the in-order integer pipeline.
+///
+/// This is deliberately not an LSU stage: the pipelined shifter completes
+/// here, while load formatting is one independently selected result source.
+module CompletionUnit (
+    completion: modport CompletionBus::completion,
+) {
+    var shift_architectural: logic<64>;
+    var load_result        : logic<64>;
+    var compare_less_high  : logic    ;
+    var compare_less_low   : logic    ;
+    var compare_unsigned   : logic    ;
+    var completed_logic    : logic<64>;
+
+    inst shift_high_bus : ShiftHighBus;
+    inst shift_high_unit: ShiftHighUnit (
+        shift: shift_high_bus,
+    );
+
+    always_comb {
+        shift_high_bus.arithmetic = completion.shift_arithmetic;
+        shift_high_bus.operand    = completion.shift_low;
+        shift_high_bus.amount     = completion.shift_amount;
+
+        compare_less_high = completion.compare_less[3] || (completion.compare_equal[3] && completion.compare_less[2]);
+        compare_less_low  = completion.compare_less[1] || (completion.compare_equal[1] && completion.compare_less[0]);
+        compare_unsigned  = compare_less_high
+            || ((completion.compare_equal[3] && completion.compare_equal[2]) && compare_less_low);
+        if completion.compare_signed && (completion.compare_sign_a != completion.compare_sign_b) {
+            completion.compare_result = completion.compare_sign_a;
+        } else {
+            completion.compare_result = compare_unsigned;
+        }
+        completed_logic = completion.logic_result;
+        if completion.use_compare {
+            completed_logic[0] = completion.compare_result;
+        }
+
+        if completion.shift_word {
+            if completion.shift_left {
+                for i in 0..32 {
+                    shift_architectural[i] = shift_high_bus.result[63 - i];
+                }
+                shift_architectural[63:32] = {shift_high_bus.result[32] repeat 32};
+            } else {
+                shift_architectural = {shift_high_bus.result[31] repeat 32, shift_high_bus.result[31:0]};
+            }
+        } else if completion.shift_left {
+            for i in 0..64 {
+                shift_architectural[i] = shift_high_bus.result[63 - i];
+            }
+        } else {
+            shift_architectural = shift_high_bus.result;
+        }
+
+        case completion.load_size {
+            2'b00: {
+                if completion.load_unsigned {
+                    load_result = {56'd0, completion.load_data[7:0]};
+                } else {
+                    load_result = {completion.load_data[7] repeat 56, completion.load_data[7:0]};
+                }
+            }
+            2'b01: {
+                if completion.load_unsigned {
+                    load_result = {48'd0, completion.load_data[15:0]};
+                } else {
+                    load_result = {completion.load_data[15] repeat 48, completion.load_data[15:0]};
+                }
+            }
+            2'b10: {
+                if completion.load_unsigned {
+                    load_result = {32'd0, completion.load_data[31:0]};
+                } else {
+                    load_result = {completion.load_data[31] repeat 32, completion.load_data[31:0]};
+                }
+            }
+            default: load_result = completion.load_data;
+        }
+
+        if completion.use_load {
+            completion.result = load_result;
+        } else if completion.use_shift {
+            completion.result = shift_architectural;
+        } else if completion.use_logic {
+            completion.result = completed_logic;
+        } else {
+            completion.result = completion.arithmetic;
+        }
+
+        case completion.store_size {
+            2'b00  : completion.store_mask = 8'h01;
+            2'b01  : completion.store_mask = 8'h03;
+            2'b10  : completion.store_mask = 8'h0f;
+            default: completion.store_mask = 8'hff;
+        }
+    }
+}

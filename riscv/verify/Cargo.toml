@@ -10,6 +10,7 @@ default-run = "verify-riscv"
 celox.workspace = true
 celox03.workspace = true
 object.workspace = true
+serde_json.workspace = true
 struo-celox.workspace = true
 struo-frontend-veryl.workspace = true
 struo-synth.workspace = true
@@ -22,3 +23,7 @@ path = "src/bin/nextpnr.rs"
 [[bin]]
 name = "rv64-riscv-tests"
 path = "src/bin/rv64_tests.rs"
+
+[[bin]]
+name = "hardware-riscv-tests"
+path = "src/bin/hardware_tests.rs"

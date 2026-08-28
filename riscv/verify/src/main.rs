@@ -4,11 +4,12 @@ use std::path::Path;
 use std::time::Instant;
 use std::{cmp, collections::HashMap};
 
-use celox::{Simulator, SimulatorBuilder};
+use celox::SimulatorBuilder;
 use struo_celox::ecp5_simulator;
 use struo_frontend_veryl::analyze_and_lower;
 use struo_synth::synthesize;
 use struo_target_ecp5::{Bit, Ecp5Cell, MappingOptions, map_to_ecp5_with_options};
+use verify_riscv::ElfImage;
 
 #[derive(Clone, Copy)]
 struct Expected {
@@ -206,13 +207,279 @@ fn program() -> Vec<Expected> {
         },
         Expected {
             pc: 80,
+            instr: i_type(33, 16, 1, 17, 0x13),
+            rd: 17,
+            data: 0xffff_fffe_0000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 84,
+            instr: i_type(32, 17, 5, 18, 0x13),
+            rd: 18,
+            data: 0x0000_0000_ffff_fffe,
+            mem_write: None,
+        },
+        Expected {
+            pc: 88,
+            instr: i_type(0x420, 17, 5, 19, 0x13),
+            rd: 19,
+            data: 0xffff_ffff_ffff_fffe,
+            mem_write: None,
+        },
+        Expected {
+            pc: 92,
+            instr: i_type(1, 16, 1, 20, 0x1b),
+            rd: 20,
+            data: 0xffff_ffff_ffff_fffe,
+            mem_write: None,
+        },
+        Expected {
+            pc: 96,
+            instr: i_type(31, 20, 5, 21, 0x1b),
+            rd: 21,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 100,
+            instr: i_type(0x41f, 20, 5, 22, 0x1b),
+            rd: 22,
+            data: 0xffff_ffff_ffff_ffff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 104,
+            instr: i_type(63, 0, 0, 23, 0x13),
+            rd: 23,
+            data: 63,
+            mem_write: None,
+        },
+        Expected {
+            pc: 108,
+            instr: r_type(0, 23, 21, 1, 24),
+            rd: 24,
+            data: 0x8000_0000_0000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 112,
+            instr: r_type(0, 23, 24, 5, 25),
+            rd: 25,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 116,
+            instr: r_type(0x20, 23, 24, 5, 26),
+            rd: 26,
+            data: 0xffff_ffff_ffff_ffff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 120,
+            instr: r_type_opcode(0, 23, 21, 1, 27, 0x3b),
+            rd: 27,
+            data: 0xffff_ffff_8000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 124,
+            instr: r_type_opcode(0, 23, 27, 5, 28, 0x3b),
+            rd: 28,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 128,
+            instr: r_type_opcode(0x20, 23, 27, 5, 29, 0x3b),
+            rd: 29,
+            data: 0xffff_ffff_ffff_ffff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 132,
+            instr: i_type(1, 1, 1, 30, 0x13),
+            rd: 30,
+            data: 10,
+            mem_write: None,
+        },
+        Expected {
+            pc: 136,
+            instr: i_type(1, 2, 5, 30, 0x13),
+            rd: 30,
+            data: 3,
+            mem_write: None,
+        },
+        Expected {
+            pc: 140,
+            instr: i_type(0x401, 13, 5, 30, 0x13),
+            rd: 30,
+            data: 0xffff_ffff_c000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 144,
+            instr: r_type(0, 1, 13, 2, 30),
+            rd: 30,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 148,
+            instr: r_type(0, 1, 13, 3, 30),
+            rd: 30,
+            data: 0,
+            mem_write: None,
+        },
+        Expected {
+            pc: 152,
+            instr: i_type(0, 13, 2, 30, 0x13),
+            rd: 30,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 156,
+            instr: i_type(-1, 0, 3, 30, 0x13),
+            rd: 30,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 160,
+            instr: b_type(8, 1, 13, 4),
+            rd: 0,
+            data: 0,
+            mem_write: None,
+        },
+        Expected {
+            pc: 168,
+            instr: b_type(8, 13, 1, 5),
+            rd: 0,
+            data: 0,
+            mem_write: None,
+        },
+        Expected {
+            pc: 176,
+            instr: b_type(8, 13, 1, 6),
+            rd: 0,
+            data: 0,
+            mem_write: None,
+        },
+        Expected {
+            pc: 184,
+            instr: b_type(8, 1, 13, 7),
+            rd: 0,
+            data: 0,
+            mem_write: None,
+        },
+        Expected {
+            pc: 192,
+            instr: s_type(0, 22, 0, 0),
+            rd: 0,
+            data: 0,
+            mem_write: Some((0, 0xffff_ffff_ffff_ffff, 0x01)),
+        },
+        Expected {
+            pc: 196,
+            instr: i_type(0, 0, 0, 30, 0x03),
+            rd: 30,
+            data: 0xffff_ffff_ffff_ffff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 200,
+            instr: i_type(0, 0, 4, 30, 0x03),
+            rd: 30,
+            data: 0x0000_0000_0000_00ff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 204,
+            instr: s_type(0, 15, 0, 1),
+            rd: 0,
+            data: 0,
+            mem_write: Some((0, 0xffff_ffff_ffff_fffe, 0x03)),
+        },
+        Expected {
+            pc: 208,
+            instr: i_type(0, 0, 1, 30, 0x03),
+            rd: 30,
+            data: 0xffff_ffff_ffff_fffe,
+            mem_write: None,
+        },
+        Expected {
+            pc: 212,
+            instr: i_type(0, 0, 5, 30, 0x03),
+            rd: 30,
+            data: 0x0000_0000_0000_fffe,
+            mem_write: None,
+        },
+        Expected {
+            pc: 216,
+            instr: s_type(0, 13, 0, 2),
+            rd: 0,
+            data: 0,
+            mem_write: Some((0, 0xffff_ffff_8000_0000, 0x0f)),
+        },
+        Expected {
+            pc: 220,
+            instr: i_type(0, 0, 2, 30, 0x03),
+            rd: 30,
+            data: 0xffff_ffff_8000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 224,
+            instr: i_type(0, 0, 6, 30, 0x03),
+            rd: 30,
+            data: 0x0000_0000_8000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 228,
+            instr: s_type(0, 17, 0, 3),
+            rd: 0,
+            data: 0,
+            mem_write: Some((0, 0xffff_fffe_0000_0000, 0xff)),
+        },
+        Expected {
+            pc: 232,
+            instr: i_type(0, 0, 3, 30, 0x03),
+            rd: 30,
+            data: 0xffff_fffe_0000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 236,
+            instr: i_type(1, 0, 0, 30, 0x13),
+            rd: 30,
+            data: 1,
+            mem_write: None,
+        },
+        Expected {
+            pc: 240,
+            instr: i_type(5, 30, 1, 30, 0x13),
+            rd: 30,
+            data: 32,
+            mem_write: None,
+        },
+        Expected {
+            pc: 244,
+            instr: i_type(1, 30, 0, 30, 0x13),
+            rd: 30,
+            data: 33,
+            mem_write: None,
+        },
+        Expected {
+            pc: 248,
             instr: i_type(0x55, 0, 0, 31, 0x13),
             rd: 31,
             data: 0x55,
             mem_write: None,
         },
         Expected {
-            pc: 84,
+            pc: 252,
             instr: 0x0000_0073,
             rd: 0,
             data: 0,
@@ -254,7 +521,7 @@ fn $function(
     let mut committed = 0_usize;
     let mut commit_cycles = Vec::new();
     let mut elapsed_cycles = 0_usize;
-    for cycle in 0..64 {
+    for cycle in 0..140 {
         let fetch_pc = $read_value(simulator, "pc");
         let fetched_instruction = expected
             .iter()
@@ -345,9 +612,21 @@ fn $function(
     {
         return Err(format!("{label}: dependent ALU forwarding did not sustain one commit per clock").into());
     }
-    if elapsed_cycles > 40 {
+    if commit_cycles[31..34]
+        .windows(2)
+        .any(|cycles| cycles[1] != cycles[0] + 1)
+    {
+        return Err(format!("{label}: pipelined shifts did not sustain one completion per clock").into());
+    }
+    if commit_cycles[54..56]
+        .windows(2)
+        .any(|cycles| cycles[1] != cycles[0] + 2)
+    {
+        return Err(format!("{label}: dependent shift-to-ALU latency was not exactly two clocks").into());
+    }
+    if elapsed_cycles > 120 {
         return Err(format!(
-            "{label}: architectural trace took {elapsed_cycles} clocks, expected at most 40"
+            "{label}: architectural trace took {elapsed_cycles} clocks, expected at most 120"
         )
         .into());
     }
@@ -355,7 +634,7 @@ fn $function(
         return Err(format!("{label}: final architectural signature is invalid").into());
     }
     println!(
-        "{label}: {} instructions in {elapsed_cycles} clocks ({:.3} CPI); dependent ALU forwarding CPI 1; signature x31=0x0000000000000055",
+        "{label}: {} instructions in {elapsed_cycles} clocks ({:.3} CPI); two-stage shifts and comparisons sustain one completion per clock and dependent consumers wait once; signature x31=0x0000000000000055",
         expected.len(),
         elapsed_cycles as f64 / expected.len() as f64,
     );
@@ -364,8 +643,123 @@ fn $function(
 };
 }
 
-define_verifier!(verify_rtl, value_rtl, Simulator);
+define_verifier!(
+    verify_interp,
+    value_interp,
+    celox::Simulator<celox::InterpBackend>
+);
 define_verifier!(verify_post_map, value_post_map, celox03::Simulator);
+
+fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
+    let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
+    let source = [
+        verify_riscv::core_source(project)?,
+        hardware_memory,
+        fs::read_to_string(project.join("src/HardwareCoreTestTop.veryl"))?,
+    ]
+    .join("\n");
+    let image = ElfImage::load(&project.join("build/rv64i-subset/memory.elf"))?;
+    let mut bytes = [0_u8; 4096];
+    let mut loaded = Vec::new();
+    for (address, byte) in image.load_bytes() {
+        let physical = match address & !0x7ff {
+            0 => usize::try_from(address & 0x7ff)?,
+            0x8000_0000 => 0x800 | usize::try_from(address & 0x7ff)?,
+            _ => {
+                return Err(
+                    format!("hardware RTL address 0x{address:016x} is out of range").into(),
+                );
+            }
+        };
+        bytes[physical] = byte;
+        loaded.push(physical);
+    }
+    loaded.sort_unstable();
+    loaded.dedup();
+
+    let mut simulator =
+        SimulatorBuilder::new(&source, "HardwareCoreTestTop").build_interpreter()?;
+    let clk = simulator.event("clk");
+    let clk_n = simulator.event("clk_n");
+    let rst_n = simulator.signal("rst_n");
+    let debug_write = simulator.signal("debug_write");
+    let debug_address = simulator.signal("debug_address");
+    let debug_data = simulator.signal("debug_data");
+    simulator.modify(|io| {
+        io.set(rst_n, 0_u8);
+        io.set(debug_write, 0_u8);
+        io.set(debug_address, 0_u32);
+        io.set(debug_data, 0_u8);
+    })?;
+    simulator.tick(clk_n)?;
+    simulator.tick(clk)?;
+    for address in loaded {
+        simulator.modify(|io| {
+            io.set(debug_write, 1_u8);
+            io.set(debug_address, address as u32);
+            io.set(debug_data, bytes[address]);
+        })?;
+        simulator.tick(clk_n)?;
+        simulator.tick(clk)?;
+    }
+    simulator.modify(|io| io.set(debug_write, 0_u8))?;
+    simulator.tick(clk_n)?;
+    simulator.tick(clk)?;
+    simulator.modify(|io| io.set(rst_n, 1_u8))?;
+
+    let mut trace = std::collections::VecDeque::with_capacity(20);
+    for cycle in 1..=4_000 {
+        simulator.tick(clk_n)?;
+        let store = (value_interp(&mut simulator, "data_we") != 0).then(|| {
+            (
+                value_interp(&mut simulator, "data_addr"),
+                value_interp(&mut simulator, "data_wdata"),
+                value_interp(&mut simulator, "data_wmask"),
+            )
+        });
+        simulator.tick(clk)?;
+        if value_interp(&mut simulator, "commit_valid") != 0 {
+            if trace.len() == trace.capacity() {
+                trace.pop_front();
+            }
+            trace.push_back((
+                value_interp(&mut simulator, "commit_pc"),
+                value_interp(&mut simulator, "commit_instr"),
+                value_interp(&mut simulator, "commit_rd"),
+                value_interp(&mut simulator, "commit_data"),
+            ));
+        }
+        if let Some((address, data, mask)) = store
+            && address == image.tohost
+            && data != 0
+        {
+            if data != 1 {
+                let recent = trace
+                    .iter()
+                    .map(|(pc, instr, rd, value)| {
+                        format!("  pc={pc:#06x} instr={instr:#010x} rd=x{rd} data={value:#018x}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "hardware-memory RTL failed: tohost={data} (test {}) at cycle {cycle}, mask={mask:#04x}\n{recent}",
+                    data >> 1
+                )
+                .into());
+            }
+            println!("Hardware-memory RTL: memory.elf PASS in {cycle} cycles");
+            return Ok(());
+        }
+    }
+    let recent = trace
+        .iter()
+        .map(|(pc, instr, rd, value)| {
+            format!("  pc={pc:#06x} instr={instr:#010x} rd=x{rd} data={value:#018x}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!("hardware-memory RTL timed out\n{recent}").into())
+}
 
 fn board_diagnostic_instruction(pc: u64) -> u32 {
     match pc {
@@ -381,7 +775,9 @@ fn board_diagnostic_instruction(pc: u64) -> u32 {
     }
 }
 
-fn verify_board_diagnostic(simulator: &mut Simulator) -> Result<(), Box<dyn Error>> {
+fn verify_board_diagnostic(
+    simulator: &mut celox::Simulator<celox::InterpBackend>,
+) -> Result<(), Box<dyn Error>> {
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
@@ -400,19 +796,19 @@ fn verify_board_diagnostic(simulator: &mut Simulator) -> Result<(), Box<dyn Erro
     let mut branch_commits = 0_u64;
     let mut elapsed_cycles = 0_usize;
     for cycle in 0..50_000 {
-        let fetch_pc = value_rtl(simulator, "pc");
+        let fetch_pc = value_interp(simulator, "pc");
         simulator.modify(|io| io.set(instruction, board_diagnostic_instruction(fetch_pc)))?;
         simulator.tick(clock)?;
         elapsed_cycles = cycle + 1;
 
-        if value_rtl(simulator, "commit_valid") == 0 {
+        if value_interp(simulator, "commit_valid") == 0 {
             continue;
         }
-        match value_rtl(simulator, "commit_pc") {
+        match value_interp(simulator, "commit_pc") {
             0x08 => {
                 delay_addi_commits += 1;
                 let expected = 4096 - delay_addi_commits;
-                let observed = value_rtl(simulator, "commit_data");
+                let observed = value_interp(simulator, "commit_data");
                 if observed != expected {
                     return Err(format!(
                         "board diagnostic: delay ADDI {delay_addi_commits} expected x1={expected}, got {observed}"
@@ -423,7 +819,7 @@ fn verify_board_diagnostic(simulator: &mut Simulator) -> Result<(), Box<dyn Erro
             0x0c => branch_commits += 1,
             _ => {}
         }
-        let commit_pc = value_rtl(simulator, "commit_pc");
+        let commit_pc = value_interp(simulator, "commit_pc");
         if commit_pc != 0 && commit_pc != 0x10 {
             continue;
         }
@@ -438,7 +834,7 @@ fn verify_board_diagnostic(simulator: &mut Simulator) -> Result<(), Box<dyn Erro
             ("commit_rd", 31),
             ("commit_data", x31_commits),
         ] {
-            let observed = value_rtl(simulator, signal);
+            let observed = value_interp(simulator, signal);
             if observed != expected {
                 return Err(format!(
                     "board diagnostic: {signal} mismatch on x31 update {x31_commits}: expected 0x{expected:016x}, got 0x{observed:016x}"
@@ -452,7 +848,7 @@ fn verify_board_diagnostic(simulator: &mut Simulator) -> Result<(), Box<dyn Erro
     }
 
     if x31_commits != 2
-        || value_rtl(simulator, "debug_x31") != 2
+        || value_interp(simulator, "debug_x31") != 2
         || delay_addi_commits != 4096
         || branch_commits != 4096
     {
@@ -474,11 +870,13 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     let write_enable = simulator.signal("write_enable");
     let write_address = simulator.signal("write_address");
     let write_data = simulator.signal("write_data");
+    let read_enable = simulator.signal("read_enable");
     let read_address_a = simulator.signal("read_address_a");
     let read_address_b = simulator.signal("read_address_b");
 
     simulator.modify(|io| {
         io.set(write_enable, 1_u8);
+        io.set(read_enable, 1_u8);
         io.set(write_address, 5_u8);
         io.set(write_data, 0x0123_4567_89ab_cdef_u64);
         io.set(read_address_a, 0_u8);
@@ -547,7 +945,7 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     let mapped = map_to_ecp5_with_options(
         &synthesized.netlist,
         MappingOptions {
-            timing_goal_mhz: 150,
+            timing_goal_mhz: 126,
             ..MappingOptions::default()
         },
     )?;
@@ -562,7 +960,7 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
         );
     }
     println!(
-        "Register file @ 150 MHz: dual-read behavior passed; 2 logical memories -> {block_rams} DP16KD cells, data={} -> {} ps, overall={} -> {} ps",
+        "Register file @ 126 MHz: dual-read behavior passed; 2 logical memories -> {block_rams} DP16KD cells, data={} -> {} ps, overall={} -> {} ps",
         mapped.retiming().original_period_ps,
         mapped.retiming().selected_period_ps,
         mapped.retiming().original_overall_period_ps,
@@ -633,22 +1031,32 @@ fn mapped_critical_sinks(cells: &[Ecp5Cell]) -> Vec<(usize, String)> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args().collect::<Vec<_>>();
+    let rtl_only = arguments.iter().any(|argument| argument == "--rtl-only");
     let map_only = arguments.iter().any(|argument| argument == "--map-only");
     let post_map = arguments.iter().any(|argument| argument == "--post-map");
     let register_file_only = arguments
         .iter()
         .any(|argument| argument == "--regfile-only");
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--hardware-memory-rtl")
+    {
+        return verify_hardware_memory_rtl(project);
+    }
     verify_register_file(project)?;
     if register_file_only {
         return Ok(());
     }
     let core_source = verify_riscv::core_source(project)?;
 
-    let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
-    verify_rtl(&mut rtl, "Celox RTL simulation")?;
-    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
+    let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_interpreter()?;
+    verify_interp(&mut rtl, "Celox RTL interpreter")?;
+    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core").build_interpreter()?;
     verify_board_diagnostic(&mut board_rtl)?;
+    if rtl_only {
+        return Ok(());
+    }
 
     let design = analyze_and_lower(&core_source, "rica_riscv", "Core")?;
     let synthesized = synthesize(&design)?;
@@ -656,7 +1064,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mapped = map_to_ecp5_with_options(
         &synthesized.netlist,
         MappingOptions {
-            timing_goal_mhz: 150,
+            timing_goal_mhz: 126,
             ..MappingOptions::default()
         },
     )?;
@@ -666,7 +1074,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "Struo ECP5 map @ 150 MHz: {} nodes, {} registers, {} cells, data={} -> {} ps, overall={} -> {} ps, LUT depth={} -> {}, critical registers={} -> {}, retimed={}, map={map_elapsed:?}",
+        "Struo ECP5 map @ 126 MHz: {} nodes, {} registers, {} cells, data={} -> {} ps, overall={} -> {} ps, LUT depth={} -> {}, critical registers={} -> {}, retimed={}, map={map_elapsed:?}",
         synthesized.netlist.nodes().len(),
         synthesized.netlist.registers().len(),
         mapped.cells().len(),

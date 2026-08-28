@@ -1,6 +1,6 @@
 {
   "reference_clock_port": "clk",
-  "output_clock_port": "clk_150",
+  "output_clock_port": "clk_126",
   "locked_port": "pll_locked",
   "fabric_output": "CLKOP",
   "feedback_output": "CLKOP",
@@ -15,19 +15,19 @@
     "OUTDIVIDER_MUXD": "DIVD",
     "CLKI_DIV": "2",
     "CLKOP_ENABLE": "ENABLED",
-    "CLKOP_DIV": "4",
-    "CLKOP_CPHASE": "1",
+    "CLKOP_DIV": "5",
+    "CLKOP_CPHASE": "2",
     "CLKOP_FPHASE": "0",
     "CLKOS_ENABLE": "DISABLED",
     "CLKOS_DIV": "1",
     "CLKOS_CPHASE": "0",
     "CLKOS_FPHASE": "0",
     "FEEDBK_PATH": "CLKOP",
-    "CLKFB_DIV": "25"
+    "CLKFB_DIV": "21"
   },
   "attributes": {
     "FREQUENCY_PIN_CLKI": "12",
-    "FREQUENCY_PIN_CLKOP": "150",
+    "FREQUENCY_PIN_CLKOP": "126",
     "ICP_CURRENT": "12",
     "LPF_RESISTOR": "8",
     "MFG_ENABLE_FILTEROPAMP": "1",
