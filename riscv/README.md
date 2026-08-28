@@ -39,7 +39,7 @@ and JALR redirects.
 
 For the LFE5UM5G-85F speed-8 build, Struo reports a 6.560 ns mapped estimate.
 Texo revision `0cf4b8a` routes the complete EVN wrapper at the 6.667 ns target
-with +0.002 ns setup slack and +0.290 ns hold slack, covering all 2781 modeled
+with +0.013 ns setup slack and +0.290 ns hold slack, covering all 2781 modeled
 endpoints. Routing the earlier eight-bit-count `Top` mapping with nextpnr-ecp5
 0.6 produced 148.92, 159.36, 150.74, and 155.30 MHz for seeds 1 through 4:
 three of four seeds close at 150 MHz. The Texo result is the board-level
@@ -95,15 +95,20 @@ cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- Top
 ```
 
-The board wrapper binds the EVN's 12 MHz reference to a 150 MHz EHXPLLL and
-runs a small ROM program. D5 through D10 show the low six bits of x31 as an
-active-low binary count, D11 toggles from a divided retired-instruction count,
-and D12 stays lit while the PLL is locked. These independently expose firmware
-progress, pipeline commit progress, and clock/reset status. `Top` registers the
-x31 polarity conversion, so its human-visible display trails by one 150 MHz
-cycle without putting those LED pads directly on the CPU's combinational
-output path. The PLL lock alone releases CPU reset; the generic SW4 input is
-not required for autonomous bring-up.
+The board wrapper binds the EVN's 12 MHz reference to a 150 MHz EHXPLLL. Its
+ROM increments x31 immediately after reset and then enters a delay/branch loop
+before the next increment. D5 through D10 show x31[5:0] as an active-low binary
+count, D11 toggles from a separately divided retired-instruction count, and D12
+stays lit while the PLL is locked.
+These independently expose register writeback, pipeline commit progress, and
+clock/reset status. In particular, D5 must light almost immediately; later
+binary-count changes additionally prove that the delay branch and redirect
+completed. The RTL regression uses the same ROM control-flow shape with 4096
+delay iterations and requires every ADDI/BNE pair to retire before x31 may
+advance. `Top` registers the x31 polarity conversion, so its display
+trails by one 150 MHz cycle without putting those LED pads directly on the
+CPU's combinational output path. The PLL lock alone releases CPU reset; the
+generic SW4 input is not required for autonomous bring-up.
 Build and program it with the pinned Texo revision using:
 
 ```sh

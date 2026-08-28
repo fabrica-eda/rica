@@ -367,6 +367,106 @@ fn $function(
 define_verifier!(verify_rtl, value_rtl, Simulator);
 define_verifier!(verify_post_map, value_post_map, celox03::Simulator);
 
+fn board_diagnostic_instruction(pc: u64) -> u32 {
+    match pc {
+        0x00 => i_type(1, 0, 0, 31, 0x13),
+        // The board uses a larger LUI delay. Keeping the same instruction and
+        // control-flow shape with 4096 iterations makes it practical in RTL.
+        0x04 => u_type(1, 1, 0x37),
+        0x08 => i_type(-1, 1, 0, 1, 0x13),
+        0x0c => b_type(-4, 0, 1, 1),
+        0x10 => i_type(1, 31, 0, 31, 0x13),
+        0x14 => j_type(-16, 0),
+        _ => 0x0000_0073,
+    }
+}
+
+fn verify_board_diagnostic(simulator: &mut Simulator) -> Result<(), Box<dyn Error>> {
+    let clock = simulator.event("clk");
+    let reset = simulator.signal("rst_n");
+    let instruction = simulator.signal("instr");
+    let data_rdata = simulator.signal("data_rdata");
+
+    simulator.modify(|io| {
+        io.set(reset, 0_u8);
+        io.set(instruction, 0x0000_0013_u32);
+        io.set(data_rdata, 0_u64);
+    })?;
+    simulator.tick(clock)?;
+    simulator.modify(|io| io.set(reset, 1_u8))?;
+
+    let mut x31_commits = 0_u64;
+    let mut delay_addi_commits = 0_u64;
+    let mut branch_commits = 0_u64;
+    let mut elapsed_cycles = 0_usize;
+    for cycle in 0..50_000 {
+        let fetch_pc = value_rtl(simulator, "pc");
+        simulator.modify(|io| io.set(instruction, board_diagnostic_instruction(fetch_pc)))?;
+        simulator.tick(clock)?;
+        elapsed_cycles = cycle + 1;
+
+        if value_rtl(simulator, "commit_valid") == 0 {
+            continue;
+        }
+        match value_rtl(simulator, "commit_pc") {
+            0x08 => {
+                delay_addi_commits += 1;
+                let expected = 4096 - delay_addi_commits;
+                let observed = value_rtl(simulator, "commit_data");
+                if observed != expected {
+                    return Err(format!(
+                        "board diagnostic: delay ADDI {delay_addi_commits} expected x1={expected}, got {observed}"
+                    )
+                    .into());
+                }
+            }
+            0x0c => branch_commits += 1,
+            _ => {}
+        }
+        let commit_pc = value_rtl(simulator, "commit_pc");
+        if commit_pc != 0 && commit_pc != 0x10 {
+            continue;
+        }
+        x31_commits += 1;
+        let expected_instruction = if commit_pc == 0 {
+            i_type(1, 0, 0, 31, 0x13)
+        } else {
+            i_type(1, 31, 0, 31, 0x13)
+        };
+        for (signal, expected) in [
+            ("commit_instr", u64::from(expected_instruction)),
+            ("commit_rd", 31),
+            ("commit_data", x31_commits),
+        ] {
+            let observed = value_rtl(simulator, signal);
+            if observed != expected {
+                return Err(format!(
+                    "board diagnostic: {signal} mismatch on x31 update {x31_commits}: expected 0x{expected:016x}, got 0x{observed:016x}"
+                )
+                .into());
+            }
+        }
+        if x31_commits == 2 {
+            break;
+        }
+    }
+
+    if x31_commits != 2
+        || value_rtl(simulator, "debug_x31") != 2
+        || delay_addi_commits != 4096
+        || branch_commits != 4096
+    {
+        return Err(format!(
+            "board diagnostic: expected one complete 4096-iteration delay before the second x31 update; observed x31={x31_commits}, ADDI={delay_addi_commits}, BNE={branch_commits} in {elapsed_cycles} clocks"
+        )
+        .into());
+    }
+    println!(
+        "Board diagnostic RTL: x31 advanced 0 -> 1 -> 2 through the ADDI/BNE/JAL loop in {elapsed_cycles} clocks"
+    );
+    Ok(())
+}
+
 fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     let source = fs::read_to_string(project.join("src/RegisterFile.veryl"))?;
     let mut simulator = SimulatorBuilder::new(&source, "RegisterFile").build_native()?;
@@ -547,6 +647,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
     verify_rtl(&mut rtl, "Celox RTL simulation")?;
+    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
+    verify_board_diagnostic(&mut board_rtl)?;
 
     let design = analyze_and_lower(&core_source, "rica_riscv", "Core")?;
     let synthesized = synthesize(&design)?;

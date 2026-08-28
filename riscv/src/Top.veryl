@@ -53,11 +53,12 @@ module Top (
     // them with one EHXPLLL using pll-12-to-150.json before placement.
     assign core_rst_n = pll_locked;
 
-    // D5-D10 show the active-low x31 count. D11 divides retired instructions
-    // into a human-visible commit heartbeat, while D12 is an active-low
-    // PLL-lock indicator. Clock/reset, pipeline progress, and firmware progress
-    // are therefore independently visible. The x31 display trails by one CPU
-    // clock and stays out of the CPU's combinational timing cone.
+    // D5-D10 show the active-low low six bits of the x31 count.
+    // D11 independently divides retired instructions into a commit heartbeat,
+    // while D12 is an active-low PLL-lock indicator. Clock/reset, pipeline
+    // progress, and register writeback are therefore independently visible.
+    // The x31 display trails by one CPU clock and stays out of the CPU's
+    // combinational timing cone.
     always_ff (clk_150, core_rst_n) {
         if_reset {
             commit_count_q = 25'h000_0000;
@@ -71,12 +72,12 @@ module Top (
     }
 
     always_comb {
-        // At 150 MHz, x31 advances several times per second. A moving binary
-        // count proves that the PLL, instruction flow, branch redirect, and
-        // integer writeback path are all alive on the board.
+        // Initialize x31 to one before entering the delay loop. D5 therefore
+        // lights immediately after reset even if forwarding or redirect is
+        // broken; the PC=0 instruction is not repeated by the outer loop.
         case core_pc {
-            64'h0000_0000_0000_0000: instruction = 32'h0000_0f93; // addi x31, x0, 0
-            64'h0000_0000_0000_0004: instruction = 32'h0080_00b7; // lui  x1, 0x800
+            64'h0000_0000_0000_0000: instruction = 32'h0010_0f93; // addi x31, x0, 1
+            64'h0000_0000_0000_0004: instruction = 32'h0040_00b7; // lui  x1, 0x400
             64'h0000_0000_0000_0008: instruction = 32'hfff0_8093; // addi x1, x1, -1
             64'h0000_0000_0000_000c: instruction = 32'hfe00_9ee3; // bne  x1, x0, -4
             64'h0000_0000_0000_0010: instruction = 32'h001f_8f93; // addi x31, x31, 1

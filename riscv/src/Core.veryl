@@ -291,7 +291,10 @@ module Core (
         }
         ex_redirect_valid     = ex_valid_q && ex_link_q;
         branch_redirect_valid = mem_valid_q && mem_is_branch_q && mem_branch_taken;
-        redirect_valid        = ex_redirect_valid || branch_redirect_valid;
+        // Applying an older redirect takes one extra cycle. Control transfers
+        // still present in the younger pipeline during that cycle are
+        // wrong-path work and must not enqueue another redirect.
+        redirect_valid        = !redirect_pending_q && (ex_redirect_valid || branch_redirect_valid);
         if ex_redirect_clear_lsb_q {
             ex_redirect_target = redirect_sum & 32'hffff_fffe;
         } else {
