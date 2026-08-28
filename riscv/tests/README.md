@@ -39,7 +39,7 @@ The same ELF contract is supported by the JTAG-I2C hardware harness:
 cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-tests
 ```
 
-The default command programs `build/riscv-hardware-test-126.bit` and then runs
+The default command programs `build/riscv-hardware-test-120.bit` and then runs
 all bundled tests. `--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
 execution window. Positional ELF paths select individual or external tests.
@@ -50,7 +50,7 @@ The runner writes generated SVF files under `build/hardware-rv64`. A successful
 result covers the entire board path: JTAGG ER1, I2C register transport, BRAM
 loading, PLL/reset, RV64 execution, and `tohost` readback. All five bundled
 tests, including the directed `SW; LD; LD; BNE` memory regression, pass on the
-EVN at 126 MHz.
+EVN at 120 MHz.
 
 ## Architectural test integration
 

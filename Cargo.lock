@@ -3469,7 +3469,7 @@ dependencies = [
 [[package]]
 name = "struo-celox"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 dependencies = [
  "celox 0.3.1",
  "struo-ir",
@@ -3479,7 +3479,7 @@ dependencies = [
 [[package]]
 name = "struo-formal"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 dependencies = [
  "struo-ir",
 ]
@@ -3487,7 +3487,7 @@ dependencies = [
 [[package]]
 name = "struo-frontend-veryl"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 dependencies = [
  "struo-rtl",
  "veryl-analyzer",
@@ -3498,22 +3498,22 @@ dependencies = [
 [[package]]
 name = "struo-ir"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 
 [[package]]
 name = "struo-rtl"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 
 [[package]]
 name = "struo-sim"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 
 [[package]]
 name = "struo-synth"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 dependencies = [
  "struo-ir",
  "struo-rtl",
@@ -3522,7 +3522,7 @@ dependencies = [
 [[package]]
 name = "struo-target-ecp5"
 version = "0.1.1"
-source = "git+https://github.com/fabrica-eda/struo.git?rev=89e3fa16deeb10d3eddd95708f4056de3b893d9a#89e3fa16deeb10d3eddd95708f4056de3b893d9a"
+source = "git+https://github.com/fabrica-eda/struo.git?rev=e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee#e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee"
 dependencies = [
  "serde",
  "serde_json",
@@ -3656,7 +3656,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 [[package]]
 name = "texo-cli"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "clap",
  "serde",
@@ -3680,7 +3680,7 @@ dependencies = [
 [[package]]
 name = "texo-flow"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "texo-model",
  "texo-pnr",
@@ -3692,7 +3692,7 @@ dependencies = [
 [[package]]
 name = "texo-model"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "serde",
 ]
@@ -3700,7 +3700,7 @@ dependencies = [
 [[package]]
 name = "texo-pnr"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "texo-model",
 ]
@@ -3708,7 +3708,7 @@ dependencies = [
 [[package]]
 name = "texo-struo"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "celox 0.3.1",
  "struo-celox",
@@ -3720,7 +3720,7 @@ dependencies = [
 [[package]]
 name = "texo-target-ecp5"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "postcard",
  "serde",
@@ -3732,7 +3732,7 @@ dependencies = [
 [[package]]
 name = "texo-timing"
 version = "0.1.5"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=81d43358f5e30530fccb5a8b0f9bd7a75e77299c#81d43358f5e30530fccb5a8b0f9bd7a75e77299c"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=accfdb5759881f5bf9c4016be8c87783ce77da78#accfdb5759881f5bf9c4016be8c87783ce77da78"
 dependencies = [
  "texo-model",
  "texo-pnr",

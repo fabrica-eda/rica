@@ -12,6 +12,8 @@ use verify_riscv::ElfImage;
 const WINDOW_START: u8 = 0x20;
 const WINDOW_LENGTH: usize = 0xe0;
 const DEFAULT_RUN_TCK: usize = 1_000_000;
+type MemoryRange = (usize, usize);
+type HardwareMemoryImage = ([u8; 4096], Vec<MemoryRange>);
 
 fn checked_command(command: &mut Command) -> Result<(), Box<dyn Error>> {
     let printable = format!("{command:?}");
@@ -194,6 +196,12 @@ impl SvfI2c {
     }
 
     fn write_registers(&mut self, address: u8, data: &[u8]) {
+        writeln!(
+            self.text,
+            "! WRITE register 0x{address:02x}, {} byte(s)",
+            data.len()
+        )
+        .unwrap();
         self.start();
         self.write_byte(0x42 << 1);
         self.write_byte(address);
@@ -204,6 +212,12 @@ impl SvfI2c {
     }
 
     fn expect_registers(&mut self, address: u8, expected: &[(u8, u8)]) {
+        writeln!(
+            self.text,
+            "! READ register 0x{address:02x}, {} byte(s)",
+            expected.len()
+        )
+        .unwrap();
         self.start();
         self.write_byte(0x42 << 1);
         self.write_byte(address);
@@ -229,19 +243,19 @@ fn physical_index(address: u64) -> Result<usize, Box<dyn Error>> {
     }
 }
 
-fn memory_image(image: &ElfImage) -> Result<([u8; 4096], Vec<(usize, usize)>), Box<dyn Error>> {
+fn memory_image(image: &ElfImage) -> Result<HardwareMemoryImage, Box<dyn Error>> {
     let mut bytes = [0_u8; 4096];
     let mut owners = BTreeMap::<usize, u64>::new();
     let mut maxima = [None::<usize>; 2];
     for (address, byte) in image.load_bytes() {
         let index = physical_index(address)?;
-        if let Some(previous) = owners.insert(index, address) {
-            if previous != address {
-                return Err(format!(
-                    "hardware RAM alias: 0x{previous:016x} and 0x{address:016x} both map to 0x{index:03x}"
-                )
-                .into());
-            }
+        if let Some(previous) = owners.insert(index, address)
+            && previous != address
+        {
+            return Err(format!(
+                "hardware RAM alias: 0x{previous:016x} and 0x{address:016x} both map to 0x{index:03x}"
+            )
+            .into());
         }
         bytes[index] = byte;
         let half = index >> 11;
@@ -296,7 +310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
     let mut run_tck = DEFAULT_RUN_TCK;
     let mut program = true;
-    let mut bitstream = project.join("build/riscv-hardware-test-126.bit");
+    let mut bitstream = project.join("build/riscv-hardware-test-120.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

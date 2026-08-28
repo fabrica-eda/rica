@@ -52,7 +52,7 @@ module Top (
     );
 
     // clk_126 and pll_locked are logical PLL boundary ports. Texo replaces
-    // them with one EHXPLLL using pll-12-to-126.json before placement.
+    // them with one EHXPLLL using pll-12-to-120.json before placement.
     assign core_rst_n = pll_locked;
 
     // D5-D10 show the active-low low six bits of the x31 count.

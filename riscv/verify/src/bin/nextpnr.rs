@@ -11,11 +11,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let top = env::args().nth(1).unwrap_or_else(|| "Core".to_owned());
     let (output_name, timing_goal_mhz) = match top.as_str() {
-        "Core" => ("riscv-126.nextpnr.json", 126),
-        "Top" => ("riscv-top-126.nextpnr.json", 126),
-        "HardwareTestTop" => ("riscv-hardware-test-126.nextpnr.json", 126),
+        "Core" => ("riscv-120.nextpnr.json", 120),
+        "Top" => ("riscv-top-120.nextpnr.json", 120),
+        "HardwareTestTop" => ("riscv-hardware-test-120.nextpnr.json", 120),
         // Keep the standalone ALU diagnostics at their intentionally harder
-        // 150 MHz target even though the integrated CPU now targets 126 MHz.
+        // 150 MHz target even though the integrated CPU now targets 120 MHz.
         "FullAluTimingTop" => ("alu-full-single-cycle-150.nextpnr.json", 150),
         "FunnelShiftTimingTop" => ("funnel-shift-single-cycle-150.nextpnr.json", 150),
         _ => {
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if top == "HardwareTestTop" {
         mapped.bind_jtagg(&JtaggBinding::with_prefix("jtag"))?;
         let pll: PllBinding =
-            serde_json::from_str(&fs::read_to_string(project.join("pll-12-to-126.json"))?)?;
+            serde_json::from_str(&fs::read_to_string(project.join("pll-12-to-120.json"))?)?;
         mapped.bind_pll(&pll)?;
     }
 
