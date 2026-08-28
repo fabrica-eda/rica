@@ -7,11 +7,13 @@ into the next EX operand produced an 8.72 ns mapped path. Removing forwarding
 met timing but inserted a bubble into every RAW-dependent ALU pair, which is
 not an acceptable CPU architecture.
 
-The implementation now computes a 16+16-bit carry-select result and captures
-arithmetic and logical results into dedicated bypass registers. Consumer
-metadata selects that registered result before the next ALU. Consecutive RAW
-ALU dependencies therefore retain CPI 1 without an ALU-to-ALU combinational
-recurrence. Only loads, whose value is not present in EX, stall once.
+The RV64 implementation now computes a low 32-bit sum and both possible high
+32-bit sums, then selects the high half with the low carry. Arithmetic and
+logical results are captured into dedicated bypass registers.
+Consumer metadata selects that registered result before the next ALU.
+Consecutive RAW ALU dependencies therefore retain CPI 1 without an
+ALU-to-ALU combinational recurrence. Only loads, whose value is not present in
+EX, stall once.
 
 ## Data-dependent flushes must be registered
 
@@ -21,10 +23,19 @@ flush every younger pipeline register in the same cycle routed at only
 following cycle squashes wrong-path EX/MEM valid bits and redirects fetch.
 This keeps branch-data fanout out of the register-enable network.
 
+## The board ROM must not share the next-PC path
+
+Driving the board instruction ROM directly from `fetch_base + fetch_offset`
+combined a 32-bit PC addition, ROM decode, and fetch-register input into one
+cycle. This became the full-wrapper critical path even after the ALU path was
+shortened. `fetch_pc_q` now terminates the next-PC addition before the ROM.
+The front end still presents and accepts one instruction address per clock;
+this register changes latency, not throughput.
+
 ## Synchronous memory latency must remain local
 
-The reusable `RegisterFile` infers two 32x32 1R1W memories so that two
-independent read ports can map to four ECP5 `DP16KD` blocks. Its synchronous
+The reusable `RegisterFile` infers two 32x64 1R1W memories so that two
+independent read ports can map to eight ECP5 `DP16KD` blocks. Its synchronous
 read latency is expected.
 
 That latency must be represented by pipeline state and forwarding/stall
@@ -42,9 +53,13 @@ solely because it meets a 6.667 ns period. Regressions must report at least:
 - load-use penalty
 - mapped resource counts and post-route timing
 
-The current core commits the 16-instruction mixed trace in 34 clocks and keeps
-the first eight dependent ALU/store instructions at one commit per clock. Its
-core-only speed-8 nextpnr result is 164.47 MHz. The retired 250 MHz design met
-timing while taking fifteen clocks per instruction; it remains in Texo as a
-physical-design regression precisely so this CPU is not optimized around that
-result.
+The current core commits the 20-instruction mixed trace in 39 clocks and keeps
+the first eight dependent ALU/store instructions at one commit per clock.
+Texo revision `0cf4b8a` closes the complete speed-8 EVN wrapper at 150 MHz with
+0.000 ns setup and +0.290 ns hold slack; a repeated run checks the same 2732
+endpoints and reproduces those slacks. The exact same mapping reaches 148.92,
+159.36, 150.74, and 155.30 MHz in nextpnr seeds 1 through 4. This seed spread
+remains a QoR concern, but it is no longer confused with the accepted Texo
+board run. The retired 250 MHz design met timing while taking fifteen clocks
+per instruction; it remains in Texo as a physical-design regression precisely
+so this CPU is not optimized around that result.

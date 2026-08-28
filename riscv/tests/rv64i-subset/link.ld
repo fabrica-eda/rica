@@ -5,7 +5,7 @@ SECTIONS
 {
     . = 0;
     .text : { *(.text.init) *(.text .text.*) }
-    . = ALIGN(4);
+    . = ALIGN(8);
     .rodata : { *(.rodata .rodata.*) }
     .data : { *(.data .data.*) }
     .tohost : { KEEP(*(.tohost)) }

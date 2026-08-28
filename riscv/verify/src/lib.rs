@@ -14,12 +14,26 @@ const CORE_SOURCES: [&str; 5] = [
     "Core.veryl",
 ];
 
-fn reset_trampoline(entry: u32) -> [u32; 2] {
-    let upper = entry.wrapping_add(0x800) & 0xffff_f000;
-    let lower = entry.wrapping_sub(upper) & 0xfff;
-    let lui_t0 = upper | (5 << 7) | 0x37;
-    let jalr_t0 = (lower << 20) | (5 << 15) | 0x67;
-    [lui_t0, jalr_t0]
+fn reset_trampoline(entry: u64) -> Result<Vec<u32>, String> {
+    if entry < 0x7fff_f800 {
+        let entry = entry as u32;
+        let upper = entry.wrapping_add(0x800) & 0xffff_f000;
+        let lower = entry.wrapping_sub(upper) & 0xfff;
+        return Ok(vec![
+            upper | (5 << 7) | 0x37,
+            (lower << 20) | (5 << 15) | 0x67,
+        ]);
+    }
+    if entry == 0x8000_0000 {
+        return Ok(vec![
+            0x4000_02b7, // lui t0, 0x40000
+            0x0052_82b3, // add t0, t0, t0
+            0x0002_8067, // jalr x0, 0(t0)
+        ]);
+    }
+    Err(format!(
+        "entry 0x{entry:016x} is outside the reset trampoline's implemented address range"
+    ))
 }
 
 pub fn core_source(project: &Path) -> Result<String, Box<dyn Error>> {
@@ -32,95 +46,124 @@ pub fn core_source(project: &Path) -> Result<String, Box<dyn Error>> {
 
 #[derive(Clone)]
 pub struct ElfImage {
-    memory: BTreeMap<u32, u8>,
-    pub tohost: u32,
+    memory: BTreeMap<u64, u8>,
+    pub tohost: u64,
 }
 
 impl ElfImage {
     pub fn load(path: &Path) -> Result<Self, Box<dyn Error>> {
         let bytes = fs::read(path)?;
         let elf = object::File::parse(bytes.as_slice())?;
-        if elf.architecture() != Architecture::Riscv32 {
-            return Err(format!("{} is not an RV32 ELF", path.display()).into());
+        if elf.architecture() != Architecture::Riscv64 {
+            return Err(format!("{} is not an RV64 ELF", path.display()).into());
         }
         if !elf.is_little_endian() {
             return Err(format!("{} is not little-endian", path.display()).into());
         }
         let mut memory = BTreeMap::new();
         for segment in elf.segments() {
-            let address = u32::try_from(segment.address())?;
-            for (offset, byte) in segment.data()?.iter().copied().enumerate() {
+            let address = segment.address();
+            let data = segment.data()?;
+            let end = address
+                .checked_add(u64::try_from(data.len())?)
+                .ok_or("ELF segment address overflow")?;
+            if end > 0x1_0000_0000 {
+                return Err(format!(
+                    "{} has a loadable segment outside Rica's 32-bit physical address space",
+                    path.display()
+                )
+                .into());
+            }
+            for (offset, byte) in data.iter().copied().enumerate() {
                 memory.insert(
                     address
-                        .checked_add(u32::try_from(offset)?)
+                        .checked_add(u64::try_from(offset)?)
                         .ok_or("ELF segment address overflow")?,
                     byte,
                 );
             }
         }
-        let entry = u32::try_from(elf.entry())?;
+        let entry = elf.entry();
         if entry & 3 != 0 {
             return Err(format!(
-                "{} has entry 0x{entry:08x}, which is not word-aligned",
+                "{} has entry 0x{entry:016x}, which is not word-aligned",
                 path.display()
             )
             .into());
         }
         if entry != 0 {
-            if (0..8).any(|address| memory.contains_key(&address)) {
+            let trampoline = reset_trampoline(entry)?;
+            let trampoline_bytes = trampoline.len() * 4;
+            if (0..u64::try_from(trampoline_bytes)?).any(|address| memory.contains_key(&address)) {
                 return Err(format!(
-                    "{} has entry 0x{entry:08x} but also occupies the reset trampoline at 0x00000000",
+                    "{} has entry 0x{entry:016x} but also occupies the reset trampoline at 0x00000000",
                     path.display()
                 )
                 .into());
             }
-            for (offset, byte) in reset_trampoline(entry)
+            for (offset, byte) in trampoline
                 .into_iter()
                 .flat_map(u32::to_le_bytes)
                 .enumerate()
             {
-                memory.insert(offset as u32, byte);
+                memory.insert(offset as u64, byte);
             }
         }
         let tohost = elf
             .symbols()
             .find(|symbol| symbol.name().ok() == Some("tohost"))
             .ok_or_else(|| format!("{} has no tohost symbol", path.display()))
-            .and_then(|symbol| {
-                u32::try_from(symbol.address()).map_err(|error| error.to_string())
-            })?;
+            .map(|symbol| symbol.address())?;
+        if tohost > u64::from(u32::MAX) {
+            return Err(format!(
+                "{} places tohost outside Rica's 32-bit physical address space",
+                path.display()
+            )
+            .into());
+        }
         Ok(Self { memory, tohost })
     }
 
-    fn read_word(&self, address: u32) -> u32 {
-        u32::from_le_bytes(std::array::from_fn(|offset| {
+    fn read_doubleword(&self, address: u64) -> u64 {
+        u64::from_le_bytes(std::array::from_fn(|offset| {
             self.memory
-                .get(&address.wrapping_add(offset as u32))
+                .get(&address.wrapping_add(offset as u64))
                 .copied()
                 .unwrap_or(0)
         }))
     }
 
-    fn write_word(&mut self, address: u32, value: u32) {
-        for (offset, byte) in value.to_le_bytes().into_iter().enumerate() {
+    fn read_instruction(&self, address: u64) -> u32 {
+        u32::from_le_bytes(std::array::from_fn(|offset| {
             self.memory
-                .insert(address.wrapping_add(offset as u32), byte);
+                .get(&address.wrapping_add(offset as u64))
+                .copied()
+                .unwrap_or(0)
+        }))
+    }
+
+    fn write_masked(&mut self, address: u64, value: u64, mask: u8) {
+        for (offset, byte) in value.to_le_bytes().into_iter().enumerate() {
+            if mask & (1 << offset) != 0 {
+                self.memory
+                    .insert(address.wrapping_add(offset as u64), byte);
+            }
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct Commit {
-    pc: u32,
+    pc: u64,
     instruction: u32,
     rd: u32,
-    data: u32,
+    data: u64,
 }
 
-fn value(simulator: &mut Simulator, name: &str) -> u32 {
+fn value(simulator: &mut Simulator, name: &str) -> u64 {
     simulator
         .get(simulator.signal(name))
-        .to_u32_digits()
+        .to_u64_digits()
         .first()
         .copied()
         .unwrap_or(0)
@@ -144,7 +187,7 @@ pub fn run_elf(
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
-        io.set(data_rdata, 0_u32);
+        io.set(data_rdata, 0_u64);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;
@@ -154,24 +197,30 @@ pub fn run_elf(
     for cycle in 1..=max_cycles {
         let fetch_pc = value(&mut simulator, "pc");
         let data_address = value(&mut simulator, "data_addr");
-        let store = (value(&mut simulator, "data_we") != 0)
-            .then(|| (data_address, value(&mut simulator, "data_wdata")));
-        let fetched_instruction = image.read_word(fetch_pc);
-        let memory_read_data = image.read_word(data_address);
+        let store = (value(&mut simulator, "data_we") != 0).then(|| {
+            (
+                data_address,
+                value(&mut simulator, "data_wdata"),
+                value(&mut simulator, "data_wmask") as u8,
+            )
+        });
+        let fetched_instruction = image.read_instruction(fetch_pc);
+        let memory_read_data = image.read_doubleword(data_address);
         simulator.modify(|io| {
             io.set(instruction, fetched_instruction);
             io.set(data_rdata, memory_read_data);
         })?;
         simulator.tick(clock)?;
 
-        if let Some((address, data)) = store {
-            if address & 3 != 0 {
+        if let Some((address, data, mask)) = store {
+            let alignment_mask = if mask == 0x0f { 3 } else { 7 };
+            if address & alignment_mask != 0 {
                 return Err(format!(
-                    "unaligned word store [0x{address:08x}] = 0x{data:08x} at cycle {cycle}"
+                    "unaligned store [0x{address:016x}]/0x{mask:02x} = 0x{data:016x} at cycle {cycle}"
                 )
                 .into());
             }
-            image.write_word(address, data);
+            image.write_masked(address, data, mask);
             if address == image.tohost && data != 0 {
                 if data == 1 {
                     return Ok(ElfRun {
@@ -180,7 +229,7 @@ pub fn run_elf(
                     });
                 }
                 return Err(format!(
-                    "self-check failed with tohost=0x{data:08x} (test {}) at cycle {cycle}\n{}",
+                    "self-check failed with tohost=0x{data:016x} (test {}) at cycle {cycle}\n{}",
                     data >> 1,
                     format_trace(&trace)
                 )
@@ -195,8 +244,8 @@ pub fn run_elf(
             }
             trace.push_back(Commit {
                 pc: value(&mut simulator, "commit_pc"),
-                instruction: value(&mut simulator, "commit_instr"),
-                rd: value(&mut simulator, "commit_rd"),
+                instruction: value(&mut simulator, "commit_instr") as u32,
+                rd: value(&mut simulator, "commit_rd") as u32,
                 data: value(&mut simulator, "commit_data"),
             });
         }
@@ -219,7 +268,7 @@ fn format_trace(trace: &VecDeque<Commit>) -> String {
     let mut output = String::from("recent commits:");
     for commit in trace {
         output.push_str(&format!(
-            "\n  pc=0x{:08x} instr=0x{:08x} rd=x{} data=0x{:08x}",
+            "\n  pc=0x{:016x} instr=0x{:08x} rd=x{} data=0x{:016x}",
             commit.pc, commit.instruction, commit.rd, commit.data
         ));
     }
@@ -231,14 +280,12 @@ mod tests {
     use super::reset_trampoline;
 
     #[test]
-    fn reset_trampoline_reaches_full_address_space() {
-        for entry in [0x0000_4000_u32, 0x7fff_fffc, 0x8000_0000, 0xffff_f000] {
-            let [lui, jalr] = reset_trampoline(entry);
-            let upper = lui & 0xffff_f000;
-            let lower = ((jalr as i32) >> 20) as u32;
-            assert_eq!(upper.wrapping_add(lower) & !1, entry);
-            assert_eq!(lui & 0x0000_0fff, (5 << 7) | 0x37);
-            assert_eq!(jalr & 0x000f_ffff, (5 << 15) | 0x67);
-        }
+    fn reset_trampoline_covers_local_and_act4_entry_points() {
+        let local = reset_trampoline(0x4000).unwrap();
+        assert_eq!(local, [0x0000_42b7, 0x0002_8067]);
+
+        let act4 = reset_trampoline(0x8000_0000).unwrap();
+        assert_eq!(act4, [0x4000_02b7, 0x0052_82b3, 0x0002_8067]);
+        assert!(reset_trampoline(0x1_0000_0000).is_err());
     }
 }

@@ -23,6 +23,17 @@ _start:
     andi x11, x10, 0x0f
     addi x12, x0, 5
     bne x11, x12, fail_6
+
+    # RV64 U-immediates and *W results are sign-extended to XLEN.
+    lui x13, 0x80000
+    addiw x14, x13, 0
+    bne x13, x14, fail_7
+    addiw x15, x13, -1
+    addw x16, x15, x15
+    addi x17, x0, -2
+    bne x16, x17, fail_8
+    subw x18, x16, x15
+    bne x18, x15, fail_9
     PASS
 
 fail_1: FAIL 1
@@ -31,3 +42,6 @@ fail_3: FAIL 3
 fail_4: FAIL 4
 fail_5: FAIL 5
 fail_6: FAIL 6
+fail_7: FAIL 7
+fail_8: FAIL 8
+fail_9: FAIL 9

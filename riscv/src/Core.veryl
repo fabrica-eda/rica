@@ -1,4 +1,4 @@
-/// Overlapped in-order RV32I-subset core for the 150 MHz implementation.
+/// Overlapped in-order RV64I-subset core for the 150 MHz implementation.
 ///
 /// Fetch/decode, synchronous register read, execute, memory, and writeback
 /// overlap. Consecutive dependent ALU instructions use a registered EX bypass
@@ -8,31 +8,36 @@ module Core (
     clk             : input  clock    ,
     rst_n           : input  reset    ,
     instr           : input  logic<32>,
-    data_rdata      : input  logic<32>,
-    pc              : output logic<32>,
-    data_addr       : output logic<32>,
-    data_wdata      : output logic<32>,
+    data_rdata      : input  logic<64>,
+    pc              : output logic<64>,
+    data_addr       : output logic<64>,
+    data_wdata      : output logic<64>,
+    data_wmask      : output logic<8> ,
     data_we         : output logic    ,
     halted          : output logic    ,
     commit_valid    : output logic    ,
-    commit_pc       : output logic<32>,
+    commit_pc       : output logic<64>,
     commit_instr    : output logic<32>,
     commit_rd       : output logic<5> ,
-    commit_data     : output logic<32>,
+    commit_data     : output logic<64>,
     commit_mem_we   : output logic    ,
-    commit_mem_addr : output logic<32>,
-    commit_mem_wdata: output logic<32>,
-    debug_x31       : output logic<32>,
+    commit_mem_addr : output logic<64>,
+    commit_mem_wdata: output logic<64>,
+    commit_mem_wmask: output logic<8> ,
+    debug_x31       : output logic<64>,
 ) {
-    // Keep the redirect base and the sequential offset in separate registers.
-    // The hot sequential path is then only offset + 4; a taken branch updates
-    // the mostly-static base instead of feeding a wide redirect/hold/increment
-    // mux back into every PC bit.
+    // Keep the redirect base, sequential offset, and instruction-memory address
+    // in separate registers. The next-PC addition therefore terminates before
+    // instruction decode while still presenting one fetch address per cycle.
+    // A taken branch updates the mostly-static base instead of feeding a wide
+    // redirect/hold/increment mux back into every PC bit.
+    // This implementation exposes a 32-bit physical address space while the
+    // architectural integer datapath and visible addresses remain XLEN-wide.
     var fetch_base_q  : logic<32>;
     var fetch_offset_q: logic<32>;
-    var fetch_pc      : logic<32>;
+    var fetch_pc_q    : logic<32>;
     var halted_q      : logic    ;
-    var debug_x31_q   : logic<32>;
+    var debug_x31_q   : logic<64>;
 
     var fd_valid_q: logic    ;
     var fd_pc_q   : logic<32>;
@@ -44,7 +49,7 @@ module Core (
     var rx_rs1_q          : logic<5> ;
     var rx_rs2_q          : logic<5> ;
     var rx_rd_q           : logic<5> ;
-    var rx_immediate_q    : logic<32>;
+    var rx_immediate_q    : logic<64>;
     var rx_alu_op_q       : logic<3> ;
     var rx_use_pc_q       : logic    ;
     var rx_use_immediate_q: logic    ;
@@ -52,15 +57,18 @@ module Core (
     var rx_use_rs2_q      : logic    ;
     var rx_write_enable_q : logic    ;
     var rx_is_load_q      : logic    ;
+    var rx_load_word_q    : logic    ;
     var rx_is_store_q     : logic    ;
+    var rx_store_word_q   : logic    ;
+    var rx_word_op_q      : logic    ;
     var rx_is_branch_q    : logic    ;
     var rx_branch_ne_q    : logic    ;
     var rx_is_jal_q       : logic    ;
     var rx_is_jalr_q      : logic    ;
     var rx_halt_q         : logic    ;
     var rx_stalled_q      : logic    ;
-    var rx_stall_data_a_q : logic<32>;
-    var rx_stall_data_b_q : logic<32>;
+    var rx_stall_data_a_q : logic<64>;
+    var rx_stall_data_b_q : logic<64>;
 
     var ex_valid_q             : logic    ;
     var ex_pc_q                : logic<32>;
@@ -69,20 +77,23 @@ module Core (
     var ex_alu_op_q            : logic<3> ;
     var ex_write_enable_q      : logic    ;
     var ex_is_load_q           : logic    ;
+    var ex_load_word_q         : logic    ;
     var ex_is_store_q          : logic    ;
+    var ex_store_word_q        : logic    ;
+    var ex_word_op_q           : logic    ;
     var ex_is_branch_q         : logic    ;
     var ex_branch_ne_q         : logic    ;
     var ex_link_q              : logic    ;
     var ex_halt_q              : logic    ;
-    var ex_operand_a_q         : logic<32>;
-    var ex_operand_b_q         : logic<32>;
-    var ex_store_data_q        : logic<32>;
+    var ex_operand_a_q         : logic<64>;
+    var ex_operand_b_q         : logic<64>;
+    var ex_store_data_q        : logic<64>;
     var ex_redirect_base_q     : logic<32>;
     var ex_redirect_offset_q   : logic<32>;
     var ex_redirect_clear_lsb_q: logic    ;
     struct BypassState {
-        arithmetic  : logic<32>,
-        logic_result: logic<32>,
+        arithmetic  : logic<64>,
+        logic_result: logic<64>,
         use_logic   : logic    ,
         operand_a   : logic    ,
         operand_b   : logic    ,
@@ -97,13 +108,19 @@ module Core (
     var mem_rd_q          : logic<5> ;
     var mem_write_enable_q: logic    ;
     var mem_is_load_q     : logic    ;
+    var mem_load_word_q   : logic    ;
     var mem_is_store_q    : logic    ;
+    var mem_store_word_q  : logic    ;
+    var mem_is_branch_q       : logic    ;
+    var mem_branch_ne_q       : logic    ;
+    var mem_branch_equal_q    : logic<4> ;
+    var mem_redirect_target_q: logic<32>;
     var mem_halt_q        : logic    ;
-    var mem_result_q      : logic<32>;
-    var mem_logic_result_q: logic<32>;
+    var mem_result_q      : logic<64>;
+    var mem_logic_result_q: logic<64>;
     var mem_use_logic_q   : logic    ;
     var mem_address_q     : logic<32>;
-    var mem_wdata_q       : logic<32>;
+    var mem_wdata_q       : logic<64>;
 
     var wb_valid_q       : logic    ;
     var wb_pc_q          : logic<32>;
@@ -111,32 +128,39 @@ module Core (
     var wb_rd_q          : logic<5> ;
     var wb_write_enable_q: logic    ;
     var wb_halt_q        : logic    ;
-    var wb_result_q      : logic<32>;
+    var wb_result_q      : logic<64>;
     var wb_mem_we_q      : logic    ;
     var wb_mem_addr_q    : logic<32>;
-    var wb_mem_wdata_q   : logic<32>;
+    var wb_mem_wdata_q   : logic<64>;
+    var wb_mem_wmask_q   : logic<8> ;
 
     var rf_write_enable: logic    ;
-    var rf_read_data_a : logic<32>;
-    var rf_read_data_b : logic<32>;
+    var rf_read_data_a : logic<64>;
+    var rf_read_data_b : logic<64>;
 
-    var mem_forward_data   : logic<32>;
-    var forwarded_rs1      : logic<32>;
-    var forwarded_rs2      : logic<32>;
-    var rx_operand_a       : logic<32>;
-    var rx_operand_b       : logic<32>;
-    var alu_operand_a      : logic<32>;
-    var alu_operand_b      : logic<32>;
-    var bypass_data        : logic<32>;
-    var execute_store_data : logic<32>;
+    var mem_forward_data   : logic<64>;
+    var mem_load_data      : logic<64>;
+    var forwarded_rs1      : logic<64>;
+    var forwarded_rs2      : logic<64>;
+    var rx_operand_a       : logic<64>;
+    var rx_operand_b       : logic<64>;
+    var alu_operand_a      : logic<64>;
+    var alu_operand_b      : logic<64>;
+    var bypass_data        : logic<64>;
+    var execute_store_data : logic<64>;
     var ex_bypass_hit_rs1  : logic    ;
     var ex_bypass_hit_rs2  : logic    ;
-    var mem_selected_result: logic<32>;
+    var mem_selected_result: logic<64>;
     var redirect_sum       : logic<32>;
-    var branch_taken       : logic    ;
-    var redirect_valid     : logic    ;
-    var redirect_target    : logic<32>;
+    var mem_branch_equal   : logic    ;
+    var mem_branch_taken   : logic    ;
+    var ex_redirect_valid    : logic    ;
+    var branch_redirect_valid: logic    ;
+    var redirect_valid       : logic    ;
+    var ex_redirect_target   : logic<32>;
+    var redirect_target      : logic<32>;
     var redirect_pending_q : logic    ;
+    var redirect_flush_wb_q: logic    ;
     var redirect_target_q  : logic<32>;
     var execution_hazard   : logic    ;
     var stop_frontend      : logic    ;
@@ -177,8 +201,14 @@ module Core (
             mem_selected_result = mem_result_q;
         }
 
+        if mem_load_word_q {
+            mem_load_data = {data_rdata[31] repeat 32, data_rdata[31:0]};
+        } else {
+            mem_load_data = data_rdata;
+        }
+
         if mem_is_load_q {
-            mem_forward_data = data_rdata;
+            mem_forward_data = mem_load_data;
         } else {
             mem_forward_data = mem_selected_result;
         }
@@ -238,6 +268,7 @@ module Core (
 
         execute_bus.alu_op    = ex_alu_op_q;
         execute_bus.link      = ex_link_q;
+        execute_bus.word_op   = ex_word_op_q;
         execute_bus.operand_a = alu_operand_a;
         execute_bus.operand_b = alu_operand_b;
         if ex_bypass_q.store_data {
@@ -246,30 +277,42 @@ module Core (
             execute_store_data = ex_store_data_q;
         }
 
-        if ex_branch_ne_q {
-            branch_taken = alu_operand_a != alu_operand_b;
+        mem_branch_equal = mem_branch_equal_q == 4'b1111;
+        if mem_branch_ne_q {
+            mem_branch_taken = !mem_branch_equal;
         } else {
-            branch_taken = alu_operand_a == alu_operand_b;
+            mem_branch_taken = mem_branch_equal;
         }
         if ex_bypass_q.redirect {
-            redirect_sum = bypass_data + ex_redirect_offset_q;
+            redirect_sum = bypass_data[31:0] + ex_redirect_offset_q;
         } else {
             redirect_sum = ex_redirect_base_q + ex_redirect_offset_q;
         }
-        redirect_valid = ex_valid_q && (ex_link_q || (ex_is_branch_q && branch_taken));
+        ex_redirect_valid     = ex_valid_q && ex_link_q;
+        branch_redirect_valid = mem_valid_q && mem_is_branch_q && mem_branch_taken;
+        redirect_valid        = ex_redirect_valid || branch_redirect_valid;
         if ex_redirect_clear_lsb_q {
-            redirect_target = redirect_sum & 32'hffff_fffe;
+            ex_redirect_target = redirect_sum & 32'hffff_fffe;
         } else {
-            redirect_target = redirect_sum;
+            ex_redirect_target = redirect_sum;
+        }
+        if branch_redirect_valid {
+            redirect_target = mem_redirect_target_q;
+        } else {
+            redirect_target = ex_redirect_target;
         }
         execution_hazard = rx_valid_q && ex_valid_q && ex_write_enable_q && ex_is_load_q && (ex_rd_q != 5'd0)
             && ((rx_use_rs1_q && (rx_rs1_q == ex_rd_q)) || (rx_use_rs2_q && (rx_rs2_q == ex_rd_q)));
         stop_frontend    = rx_valid_q && rx_halt_q;
 
-        fetch_pc   = fetch_base_q + fetch_offset_q;
-        pc         = fetch_pc;
+        pc         = fetch_pc_q;
         data_addr  = mem_address_q;
         data_wdata = mem_wdata_q;
+        if mem_store_word_q {
+            data_wmask = 8'h0f;
+        } else {
+            data_wmask = 8'hff;
+        }
         data_we    = mem_valid_q && mem_is_store_q;
         halted     = halted_q;
         debug_x31  = debug_x31_q;
@@ -278,24 +321,26 @@ module Core (
 
     always_ff (clk, rst_n) {
         if_reset {
-            fetch_base_q       = 32'h0000_0000;
-            fetch_offset_q     = 32'h0000_0000;
+            fetch_base_q       = 64'h0000_0000_0000_0000;
+            fetch_offset_q     = 32'd4;
+            fetch_pc_q         = 64'h0000_0000_0000_0000;
             halted_q           = 1'b0;
-            debug_x31_q        = 32'h0000_0000;
+            debug_x31_q        = 64'h0000_0000_0000_0000;
             redirect_pending_q = 1'b0;
-            redirect_target_q  = 32'h0000_0000;
+            redirect_flush_wb_q = 1'b0;
+            redirect_target_q  = 64'h0000_0000_0000_0000;
 
             fd_valid_q = 1'b0;
-            fd_pc_q    = 32'h0000_0000;
+            fd_pc_q    = 64'h0000_0000_0000_0000;
             fd_instr_q = 32'h0000_0013;
 
             rx_valid_q         = 1'b0;
-            rx_pc_q            = 32'h0000_0000;
+            rx_pc_q            = 64'h0000_0000_0000_0000;
             rx_instr_q         = 32'h0000_0013;
             rx_rs1_q           = 5'd0;
             rx_rs2_q           = 5'd0;
             rx_rd_q            = 5'd0;
-            rx_immediate_q     = 32'h0000_0000;
+            rx_immediate_q     = 64'h0000_0000_0000_0000;
             rx_alu_op_q        = 4'd0;
             rx_use_pc_q        = 1'b0;
             rx_use_immediate_q = 1'b0;
@@ -303,36 +348,42 @@ module Core (
             rx_use_rs2_q       = 1'b0;
             rx_write_enable_q  = 1'b0;
             rx_is_load_q       = 1'b0;
+            rx_load_word_q     = 1'b0;
             rx_is_store_q      = 1'b0;
+            rx_store_word_q    = 1'b0;
+            rx_word_op_q       = 1'b0;
             rx_is_branch_q     = 1'b0;
             rx_branch_ne_q     = 1'b0;
             rx_is_jal_q        = 1'b0;
             rx_is_jalr_q       = 1'b0;
             rx_halt_q          = 1'b0;
             rx_stalled_q       = 1'b0;
-            rx_stall_data_a_q  = 32'h0000_0000;
-            rx_stall_data_b_q  = 32'h0000_0000;
+            rx_stall_data_a_q  = 64'h0000_0000_0000_0000;
+            rx_stall_data_b_q  = 64'h0000_0000_0000_0000;
 
             ex_valid_q               = 1'b0;
-            ex_pc_q                  = 32'h0000_0000;
+            ex_pc_q                  = 64'h0000_0000_0000_0000;
             ex_instr_q               = 32'h0000_0013;
             ex_rd_q                  = 5'd0;
             ex_alu_op_q              = 4'd0;
             ex_write_enable_q        = 1'b0;
             ex_is_load_q             = 1'b0;
+            ex_load_word_q           = 1'b0;
             ex_is_store_q            = 1'b0;
+            ex_store_word_q          = 1'b0;
+            ex_word_op_q             = 1'b0;
             ex_is_branch_q           = 1'b0;
             ex_branch_ne_q           = 1'b0;
             ex_link_q                = 1'b0;
             ex_halt_q                = 1'b0;
-            ex_operand_a_q           = 32'h0000_0000;
-            ex_operand_b_q           = 32'h0000_0000;
-            ex_store_data_q          = 32'h0000_0000;
-            ex_redirect_base_q       = 32'h0000_0000;
-            ex_redirect_offset_q     = 32'h0000_0000;
+            ex_operand_a_q           = 64'h0000_0000_0000_0000;
+            ex_operand_b_q           = 64'h0000_0000_0000_0000;
+            ex_store_data_q          = 64'h0000_0000_0000_0000;
+            ex_redirect_base_q       = 64'h0000_0000_0000_0000;
+            ex_redirect_offset_q     = 64'h0000_0000_0000_0000;
             ex_redirect_clear_lsb_q  = 1'b0;
-            ex_bypass_q.arithmetic   = 32'h0000_0000;
-            ex_bypass_q.logic_result = 32'h0000_0000;
+            ex_bypass_q.arithmetic   = 64'h0000_0000_0000_0000;
+            ex_bypass_q.logic_result = 64'h0000_0000_0000_0000;
             ex_bypass_q.use_logic    = 1'b0;
             ex_bypass_q.operand_a    = 1'b0;
             ex_bypass_q.operand_b    = 1'b0;
@@ -340,40 +391,49 @@ module Core (
             ex_bypass_q.redirect     = 1'b0;
 
             mem_valid_q        = 1'b0;
-            mem_pc_q           = 32'h0000_0000;
+            mem_pc_q           = 64'h0000_0000_0000_0000;
             mem_instr_q        = 32'h0000_0013;
             mem_rd_q           = 5'd0;
             mem_write_enable_q = 1'b0;
             mem_is_load_q      = 1'b0;
+            mem_load_word_q    = 1'b0;
             mem_is_store_q     = 1'b0;
+            mem_store_word_q   = 1'b0;
+            mem_is_branch_q       = 1'b0;
+            mem_branch_ne_q       = 1'b0;
+            mem_branch_equal_q    = 4'b0000;
+            mem_redirect_target_q = 32'h0000_0000;
             mem_halt_q         = 1'b0;
-            mem_result_q       = 32'h0000_0000;
-            mem_logic_result_q = 32'h0000_0000;
+            mem_result_q       = 64'h0000_0000_0000_0000;
+            mem_logic_result_q = 64'h0000_0000_0000_0000;
             mem_use_logic_q    = 1'b0;
-            mem_address_q      = 32'h0000_0000;
-            mem_wdata_q        = 32'h0000_0000;
+            mem_address_q      = 64'h0000_0000_0000_0000;
+            mem_wdata_q        = 64'h0000_0000_0000_0000;
 
             wb_valid_q        = 1'b0;
-            wb_pc_q           = 32'h0000_0000;
+            wb_pc_q           = 64'h0000_0000_0000_0000;
             wb_instr_q        = 32'h0000_0013;
             wb_rd_q           = 5'd0;
             wb_write_enable_q = 1'b0;
             wb_halt_q         = 1'b0;
-            wb_result_q       = 32'h0000_0000;
+            wb_result_q       = 64'h0000_0000_0000_0000;
             wb_mem_we_q       = 1'b0;
-            wb_mem_addr_q     = 32'h0000_0000;
-            wb_mem_wdata_q    = 32'h0000_0000;
+            wb_mem_addr_q     = 64'h0000_0000_0000_0000;
+            wb_mem_wdata_q    = 64'h0000_0000_0000_0000;
+            wb_mem_wmask_q    = 8'h00;
 
             commit_valid     = 1'b0;
-            commit_pc        = 32'h0000_0000;
+            commit_pc        = 64'h0000_0000_0000_0000;
             commit_instr     = 32'h0000_0013;
             commit_rd        = 5'd0;
-            commit_data      = 32'h0000_0000;
+            commit_data      = 64'h0000_0000_0000_0000;
             commit_mem_we    = 1'b0;
-            commit_mem_addr  = 32'h0000_0000;
-            commit_mem_wdata = 32'h0000_0000;
+            commit_mem_addr  = 64'h0000_0000_0000_0000;
+            commit_mem_wdata = 64'h0000_0000_0000_0000;
+            commit_mem_wmask = 8'h00;
         } else {
             redirect_pending_q = redirect_valid;
+            redirect_flush_wb_q = branch_redirect_valid;
             if redirect_valid {
                 redirect_target_q = redirect_target;
             }
@@ -382,7 +442,7 @@ module Core (
             commit_pc    = wb_pc_q;
             commit_instr = wb_instr_q;
             commit_rd    = 5'd0;
-            commit_data  = 32'h0000_0000;
+            commit_data  = 64'h0000_0000_0000_0000;
             if wb_write_enable_q && (wb_rd_q != 5'd0) {
                 commit_rd   = wb_rd_q;
                 commit_data = wb_result_q;
@@ -390,6 +450,7 @@ module Core (
             commit_mem_we    = wb_valid_q && wb_mem_we_q;
             commit_mem_addr  = wb_mem_addr_q;
             commit_mem_wdata = wb_mem_wdata_q;
+            commit_mem_wmask = wb_mem_wmask_q;
 
             if wb_valid_q && wb_halt_q {
                 halted_q = 1'b1;
@@ -405,13 +466,18 @@ module Core (
             wb_write_enable_q = mem_write_enable_q;
             wb_halt_q         = mem_halt_q;
             if mem_is_load_q {
-                wb_result_q = data_rdata;
+                wb_result_q = mem_load_data;
             } else {
                 wb_result_q = mem_selected_result;
             }
             wb_mem_we_q    = mem_is_store_q;
             wb_mem_addr_q  = mem_address_q;
             wb_mem_wdata_q = mem_wdata_q;
+            if mem_store_word_q {
+                wb_mem_wmask_q = 8'h0f;
+            } else {
+                wb_mem_wmask_q = 8'hff;
+            }
 
             mem_valid_q        = ex_valid_q;
             mem_pc_q           = ex_pc_q;
@@ -419,12 +485,21 @@ module Core (
             mem_rd_q           = ex_rd_q;
             mem_write_enable_q = ex_write_enable_q;
             mem_is_load_q      = ex_is_load_q;
+            mem_load_word_q    = ex_load_word_q;
             mem_is_store_q     = ex_is_store_q;
+            mem_store_word_q   = ex_store_word_q;
+            mem_is_branch_q       = ex_valid_q && ex_is_branch_q;
+            mem_branch_ne_q       = ex_branch_ne_q;
+            mem_branch_equal_q[0] = alu_operand_a[15:0] == alu_operand_b[15:0];
+            mem_branch_equal_q[1] = alu_operand_a[31:16] == alu_operand_b[31:16];
+            mem_branch_equal_q[2] = alu_operand_a[47:32] == alu_operand_b[47:32];
+            mem_branch_equal_q[3] = alu_operand_a[63:48] == alu_operand_b[63:48];
+            mem_redirect_target_q = ex_redirect_target;
             mem_halt_q         = ex_halt_q;
             mem_result_q       = execute_bus.arithmetic;
             mem_logic_result_q = execute_bus.logic_result;
             mem_use_logic_q    = execute_bus.result_use_logic;
-            mem_address_q      = alu_operand_a + alu_operand_b;
+            mem_address_q      = alu_operand_a[31:0] + alu_operand_b[31:0];
             mem_wdata_q        = execute_store_data;
 
             // Capture the current EX result independently from its consumer.
@@ -445,34 +520,41 @@ module Core (
             ex_alu_op_q       = rx_alu_op_q;
             ex_write_enable_q = rx_write_enable_q;
             ex_is_load_q      = rx_is_load_q;
+            ex_load_word_q    = rx_load_word_q;
             ex_is_store_q     = rx_is_store_q;
+            ex_store_word_q   = rx_store_word_q;
+            ex_word_op_q      = rx_word_op_q;
             ex_is_branch_q    = rx_is_branch_q;
             ex_branch_ne_q    = rx_branch_ne_q;
             ex_link_q         = rx_is_jal_q || rx_is_jalr_q;
             ex_halt_q         = rx_halt_q;
             if rx_is_jal_q || rx_is_jalr_q {
                 ex_operand_a_q = rx_pc_q;
-                ex_operand_b_q = 32'd4;
+                ex_operand_b_q = 64'd4;
             } else {
                 ex_operand_a_q = rx_operand_a;
                 ex_operand_b_q = rx_operand_b;
             }
             ex_store_data_q = forwarded_rs2;
             if rx_is_jalr_q {
-                ex_redirect_base_q = forwarded_rs1;
+                ex_redirect_base_q = forwarded_rs1[31:0];
             } else {
                 ex_redirect_base_q = rx_pc_q;
             }
-            ex_redirect_offset_q    = rx_immediate_q;
+            ex_redirect_offset_q    = rx_immediate_q[31:0];
             ex_redirect_clear_lsb_q = rx_is_jalr_q;
 
             if redirect_pending_q {
                 fetch_base_q   = redirect_target_q;
-                fetch_offset_q = 32'h0000_0000;
+                fetch_offset_q = 32'd4;
+                fetch_pc_q     = redirect_target_q;
                 fd_valid_q     = 1'b0;
                 rx_valid_q     = 1'b0;
                 ex_valid_q     = 1'b0;
                 mem_valid_q    = 1'b0;
+                if redirect_flush_wb_q {
+                    wb_valid_q = 1'b0;
+                }
                 rx_stalled_q   = 1'b0;
             } else if stop_frontend || halted_q {
                 fd_valid_q   = 1'b0;
@@ -499,7 +581,10 @@ module Core (
                 rx_use_rs2_q       = decode_bus.use_rs2;
                 rx_write_enable_q  = decode_bus.write_enable;
                 rx_is_load_q       = decode_bus.is_load;
+                rx_load_word_q     = decode_bus.load_word;
                 rx_is_store_q      = decode_bus.is_store;
+                rx_store_word_q    = decode_bus.store_word;
+                rx_word_op_q       = decode_bus.word_op;
                 rx_is_branch_q     = decode_bus.is_branch;
                 rx_branch_ne_q     = decode_bus.branch_ne;
                 rx_is_jal_q        = decode_bus.is_jal;
@@ -507,8 +592,9 @@ module Core (
                 rx_halt_q          = decode_bus.halt;
 
                 fd_valid_q     = 1'b1;
-                fd_pc_q        = fetch_pc;
+                fd_pc_q        = fetch_pc_q;
                 fd_instr_q     = instr;
+                fetch_pc_q     = fetch_base_q + fetch_offset_q;
                 fetch_offset_q = fetch_offset_q + 32'd4;
             }
         }

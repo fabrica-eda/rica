@@ -1,4 +1,4 @@
-/// RV32 2-read/1-write register file built from two replicated 1R1W memories.
+/// RV64 2-read/1-write register file built from two replicated 1R1W memories.
 ///
 /// Reads are synchronous with one-cycle latency. Register x0 is masked to zero
 /// and writes to x0 are suppressed. The replication is intentional: each bank
@@ -7,22 +7,22 @@ module RegisterFile (
     clk           : input  clock    ,
     write_enable  : input  logic    ,
     write_address : input  logic<5> ,
-    write_data    : input  logic<32>,
+    write_data    : input  logic<64>,
     read_address_a: input  logic<5> ,
     read_address_b: input  logic<5> ,
-    read_data_a   : output logic<32>,
-    read_data_b   : output logic<32>,
+    read_data_a   : output logic<64>,
+    read_data_b   : output logic<64>,
 ) {
-    var bank_a          : logic<32> [32];
-    var bank_b          : logic<32> [32];
-    var read_data_a_raw : logic<32>     ;
-    var read_data_b_raw : logic<32>     ;
+    var bank_a          : logic<64> [32];
+    var bank_b          : logic<64> [32];
+    var read_data_a_raw : logic<64>     ;
+    var read_data_b_raw : logic<64>     ;
     var read_address_a_q: logic<5>      ;
     var read_address_b_q: logic<5>      ;
     var bypass_a_q      : logic         ;
     var bypass_b_q      : logic         ;
-    var bypass_data_a_q : logic<32>     ;
-    var bypass_data_b_q : logic<32>     ;
+    var bypass_data_a_q : logic<64>     ;
+    var bypass_data_b_q : logic<64>     ;
 
     always_ff (clk) {
         if write_enable && (write_address != 5'd0) {
@@ -49,7 +49,7 @@ module RegisterFile (
 
     always_comb {
         if read_address_a_q == 5'd0 {
-            read_data_a = 32'h0000_0000;
+            read_data_a = 64'h0000_0000_0000_0000;
         } else if bypass_a_q {
             read_data_a = bypass_data_a_q;
         } else {
@@ -57,7 +57,7 @@ module RegisterFile (
         }
 
         if read_address_b_q == 5'd0 {
-            read_data_b = 32'h0000_0000;
+            read_data_b = 64'h0000_0000_0000_0000;
         } else if bypass_b_q {
             read_data_b = bypass_data_b_q;
         } else {

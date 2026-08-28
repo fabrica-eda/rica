@@ -1,15 +1,15 @@
-/// Combinational decoder for the currently implemented RV32I subset.
+/// Combinational decoder for the currently implemented RV64I subset.
 module Decoder (
     decode: modport DecodeBus::decoder,
 ) {
     var opcode: logic<7> ;
     var funct3: logic<3> ;
     var funct7: logic<7> ;
-    var imm_i : logic<32>;
-    var imm_s : logic<32>;
-    var imm_b : logic<32>;
-    var imm_u : logic<32>;
-    var imm_j : logic<32>;
+    var imm_i : logic<64>;
+    var imm_s : logic<64>;
+    var imm_b : logic<64>;
+    var imm_u : logic<64>;
+    var imm_j : logic<64>;
 
     always_comb {
         opcode = decode.instr[6:0];
@@ -20,11 +20,12 @@ module Decoder (
         decode.rs2 = decode.instr[24:20];
         decode.rd  = decode.instr[11:7];
 
-        imm_i = {decode.instr[31] repeat 21, decode.instr[30:20]};
-        imm_s = {decode.instr[31] repeat 21, decode.instr[30:25], decode.instr[11:7]};
-        imm_b = {decode.instr[31] repeat 20, decode.instr[7], decode.instr[30:25], decode.instr[11:8], 1'b0};
-        imm_u = {decode.instr[31:12], 12'h000};
-        imm_j = {decode.instr[31] repeat 12, decode.instr[19:12], decode.instr[20], decode.instr[30:21], 1'b0};
+        imm_i = {decode.instr[31] repeat 53, decode.instr[30:20]};
+        imm_s = {decode.instr[31] repeat 53, decode.instr[30:25], decode.instr[11:7]};
+        imm_b = {decode.instr[31] repeat 52, decode.instr[7], decode.instr[30:25], decode.instr[11:8], 1'b0};
+        // RV64 LUI/AUIPC sign-extend the 32-bit U-immediate.
+        imm_u = {decode.instr[31] repeat 33, decode.instr[30:12], 12'h000};
+        imm_j = {decode.instr[31] repeat 44, decode.instr[19:12], decode.instr[20], decode.instr[30:21], 1'b0};
 
         decode.immediate     = imm_i;
         decode.alu_op        = 4'd0;
@@ -34,7 +35,10 @@ module Decoder (
         decode.use_rs2       = 1'b0;
         decode.write_enable  = 1'b0;
         decode.is_load       = 1'b0;
+        decode.load_word     = 1'b0;
         decode.is_store      = 1'b0;
+        decode.store_word    = 1'b0;
+        decode.word_op       = 1'b0;
         decode.is_branch     = 1'b0;
         decode.branch_ne     = 1'b0;
         decode.is_jal        = 1'b0;
@@ -87,23 +91,25 @@ module Decoder (
                     decode.halt      = 1'b0;
                 }
             }
-            7'b0000011: { // LW
-                if funct3 == 3'b010 {
+            7'b0000011: { // LW/LD
+                if (funct3 == 3'b010) || (funct3 == 3'b011) {
                     decode.immediate     = imm_i;
                     decode.use_immediate = 1'b1;
                     decode.use_rs1       = 1'b1;
                     decode.write_enable  = 1'b1;
                     decode.is_load       = 1'b1;
+                    decode.load_word     = funct3 == 3'b010;
                     decode.halt          = 1'b0;
                 }
             }
-            7'b0100011: { // SW
-                if funct3 == 3'b010 {
+            7'b0100011: { // SW/SD
+                if (funct3 == 3'b010) || (funct3 == 3'b011) {
                     decode.immediate     = imm_s;
                     decode.use_immediate = 1'b1;
                     decode.use_rs1       = 1'b1;
                     decode.use_rs2       = 1'b1;
                     decode.is_store      = 1'b1;
+                    decode.store_word    = funct3 == 3'b010;
                     decode.halt          = 1'b0;
                 }
             }
@@ -179,6 +185,35 @@ module Decoder (
                         decode.halt         = 1'b0;
                     }
                     default: {}
+                }
+            }
+            7'b0011011: { // OP-IMM-32: ADDIW
+                if funct3 == 3'b000 {
+                    decode.alu_op        = 4'd0;
+                    decode.use_immediate = 1'b1;
+                    decode.use_rs1       = 1'b1;
+                    decode.write_enable  = 1'b1;
+                    decode.word_op       = 1'b1;
+                    decode.halt          = 1'b0;
+                }
+            }
+            7'b0111011: { // OP-32: ADDW/SUBW
+                if funct3 == 3'b000 {
+                    if funct7 == 7'b0000000 {
+                        decode.alu_op       = 4'd0;
+                        decode.use_rs1      = 1'b1;
+                        decode.use_rs2      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.word_op      = 1'b1;
+                        decode.halt         = 1'b0;
+                    } else if funct7 == 7'b0100000 {
+                        decode.alu_op       = 4'd1;
+                        decode.use_rs1      = 1'b1;
+                        decode.use_rs2      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.word_op      = 1'b1;
+                        decode.halt         = 1'b0;
+                    }
                 }
             }
             default: {}

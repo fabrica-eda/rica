@@ -4,7 +4,7 @@
 .macro REPORT value
     la t0, tohost
     li t1, \value
-    sw t1, 0(t0)
+    sd t1, 0(t0)
     ecall
 .endm
 
@@ -20,5 +20,5 @@
 .balign 4
 .globl tohost
 tohost:
-    .word 0
+    .dword 0
 .popsection

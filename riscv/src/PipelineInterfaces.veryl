@@ -4,7 +4,7 @@ interface DecodeBus {
     var rs1          : logic<5> ;
     var rs2          : logic<5> ;
     var rd           : logic<5> ;
-    var immediate    : logic<32>;
+    var immediate    : logic<64>;
     var alu_op       : logic<4> ;
     var use_pc       : logic    ;
     var use_immediate: logic    ;
@@ -12,7 +12,10 @@ interface DecodeBus {
     var use_rs2      : logic    ;
     var write_enable : logic    ;
     var is_load      : logic    ;
+    var load_word    : logic    ;
     var is_store     : logic    ;
+    var store_word   : logic    ;
+    var word_op      : logic    ;
     var is_branch    : logic    ;
     var branch_ne    : logic    ;
     var is_jal       : logic    ;
@@ -35,15 +38,17 @@ interface DecodeBus {
 interface ExecuteBus {
     var alu_op          : logic<4> ;
     var link            : logic    ;
-    var operand_a       : logic<32>;
-    var operand_b       : logic<32>;
-    var arithmetic      : logic<32>;
-    var logic_result    : logic<32>;
+    var word_op         : logic    ;
+    var operand_a       : logic<64>;
+    var operand_b       : logic<64>;
+    var arithmetic      : logic<64>;
+    var logic_result    : logic<64>;
     var result_use_logic: logic    ;
 
     modport pipeline {
         alu_op   : output,
         link     : output,
+        word_op  : output,
         operand_a: output,
         operand_b: output,
         ..input
@@ -52,6 +57,7 @@ interface ExecuteBus {
     modport execute {
         alu_op   : input,
         link     : input,
+        word_op  : input,
         operand_a: input,
         operand_b: input,
         ..output

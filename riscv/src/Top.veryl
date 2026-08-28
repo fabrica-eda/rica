@@ -7,31 +7,34 @@ module Top (
     led       : output 'cpu       logic<8>,
 ) {
     var core_rst_n           : 'cpu reset_async_low    ;
-    var core_pc              : 'cpu logic          <32>;
+    var core_pc              : 'cpu logic          <64>;
     var instruction          : 'cpu logic          <32>;
-    var unused_data_addr     : 'cpu logic          <32>;
-    var unused_data_wdata    : 'cpu logic          <32>;
+    var unused_data_addr     : 'cpu logic          <64>;
+    var unused_data_wdata    : 'cpu logic          <64>;
+    var unused_data_wmask    : 'cpu logic          <8> ;
     var unused_data_we       : 'cpu logic              ;
     var unused_halted        : 'cpu logic              ;
     var unused_commit_valid  : 'cpu logic              ;
-    var unused_commit_pc     : 'cpu logic          <32>;
+    var unused_commit_pc     : 'cpu logic          <64>;
     var unused_commit_instr  : 'cpu logic          <32>;
     var unused_commit_rd     : 'cpu logic          <5> ;
-    var unused_commit_data   : 'cpu logic          <32>;
+    var unused_commit_data   : 'cpu logic          <64>;
     var unused_commit_mem_we : 'cpu logic              ;
-    var unused_commit_address: 'cpu logic          <32>;
-    var unused_commit_wdata  : 'cpu logic          <32>;
-    var x31                  : 'cpu logic          <32>;
+    var unused_commit_address: 'cpu logic          <64>;
+    var unused_commit_wdata  : 'cpu logic          <64>;
+    var unused_commit_wmask  : 'cpu logic          <8> ;
+    var x31                  : 'cpu logic          <64>;
     var led_drive_q          : 'cpu logic          <8> ;
 
     inst core: Core (
         clk             : clk_150              ,
         rst_n           : core_rst_n           ,
         instr           : instruction          ,
-        data_rdata      : 32'h0000_0000        ,
+        data_rdata      : 64'h0000_0000_0000_0000        ,
         pc              : core_pc              ,
         data_addr       : unused_data_addr     ,
         data_wdata      : unused_data_wdata    ,
+        data_wmask      : unused_data_wmask    ,
         data_we         : unused_data_we       ,
         halted          : unused_halted        ,
         commit_valid    : unused_commit_valid  ,
@@ -42,6 +45,7 @@ module Top (
         commit_mem_we   : unused_commit_mem_we ,
         commit_mem_addr : unused_commit_address,
         commit_mem_wdata: unused_commit_wdata  ,
+        commit_mem_wmask: unused_commit_wmask  ,
         debug_x31       : x31                  ,
     );
 
@@ -67,12 +71,12 @@ module Top (
         // count proves that the PLL, instruction flow, branch redirect, and
         // integer writeback path are all alive on the board.
         case core_pc {
-            32'h0000_0000: instruction = 32'h0000_0f93; // addi x31, x0, 0
-            32'h0000_0004: instruction = 32'h0400_00b7; // lui  x1, 0x4000
-            32'h0000_0008: instruction = 32'hfff0_8093; // addi x1, x1, -1
-            32'h0000_000c: instruction = 32'hfe00_9ee3; // bne  x1, x0, -4
-            32'h0000_0010: instruction = 32'h001f_8f93; // addi x31, x31, 1
-            32'h0000_0014: instruction = 32'hff1f_f06f; // jal  x0, -16
+            64'h0000_0000_0000_0000: instruction = 32'h0000_0f93; // addi x31, x0, 0
+            64'h0000_0000_0000_0004: instruction = 32'h0400_00b7; // lui  x1, 0x4000
+            64'h0000_0000_0000_0008: instruction = 32'hfff0_8093; // addi x1, x1, -1
+            64'h0000_0000_0000_000c: instruction = 32'hfe00_9ee3; // bne  x1, x0, -4
+            64'h0000_0000_0000_0010: instruction = 32'h001f_8f93; // addi x31, x31, 1
+            64'h0000_0000_0000_0014: instruction = 32'hff1f_f06f; // jal  x0, -16
             default      : instruction = 32'h0000_0073; // ecall
         }
         led = led_drive_q;

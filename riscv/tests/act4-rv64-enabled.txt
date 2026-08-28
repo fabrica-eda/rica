@@ -1,4 +1,4 @@
-# ACT4 RV32I tests become runnable by adding their stem here, one per line.
+# ACT4 RV64I tests become runnable by adding their stem here, one per line.
 #
 # Keep this empty until the Core implements the instructions used by ACT4's
 # common bootstrap as well as the instruction under test. In particular, the

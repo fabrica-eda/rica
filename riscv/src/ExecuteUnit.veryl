@@ -1,11 +1,13 @@
-/// RV32 integer execution unit with a 16+16-bit carry-select adder.
+/// RV64 integer execution unit with two 32-bit carry-select slices.
 module ExecuteUnit (
     execute: modport ExecuteBus::execute,
 ) {
-    var arithmetic_b      : logic<32>;
-    var arithmetic_low    : logic<17>;
-    var arithmetic_high_c0: logic<17>;
-    var arithmetic_high_c1: logic<17>;
+    var arithmetic_b: logic<64>;
+    var sum_low     : logic<33>;
+    var sum_high_c0 : logic<33>;
+    var sum_high_c1 : logic<33>;
+    var sum_high    : logic<33>;
+    var arithmetic64: logic<64>;
 
     always_comb {
         if execute.alu_op == 4'd1 {
@@ -13,16 +15,24 @@ module ExecuteUnit (
         } else {
             arithmetic_b = execute.operand_b;
         }
-        arithmetic_low = {1'b0, execute.operand_a[15:0]} + {1'b0, arithmetic_b[15:0]};
+        sum_low = {1'b0, execute.operand_a[31:0]} + {1'b0, arithmetic_b[31:0]};
         if execute.alu_op == 4'd1 {
-            arithmetic_low = arithmetic_low + 17'd1;
+            sum_low = sum_low + 33'd1;
         }
-        arithmetic_high_c0 = {1'b0, execute.operand_a[31:16]} + {1'b0, arithmetic_b[31:16]};
-        arithmetic_high_c1 = arithmetic_high_c0 + 17'd1;
-        if arithmetic_low[16] {
-            execute.arithmetic = {arithmetic_high_c1[15:0], arithmetic_low[15:0]};
+
+        sum_high_c0 = {1'b0, execute.operand_a[63:32]} + {1'b0, arithmetic_b[63:32]};
+        sum_high_c1 = sum_high_c0 + 33'd1;
+        if sum_low[32] {
+            sum_high = sum_high_c1;
         } else {
-            execute.arithmetic = {arithmetic_high_c0[15:0], arithmetic_low[15:0]};
+            sum_high = sum_high_c0;
+        }
+
+        arithmetic64 = {sum_high[31:0], sum_low[31:0]};
+        if execute.word_op {
+            execute.arithmetic = {arithmetic64[31] repeat 32, arithmetic64[31:0]};
+        } else {
+            execute.arithmetic = arithmetic64;
         }
 
         case execute.alu_op {

@@ -12,11 +12,11 @@ use struo_target_ecp5::{Bit, Ecp5Cell, MappingOptions, map_to_ecp5_with_options}
 
 #[derive(Clone, Copy)]
 struct Expected {
-    pc: u32,
+    pc: u64,
     instr: u32,
     rd: u8,
-    data: u32,
-    mem_write: Option<(u32, u32)>,
+    data: u64,
+    mem_write: Option<(u64, u64, u8)>,
 }
 
 fn i_type(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
@@ -28,12 +28,16 @@ fn i_type(imm: i32, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
 }
 
 fn r_type(funct7: u8, rs2: u8, rs1: u8, funct3: u8, rd: u8) -> u32 {
+    r_type_opcode(funct7, rs2, rs1, funct3, rd, 0x33)
+}
+
+fn r_type_opcode(funct7: u8, rs2: u8, rs1: u8, funct3: u8, rd: u8, opcode: u8) -> u32 {
     (u32::from(funct7) << 25)
         | (u32::from(rs2) << 20)
         | (u32::from(rs1) << 15)
         | (u32::from(funct3) << 12)
         | (u32::from(rd) << 7)
-        | 0x33
+        | u32::from(opcode)
 }
 
 fn s_type(imm: i32, rs2: u8, rs1: u8, funct3: u8) -> u32 {
@@ -128,7 +132,7 @@ fn program() -> Vec<Expected> {
             instr: s_type(0, 7, 0, 2),
             rd: 0,
             data: 0,
-            mem_write: Some((0, 11)),
+            mem_write: Some((0, 11, 0x0f)),
         },
         Expected {
             pc: 32,
@@ -174,13 +178,41 @@ fn program() -> Vec<Expected> {
         },
         Expected {
             pc: 64,
+            instr: u_type(0x80000, 13, 0x37),
+            rd: 13,
+            data: 0xffff_ffff_8000_0000,
+            mem_write: None,
+        },
+        Expected {
+            pc: 68,
+            instr: i_type(-1, 13, 0, 14, 0x1b),
+            rd: 14,
+            data: 0x0000_0000_7fff_ffff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 72,
+            instr: r_type_opcode(0, 14, 14, 0, 15, 0x3b),
+            rd: 15,
+            data: 0xffff_ffff_ffff_fffe,
+            mem_write: None,
+        },
+        Expected {
+            pc: 76,
+            instr: r_type_opcode(0x20, 14, 15, 0, 16, 0x3b),
+            rd: 16,
+            data: 0x0000_0000_7fff_ffff,
+            mem_write: None,
+        },
+        Expected {
+            pc: 80,
             instr: i_type(0x55, 0, 0, 31, 0x13),
             rd: 31,
             data: 0x55,
             mem_write: None,
         },
         Expected {
-            pc: 68,
+            pc: 84,
             instr: 0x0000_0073,
             rd: 0,
             data: 0,
@@ -191,10 +223,10 @@ fn program() -> Vec<Expected> {
 
 macro_rules! define_verifier {
 ($function:ident, $read_value:ident, $simulator_type:path) => {
-fn $read_value(simulator: &mut $simulator_type, name: &str) -> u32 {
+fn $read_value(simulator: &mut $simulator_type, name: &str) -> u64 {
     simulator
         .get(simulator.signal(name))
-        .to_u32_digits()
+        .to_u64_digits()
         .first()
         .copied()
         .unwrap_or(0)
@@ -213,12 +245,12 @@ fn $function(
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
-        io.set(data_rdata, 0_u32);
+        io.set(data_rdata, 0_u64);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;
 
-    let mut memory_word = 0_u32;
+    let mut memory_word = 0_u64;
     let mut committed = 0_usize;
     let mut commit_cycles = Vec::new();
     let mut elapsed_cycles = 0_usize;
@@ -237,6 +269,7 @@ fn $function(
             (
                 $read_value(simulator, "data_addr"),
                 $read_value(simulator, "data_wdata"),
+                $read_value(simulator, "data_wmask") as u8,
             )
         });
         simulator.modify(|io| {
@@ -246,11 +279,16 @@ fn $function(
         simulator.tick(clock)?;
         elapsed_cycles = cycle + 1;
 
-        if let Some((address, data)) = store {
+        if let Some((address, data, mask)) = store {
             if address != 0 {
-                return Err(format!("{label}: store used unsupported address 0x{address:08x}").into());
+                return Err(format!("{label}: store used unsupported address 0x{address:016x}").into());
             }
-            memory_word = data;
+            for byte in 0..8 {
+                if mask & (1 << byte) != 0 {
+                    let byte_mask = 0xff_u64 << (byte * 8);
+                    memory_word = (memory_word & !byte_mask) | (data & byte_mask);
+                }
+            }
         }
 
         if $read_value(simulator, "commit_valid") == 0 {
@@ -261,26 +299,27 @@ fn $function(
         };
         for (signal, expected_value) in [
             ("commit_pc", entry.pc),
-            ("commit_instr", entry.instr),
-            ("commit_rd", u32::from(entry.rd)),
+            ("commit_instr", u64::from(entry.instr)),
+            ("commit_rd", u64::from(entry.rd)),
             ("commit_data", entry.data),
-            ("commit_mem_we", u32::from(entry.mem_write.is_some())),
+            ("commit_mem_we", u64::from(entry.mem_write.is_some())),
         ] {
             let observed = $read_value(simulator, signal);
             if observed != expected_value {
                 return Err(format!(
-                    "{label}: {signal} mismatch after PC 0x{:08x}: expected 0x{expected_value:08x}, got 0x{observed:08x}",
-                    entry.pc
+                    "{label}: {signal} mismatch after PC 0x{:016x}: expected 0x{expected_value:016x}, got 0x{observed:016x}",
+                    entry.pc,
                 )
                 .into());
             }
         }
-        if let Some((address, data)) = entry.mem_write {
+        if let Some((address, data, mask)) = entry.mem_write {
             let observed_address = $read_value(simulator, "commit_mem_addr");
             let observed_data = $read_value(simulator, "commit_mem_wdata");
-            if (observed_address, observed_data) != (address, data) {
+            let observed_mask = $read_value(simulator, "commit_mem_wmask");
+            if (observed_address, observed_data, observed_mask) != (address, data, u64::from(mask)) {
                 return Err(format!(
-                    "{label}: committed store mismatch at PC 0x{:08x}: expected [0x{address:08x}] = 0x{data:08x}, got [0x{observed_address:08x}] = 0x{observed_data:08x}",
+                    "{label}: committed store mismatch at PC 0x{:016x}: expected [0x{address:016x}]/0x{mask:02x} = 0x{data:016x}, got [0x{observed_address:016x}]/0x{observed_mask:02x} = 0x{observed_data:016x}",
                     entry.pc
                 )
                 .into());
@@ -306,9 +345,9 @@ fn $function(
     {
         return Err(format!("{label}: dependent ALU forwarding did not sustain one commit per clock").into());
     }
-    if elapsed_cycles > 36 {
+    if elapsed_cycles > 40 {
         return Err(format!(
-            "{label}: architectural trace took {elapsed_cycles} clocks, expected at most 36"
+            "{label}: architectural trace took {elapsed_cycles} clocks, expected at most 40"
         )
         .into());
     }
@@ -316,7 +355,7 @@ fn $function(
         return Err(format!("{label}: final architectural signature is invalid").into());
     }
     println!(
-        "{label}: {} instructions in {elapsed_cycles} clocks ({:.3} CPI); dependent ALU forwarding CPI 1; signature x31=0x00000055",
+        "{label}: {} instructions in {elapsed_cycles} clocks ({:.3} CPI); dependent ALU forwarding CPI 1; signature x31=0x0000000000000055",
         expected.len(),
         elapsed_cycles as f64 / expected.len() as f64,
     );
@@ -341,14 +380,14 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     simulator.modify(|io| {
         io.set(write_enable, 1_u8);
         io.set(write_address, 5_u8);
-        io.set(write_data, 0x1234_5678_u32);
+        io.set(write_data, 0x0123_4567_89ab_cdef_u64);
         io.set(read_address_a, 0_u8);
         io.set(read_address_b, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| {
         io.set(write_address, 7_u8);
-        io.set(write_data, 0xcafe_babe_u32);
+        io.set(write_data, 0xfedc_ba98_7654_3210_u64);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| {
@@ -358,16 +397,19 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     })?;
     simulator.tick(clock)?;
 
-    for (signal, expected) in [("read_data_a", 0x1234_5678), ("read_data_b", 0xcafe_babe)] {
+    for (signal, expected) in [
+        ("read_data_a", 0x0123_4567_89ab_cdef_u64),
+        ("read_data_b", 0xfedc_ba98_7654_3210_u64),
+    ] {
         let observed = simulator
             .get(simulator.signal(signal))
-            .to_u32_digits()
+            .to_u64_digits()
             .first()
             .copied()
             .unwrap_or(0);
         if observed != expected {
             return Err(format!(
-                "register file {signal} mismatch: expected 0x{expected:08x}, got 0x{observed:08x}"
+                "register file {signal} mismatch: expected 0x{expected:016x}, got 0x{observed:016x}"
             )
             .into());
         }
@@ -376,7 +418,7 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     simulator.modify(|io| {
         io.set(write_enable, 1_u8);
         io.set(write_address, 0_u8);
-        io.set(write_data, u32::MAX);
+        io.set(write_data, u64::MAX);
         io.set(read_address_a, 0_u8);
         io.set(read_address_b, 0_u8);
     })?;
@@ -384,7 +426,7 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     for signal in ["read_data_a", "read_data_b"] {
         let observed = simulator
             .get(simulator.signal(signal))
-            .to_u32_digits()
+            .to_u64_digits()
             .first()
             .copied()
             .unwrap_or(0);
@@ -414,9 +456,9 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
         .iter()
         .filter(|cell| matches!(cell, Ecp5Cell::BlockRam { .. }))
         .count();
-    if block_rams != 4 {
+    if block_rams != 8 {
         return Err(
-            format!("register file mapped to {block_rams} DP16KD cells; expected four").into(),
+            format!("register file mapped to {block_rams} DP16KD cells; expected eight").into(),
         );
     }
     println!(

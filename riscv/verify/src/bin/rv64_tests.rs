@@ -56,8 +56,8 @@ fn rust_lld() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let tests = project.join("tests/rv32i-subset");
-    let build = project.join("build/rv32i-subset");
+    let tests = project.join("tests/rv64i-subset");
+    let build = project.join("build/rv64i-subset");
     fs::create_dir_all(&build)?;
     let mut sources = fs::read_dir(&tests)?
         .filter_map(Result::ok)
@@ -74,7 +74,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
         let elf = build.join(stem).with_extension("elf");
         checked_command(
             Command::new(&assembler)
-                .arg("-triple=riscv32-unknown-none-elf")
+                .arg("-triple=riscv64-unknown-none-elf")
                 .arg("-mattr=+i")
                 .arg("-filetype=obj")
                 .arg("-I")
@@ -85,7 +85,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
         )?;
         checked_command(
             Command::new(&linker)
-                .args(["-flavor", "gnu", "-m", "elf32lriscv"])
+                .args(["-flavor", "gnu", "-m", "elf64lriscv"])
                 .arg("-T")
                 .arg(tests.join("link.ld"))
                 .arg("-o")
@@ -107,7 +107,7 @@ fn read_enabled_tests(path: &Path) -> Result<BTreeSet<String>, Box<dyn Error>> {
         }
         if !name.starts_with("I-") || !name.ends_with("-00") {
             return Err(format!(
-                "{}:{}: expected an ACT4 RV32I test stem such as I-add-00",
+                "{}:{}: expected an ACT4 RV64I test stem such as I-add-00",
                 path.display(),
                 index + 1
             )
@@ -143,7 +143,7 @@ fn act4_catalog(source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, Box<dyn 
         }
     }
     if catalog.is_empty() {
-        return Err(format!("no ACT4 RV32I tests found in {}", source_dir.display()).into());
+        return Err(format!("no ACT4 RV64I tests found in {}", source_dir.display()).into());
     }
     Ok(catalog)
 }
@@ -184,7 +184,7 @@ fn run_act4(
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let repository = project.parent().ok_or("riscv directory has no parent")?;
-    let source_dir = repository.join("third_party/riscv-arch-test/tests/rv32i/I");
+    let source_dir = repository.join("third_party/riscv-arch-test/tests/rv64i/I");
     let catalog = act4_catalog(&source_dir)?;
     let enabled = read_enabled_tests(enabled_file)?;
     let available = catalog.keys().cloned().collect::<BTreeSet<_>>();
@@ -244,7 +244,7 @@ fn run_act4(
     }
 
     println!(
-        "ACT4 RV32I: {passed} passed, {ignored} ignored, {} failed ({} total)",
+        "ACT4 RV64I: {passed} passed, {ignored} ignored, {} failed ({} total)",
         failures.len(),
         catalog.len()
     );
@@ -263,8 +263,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4_elf_dir = project
         .parent()
         .unwrap()
-        .join("third_party/riscv-arch-test/work/rica-rv32i/elfs");
-    let mut act4_enabled = project.join("tests/act4-enabled.txt");
+        .join("third_party/riscv-arch-test/work/rica-rv64i/elfs");
+    let mut act4_enabled = project.join("tests/act4-rv64-enabled.txt");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--max-cycles" {
@@ -301,7 +301,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         requested_elfs
     };
     if elfs.is_empty() {
-        return Err("no RV32 ELF tests were supplied".into());
+        return Err("no RV64 ELF tests were supplied".into());
     }
     let source = core_source(project)?;
     for elf in &elfs {
@@ -313,6 +313,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             result.commits
         );
     }
-    println!("RV32 ELF tests: {}/{} passed", elfs.len(), elfs.len());
+    println!("RV64 ELF tests: {}/{} passed", elfs.len(), elfs.len());
     Ok(())
 }

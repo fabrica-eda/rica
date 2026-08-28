@@ -20,5 +20,5 @@ name = "nextpnr-riscv"
 path = "src/bin/nextpnr.rs"
 
 [[bin]]
-name = "rv32-riscv-tests"
-path = "src/bin/rv32_tests.rs"
+name = "rv64-riscv-tests"
+path = "src/bin/rv64_tests.rs"
