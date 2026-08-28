@@ -32,6 +32,15 @@ shortened. `fetch_pc_q` now terminates the next-PC addition before the ROM.
 The front end still presents and accepts one instruction address per clock;
 this register changes latency, not throughput.
 
+## A heartbeat must distinguish reset from count zero
+
+The original board display drove all eight LEDs high both while reset was
+asserted and while x31 was zero. Its initial delay loop therefore made a
+running board indistinguishable from a stopped one. D12 now reports PLL lock,
+D11 divides the commit stream into a heartbeat, and D5 through D10 show x31.
+PLL lock alone releases CPU reset, so the unused generic SW4 input can no
+longer accidentally hold the CPU in reset.
+
 ## Synchronous memory latency must remain local
 
 The reusable `RegisterFile` infers two 32x64 1R1W memories so that two
@@ -56,10 +65,10 @@ solely because it meets a 6.667 ns period. Regressions must report at least:
 The current core commits the 20-instruction mixed trace in 39 clocks and keeps
 the first eight dependent ALU/store instructions at one commit per clock.
 Texo revision `0cf4b8a` closes the complete speed-8 EVN wrapper at 150 MHz with
-0.000 ns setup and +0.290 ns hold slack; a repeated run checks the same 2732
-endpoints and reproduces those slacks. The exact same mapping reaches 148.92,
-159.36, 150.74, and 155.30 MHz in nextpnr seeds 1 through 4. This seed spread
-remains a QoR concern, but it is no longer confused with the accepted Texo
-board run. The retired 250 MHz design met timing while taking fifteen clocks
-per instruction; it remains in Texo as a physical-design regression precisely
-so this CPU is not optimized around that result.
++0.002 ns setup and +0.290 ns hold slack, checking all 2781 endpoints. The
+earlier eight-bit-count mapping reached 148.92, 159.36, 150.74, and 155.30 MHz
+in nextpnr seeds 1 through 4. This seed spread remains a QoR concern, but it is
+no longer confused with the accepted Texo board run. The retired 250 MHz
+design met timing while taking fifteen clocks per instruction; it remains in
+Texo as a physical-design regression precisely so this CPU is not optimized
+around that result.

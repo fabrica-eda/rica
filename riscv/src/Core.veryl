@@ -76,6 +76,7 @@ module Core (
     var ex_rd_q                : logic<5> ;
     var ex_alu_op_q            : logic<3> ;
     var ex_write_enable_q      : logic    ;
+    var ex_can_bypass_q        : logic    ;
     var ex_is_load_q           : logic    ;
     var ex_load_word_q         : logic    ;
     var ex_is_store_q          : logic    ;
@@ -250,9 +251,9 @@ module Core (
             rx_operand_b = forwarded_rs2;
         }
 
-        ex_bypass_hit_rs1 = rx_valid_q && ex_valid_q && ex_write_enable_q && !ex_is_load_q && (ex_rd_q != 5'd0)
+        ex_bypass_hit_rs1 = rx_valid_q && ex_valid_q && ex_can_bypass_q
             && (ex_rd_q == rx_rs1_q);
-        ex_bypass_hit_rs2 = rx_valid_q && ex_valid_q && ex_write_enable_q && !ex_is_load_q && (ex_rd_q != 5'd0)
+        ex_bypass_hit_rs2 = rx_valid_q && ex_valid_q && ex_can_bypass_q
             && (ex_rd_q == rx_rs2_q);
 
         if ex_bypass_q.operand_a {
@@ -367,6 +368,7 @@ module Core (
             ex_rd_q                  = 5'd0;
             ex_alu_op_q              = 4'd0;
             ex_write_enable_q        = 1'b0;
+            ex_can_bypass_q          = 1'b0;
             ex_is_load_q             = 1'b0;
             ex_load_word_q           = 1'b0;
             ex_is_store_q            = 1'b0;
@@ -508,7 +510,7 @@ module Core (
             ex_bypass_q.arithmetic   = execute_bus.arithmetic;
             ex_bypass_q.logic_result = execute_bus.logic_result;
             ex_bypass_q.use_logic    = execute_bus.result_use_logic;
-            ex_bypass_q.operand_a    = ex_bypass_hit_rs1 && rx_use_rs1_q && !(rx_is_jal_q || rx_is_jalr_q);
+            ex_bypass_q.operand_a    = ex_bypass_hit_rs1 && rx_use_rs1_q && !rx_is_jalr_q;
             ex_bypass_q.operand_b    = ex_bypass_hit_rs2 && rx_use_rs2_q && !rx_use_immediate_q;
             ex_bypass_q.store_data   = ex_bypass_hit_rs2 && rx_is_store_q;
             ex_bypass_q.redirect     = ex_bypass_hit_rs1 && rx_is_jalr_q;
@@ -519,6 +521,7 @@ module Core (
             ex_rd_q           = rx_rd_q;
             ex_alu_op_q       = rx_alu_op_q;
             ex_write_enable_q = rx_write_enable_q;
+            ex_can_bypass_q   = rx_write_enable_q && !rx_is_load_q && (rx_rd_q != 5'd0);
             ex_is_load_q      = rx_is_load_q;
             ex_load_word_q    = rx_load_word_q;
             ex_is_store_q     = rx_is_store_q;
