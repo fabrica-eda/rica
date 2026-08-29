@@ -1,6 +1,6 @@
 {
   "reference_clock_port": "clk",
-  "output_clock_port": "clk_126",
+  "output_clock_port": "clk_cpu",
   "locked_port": "pll_locked",
   "fabric_output": "CLKOP",
   "feedback_output": "CLKOP",

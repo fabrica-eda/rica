@@ -1,7 +1,7 @@
 /// ECP5 Versa 5G board wrapper with a tiny RISC-V LED firmware in ROM.
 module Top (
     clk       : input  'reference clock   ,
-    clk_126   : input  'cpu       clock   ,
+    clk_cpu   : input  'cpu       clock   ,
     pll_locked: input  'cpu       logic   ,
     led       : output 'cpu       logic<8>,
 ) {
@@ -29,7 +29,7 @@ module Top (
     inst core: Core #(
         COMMIT_PAYLOAD: 0,
     ) (
-        clk             : clk_126                ,
+        clk             : clk_cpu                ,
         rst_n           : core_rst_n             ,
         instr           : instruction            ,
         data_rdata      : 64'h0000_0000_0000_0000,
@@ -51,8 +51,8 @@ module Top (
         debug_x31       : x31                    ,
     );
 
-    // clk_126 and pll_locked are logical PLL boundary ports. Texo replaces
-    // them with one EHXPLLL using pll-12-to-120.json before placement.
+    // clk_cpu and pll_locked are logical PLL boundary ports. Texo replaces
+    // them with one EHXPLLL using pll-12-to-124p8.json before placement.
     assign core_rst_n = pll_locked;
 
     // D5-D10 show the active-low low six bits of the x31 count.
@@ -61,7 +61,7 @@ module Top (
     // progress, and register writeback are therefore independently visible.
     // The x31 display trails by one CPU clock and stays out of the CPU's
     // combinational timing cone.
-    always_ff (clk_126, core_rst_n) {
+    always_ff (clk_cpu, core_rst_n) {
         if_reset {
             commit_count_q = 25'h000_0000;
             led_count_q    = 6'h3f;

@@ -310,7 +310,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
     let mut run_tck = DEFAULT_RUN_TCK;
     let mut program = true;
-    let mut bitstream = project.join("build/riscv-hardware-test-120.bit");
+    let mut bitstream = project.join("build/riscv-hardware-test-125.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

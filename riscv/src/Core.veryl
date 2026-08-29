@@ -1,4 +1,4 @@
-/// Overlapped in-order RV64I-subset core for the 120 MHz implementation.
+/// Overlapped in-order RV64I-subset core for the 125 MHz timing target.
 ///
 /// Fetch/decode, synchronous register read, EX1, common completion/EX2, and
 /// writeback overlap. The LSU is one completion source rather than the owner of

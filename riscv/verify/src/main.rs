@@ -945,7 +945,7 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
     let mapped = map_to_ecp5_with_options(
         &synthesized.netlist,
         MappingOptions {
-            timing_goal_mhz: 126,
+            timing_goal_mhz: 125,
             ..MappingOptions::default()
         },
     )?;
@@ -960,7 +960,7 @@ fn verify_register_file(project: &Path) -> Result<(), Box<dyn Error>> {
         );
     }
     println!(
-        "Register file @ 126 MHz: dual-read behavior passed; 2 logical memories -> {block_rams} DP16KD cells, data={} -> {} ps, overall={} -> {} ps",
+        "Register file @ 125 MHz: dual-read behavior passed; 2 logical memories -> {block_rams} DP16KD cells, data={} -> {} ps, overall={} -> {} ps",
         mapped.retiming().original_period_ps,
         mapped.retiming().selected_period_ps,
         mapped.retiming().original_overall_period_ps,
@@ -1064,7 +1064,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mapped = map_to_ecp5_with_options(
         &synthesized.netlist,
         MappingOptions {
-            timing_goal_mhz: 126,
+            timing_goal_mhz: 125,
             ..MappingOptions::default()
         },
     )?;
@@ -1074,7 +1074,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "Struo ECP5 map @ 126 MHz: {} nodes, {} registers, {} cells, data={} -> {} ps, overall={} -> {} ps, LUT depth={} -> {}, critical registers={} -> {}, retimed={}, map={map_elapsed:?}",
+        "Struo ECP5 map @ 125 MHz: {} nodes, {} registers, {} cells, data={} -> {} ps, overall={} -> {} ps, LUT depth={} -> {}, critical registers={} -> {}, retimed={}, map={map_elapsed:?}",
         synthesized.netlist.nodes().len(),
         synthesized.netlist.registers().len(),
         mapped.cells().len(),

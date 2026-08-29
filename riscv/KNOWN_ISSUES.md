@@ -94,12 +94,15 @@ This holds the already-aligned BRAM output without a 128-bit operand feedback
 mux or a new address-mux timing cone. The mapped wrapper grew by three cells
 (7757 to 7760), routes at 133.17 MHz for the 126 MHz constraint, and the exact
 unreordered hardware suite passes `alu`, `compare`, `control`, `memory`, and
-`shift` 5/5 on the LFE5UM5G-85 EVN.
+`shift` 5/5 on the LFE5UM5G-85 EVN. This historical 126 MHz PLL configuration
+was later found to use a 6 MHz phase-detector clock outside the data-sheet
+range and is no longer the board configuration.
 
 ## Timing and throughput are separate gates
 
-The nominal clock target is 126 MHz, but an implementation is not accepted
-solely because it meets a 7.937 ns period. Regressions must report at least:
+The nominal timing target is 125 MHz, while the data-sheet-valid board PLL
+runs at 124.8 MHz. An implementation is not accepted solely because it meets
+an 8.000 ns period. Regressions must report at least:
 
 - clocks per committed instruction for the architectural trace
 - steady-state ALU instruction throughput
@@ -109,8 +112,10 @@ solely because it meets a 7.937 ns period. Regressions must report at least:
 
 The current core commits the 58-instruction mixed trace in 102 clocks and
 keeps consecutive dependent one-cycle integer ALU operations at one per
-clock. At 126 MHz the complete wrapper reaches 132.01 MHz in nextpnr seed 1;
-Texo reports +0.053 ns setup and +0.290 ns hold slack across all 2385 checked
-endpoints. The retired 250 MHz design met timing while taking fifteen clocks
-per instruction; it remains in Texo as a physical-design regression precisely
-so this CPU is not optimized around that result.
+clock. With the 124.8 MHz PLL, the complete wrapper reaches 131.37 MHz in
+nextpnr 0.6 seed 4 and the resulting bitstream passes six complete hardware
+suites (30/30). Texo currently applies a separate clock-uncertainty policy, so
+its WNS is not used as a nextpnr-compatible QoR result. The retired 250 MHz
+design met timing while taking fifteen clocks per instruction; it remains in
+Texo as a physical-design regression precisely so this CPU is not optimized
+around that result.

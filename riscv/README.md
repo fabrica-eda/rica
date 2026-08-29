@@ -9,7 +9,7 @@ building blocks:
 - `src/Core.veryl`: pipeline state, hazard control, forwarding, and commit
 - `src/RegisterFile.veryl`: synchronous two-read/one-write register-file
   candidate
-- `src/Top.veryl`: 120 MHz ECP5 EVN PLL/LED bring-up wrapper
+- `src/Top.veryl`: 124.8 MHz ECP5 EVN PLL/LED bring-up wrapper
 - `verify/`: architectural, synthesis, mapping-equivalence, and optional
   post-map regressions
 
@@ -19,8 +19,9 @@ owned by this repository.
 
 ## Performance target
 
-The nominal CPU target is 120 MHz (8.333 ns). Fmax is not accepted as a
-performance result by itself. The current overlapped implementation has:
+The nominal CPU timing target is 125 MHz (8.000 ns). The board clock is
+124.8 MHz (8.013 ns). Fmax is not accepted as a performance result by itself.
+The current overlapped implementation has:
 
 - CPI 1 through consecutive dependent ALU instructions using registered EX
   bypasses
@@ -41,15 +42,16 @@ comparison regression completes 16 commits in 46 clocks; four immediately
 dependent SLT-to-branch pairs each pay the intended single wait.
 
 The EVN has a 12 MHz reference and an integer ECP5 PLL. The board configuration
-generates exactly 120 MHz with a 12 MHz phase-detector frequency. The older
-126 MHz configuration used a 6 MHz phase-detector frequency, outside the
-data-sheet range with guaranteed PLL jitter, and is not used for sign-off. The
-board disables unused commit payload registers
+uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, a 624 MHz VCO, and a
+divide-by-five `CLKOS` output to generate 124.8 MHz. Exact 125 MHz and the older
+126 MHz configuration require an input divider greater than one and put the
+phase detector below its data-sheet range, so neither is used. The board
+disables unused commit payload registers
 while retaining `commit_valid` for its heartbeat; the verification build keeps
-the full architectural commit trace. Struo estimates the core at 6.620 ns. The
-edge-aware Texo STA closes the complete hardware test wrapper at 120 MHz with
-+0.012 ns setup and +0.290 ns hold slack. The same bitstream passes the five
-bundled RV64 hardware tests on the EVN in four consecutive suite runs.
+the full architectural commit trace. Struo estimates the core at 6.620 ns.
+nextpnr 0.6 seed 4 routes the complete hardware wrapper at 131.37 MHz and
+passes its derived 124.8 MHz clock constraint. The resulting bitstream passes
+all five bundled RV64 hardware tests in six consecutive suite runs (30/30).
 
 ## Verification
 
@@ -92,7 +94,7 @@ Test only the reusable synchronous register file:
 cargo run --locked --offline -p verify-riscv -- --regfile-only
 ```
 
-Export either the current core or the complete board wrapper's 120 MHz-targeted
+Export either the current core or the complete board wrapper's 125 MHz-targeted
 ECP5 mapping for nextpnr diagnostics:
 
 ```sh
@@ -100,17 +102,17 @@ cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- Top
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- HardwareTestTop
 nextpnr-ecp5 --um5g-85k --package CABGA381 --speed 8 \
-  --json riscv/build/riscv-hardware-test-120.nextpnr.json \
+  --json riscv/build/riscv-hardware-test-125.nextpnr.json \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
-  --textcfg riscv/build/riscv-hardware-test-120.bit.config \
-  --freq 120 --seed 4
-ecppack riscv/build/riscv-hardware-test-120.bit.config \
-  riscv/build/riscv-hardware-test-120.bit --compress --freq 62.0
+  --textcfg riscv/build/riscv-hardware-test-125.bit.config \
+  --freq 125 --seed 4
+ecppack riscv/build/riscv-hardware-test-125.bit.config \
+  riscv/build/riscv-hardware-test-125.bit --compress --freq 62.0
 ```
 
 `HardwareTestTop` adds 4 KiB of JTAG-I2C-loadable Harvard BRAM, CPU run/reset
 control, and a `tohost` result mailbox. After routing and packing
-`riscv/build/riscv-hardware-test-120.bit`, program it and run the bundled RV64
+`riscv/build/riscv-hardware-test-125.bit`, program it and run the bundled RV64
 ELFs on the EVN with:
 
 ```sh
@@ -125,7 +127,7 @@ CPU, waits, and checks the status and 64-bit `tohost` result. The physical test
 RAM accepts `0x00000000..0x000007ff` and
 `0x80000000..0x800007ff`.
 
-The board wrapper binds the EVN's 12 MHz reference to a 120 MHz EHXPLLL. Its
+The board wrapper binds the EVN's 12 MHz reference to a 124.8 MHz EHXPLLL. Its
 ROM increments x31 immediately after reset and then enters a delay/branch loop
 before the next increment. D5 through D10 show x31[5:0] as an active-low binary
 count, D11 toggles from a separately divided retired-instruction count, and D12
@@ -139,27 +141,24 @@ advance. `Top` registers the x31 polarity conversion, so its display
 trails by one CPU cycle without putting those LED pads directly on the
 CPU's combinational output path. The PLL lock alone releases CPU reset; the
 generic SW4 input is not required for autonomous bring-up.
-Build and program it with the current Texo and pinned Struo revision using:
+Use the same PLL binding for the current Texo diagnostic flow:
 
 ```sh
 ../texo/target/release/texo pnr riscv --top HardwareTestTop --package CABGA381 --speed 8 \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
-  --pll-binding riscv/pll-12-to-120.json \
-  --synthesis-goal-mhz 120 --jtagg-prefix jtag \
-  --output riscv/build/riscv-hardware-test-120.texo.json
-../texo/target/release/texo bitgen riscv/build/riscv-hardware-test-120.texo.json \
-  --bit riscv/build/riscv-hardware-test-120.bit
-openFPGALoader -b ecp5_evn --write-sram riscv/build/riscv-hardware-test-120.bit
+  --pll-binding riscv/pll-12-to-124p8.json \
+  --synthesis-goal-mhz 125 --jtagg-prefix jtag \
+  --output riscv/build/riscv-hardware-test-125.texo.json
 ```
 
-This Texo revision automatically downloads and verifies the corrected ECP5 v4
-target pack; no local `--architecture` or `--target-pack` override is needed.
+This is currently a diagnostic rather than the verified bitstream path: Texo's
+clock-uncertainty policy is not equivalent to nextpnr 0.6 and does not close
+this wrapper at 125 MHz. The command automatically downloads and verifies the
+corrected ECP5 v4 target pack; no local architecture override is needed.
 
-Native bitgen, JTAG detection, SRAM programming, ELF upload, CPU execution, and
-mailbox readback are verified on the LFE5UM5G-85 EVN at 120 MHz. The complete
-`alu`, `compare`, `control`, `memory`, and `shift` hardware suite passes 5/5.
-The final HardwareTestTop mapping uses 7790 cells. nextpnr 0.6 miscomputes the
-`INT_OP` feedback PLL as a 120 MHz VCO and 24 MHz output; override or fix that
-generated-clock constraint before using its timing report for comparison. Use
-`--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a bitstream
-with the wrong device ID and configuration semantics.
+JTAG detection, SRAM programming, ELF upload, CPU execution, and mailbox
+readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz using the nextpnr
+bitstream above. The complete `alu`, `compare`, `control`, `memory`, and
+`shift` hardware suite passes 30/30 across six full runs. Use `--um5g-85k`, not
+`--85k`: the latter targets LFE5U and produces a bitstream with the wrong
+device ID and configuration semantics.

@@ -5,7 +5,7 @@
 /// self-check result through the programmed `tohost` address.
 module HardwareTestTop (
     clk        : input  'reference clock             ,
-    clk_126    : input  'cpu       clock             ,
+    clk_cpu    : input  'cpu       clock             ,
     pll_locked : input  'cpu       logic             ,
     led        : output 'cpu       logic          <8>,
     jtag_tdi   : input  'tap       logic             ,
@@ -72,7 +72,7 @@ module HardwareTestTop (
     var unused_commit_mem_wmask: 'cpu logic<8> ;
 
     inst i2c_target: rica_i2c::I2cTarget250 (
-        clk               : clk_126           ,
+        clk               : clk_cpu           ,
         rst_n             : debug_rst_n       ,
         scl_i             : target_scl        ,
         sda_i             : wired_sda         ,
@@ -84,8 +84,8 @@ module HardwareTestTop (
     );
 
     inst memory: HardwareMemory (
-        clk              : clk_126                 ,
-        clk_n            : clk_126 as clock_negedge,
+        clk              : clk_cpu                 ,
+        clk_n            : clk_cpu as clock_negedge,
         cpu_instr_address: cpu_pc[31:0]            ,
         cpu_instruction  : instruction             ,
         cpu_data_address : data_addr[31:0]         ,
@@ -102,7 +102,7 @@ module HardwareTestTop (
         COMMIT_PAYLOAD  : 0,
         SYNC_DATA_MEMORY: 1,
     ) (
-        clk             : clk_126                ,
+        clk             : clk_cpu                ,
         rst_n           : cpu_rst_n              ,
         instr           : instruction            ,
         data_rdata      : data_rdata             ,
@@ -183,7 +183,7 @@ module HardwareTestTop (
         led[7] = !pll_locked;
     }
 
-    always_ff (clk_126, debug_rst_n) {
+    always_ff (clk_cpu, debug_rst_n) {
         if_reset {
             debug_read_address_q = 8'h00;
             debug_identity_q     = 8'hff;
@@ -212,7 +212,7 @@ module HardwareTestTop (
         }
     }
 
-    always_ff (clk_126, debug_rst_n) {
+    always_ff (clk_cpu, debug_rst_n) {
         if_reset {
             run_q                = 1'b0;
             aperture_base_q      = 32'h0000_0000;
