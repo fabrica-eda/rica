@@ -10,6 +10,10 @@ building blocks:
 - `src/CsrFile.veryl`: machine-mode CSR and trap state
 - `src/RegisterFile.veryl`: synchronous two-read/one-write register-file
   candidate
+- `src/InstructionBuffer.veryl`: two-line CPU-side instruction buffer and
+  memory-response capture stage
+- `src/HardwareMemory.veryl`: 256 KiB unified board BRAM running at half the
+  CPU frequency
 - `src/Top.veryl`: 124.8 MHz ECP5 EVN PLL/LED bring-up wrapper
 - `verify/`: architectural, synthesis, mapping-equivalence, and optional
   post-map regressions
@@ -28,7 +32,9 @@ The current overlapped implementation has:
   bypasses
 - one localized wait for load-use, shift-use, and compare-use dependencies;
   independent shifts and comparisons still enter every clock
-- synchronous BRAM register reads without a fixed per-instruction tax
+- response-token-driven data-memory waits; no fixed load/store cycle count
+- a 124.8 MHz CPU domain and 62.4 MHz BRAM domain with registered bundled-data
+  crossings
 - pipelined 16-bit comparison chunks completed in EX2, keeping the comparison
   reduction and data-dependent flush fanout off the ALU critical path
 - a registered instruction-memory address, keeping the next-PC addition and
@@ -43,18 +49,25 @@ comparison regression completes 16 commits in 46 clocks; four immediately
 dependent SLT-to-branch pairs each pay the intended single wait.
 
 The EVN has a 12 MHz reference and an integer ECP5 PLL. The board configuration
-uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, a 624 MHz VCO, and a
-divide-by-five `CLKOS` output to generate 124.8 MHz. Exact 125 MHz and the older
-126 MHz configuration require an input divider greater than one and put the
-phase detector below its data-sheet range, so neither is used. The board
-disables unused commit payload registers while retaining `commit_valid` for its
-heartbeat; the verification build keeps the full architectural commit trace.
-The earlier 4 KiB hardware wrapper met 124.8 MHz, but the current 256 KiB
-unified true-dual-port memory does not yet: two bounded physical-feedback passes
-improve nextpnr seed 4 from 71.83 MHz to 88.79 MHz. The remaining path is the
-half-cycle instruction/debug address route across the full BRAM column. A
-full-cycle instruction-memory response stage is required before producing a
-timing-qualified replacement bitstream.
+uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, and a 624 MHz VCO.
+`CLKOS` divides by five for the 124.8 MHz CPU clock and `CLKOS2` divides by ten
+for the 62.4 MHz memory clock. Exact 125 MHz and the older 126 MHz configuration
+require an input divider greater than one and put the phase detector below its
+data-sheet range, so neither is used. The board disables unused commit payload
+registers while retaining `commit_valid` for its heartbeat; the verification
+build keeps the full architectural commit trace.
+
+nextpnr does not enforce timing between different divided outputs of the same
+ECP5 PLL. The report validator therefore checks both ordinary per-domain Fmax
+and the two related-clock boundaries. Although memory runs at half the CPU
+frequency, the phase-aligned clocks can have an intervening CPU edge, so both
+directions must meet the 8.012 ns CPU period. In the current seed-6 route, the
+CPU is 126.23/124.81 MHz, memory is 111.47/62.40 MHz, CPU-to-memory is
+6.410/8.012 ns, and memory-to-CPU is 5.982/8.012 ns. The instruction payload
+is captured first in the CPU domain; the wider data selection cone is first
+registered in the memory domain. The response toggle changes only with that
+registered data, so load/store completion follows the actual response rather
+than an assumed pipeline length.
 
 ## Verification
 
@@ -108,16 +121,20 @@ nextpnr-ecp5 --um5g-85k --package CABGA381 --speed 8 \
   --json riscv/build/riscv-hardware-test-125.nextpnr.json \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
   --textcfg riscv/build/riscv-hardware-test-125.bit.config \
-  --freq 125 --seed 4
+  --report riscv/build/riscv-hardware-test-125.nextpnr-report.json \
+  --freq 125 --seed 6
+cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- \
+  --validate-board-report riscv/build/riscv-hardware-test-125.nextpnr-report.json
 ecppack riscv/build/riscv-hardware-test-125.bit.config \
-  riscv/build/riscv-hardware-test-125.bit --compress --freq 62.0
+  riscv/build/riscv-hardware-test-125.bit --compress --freq 38.8
 ```
 
 `HardwareTestTop` adds 256 KiB of JTAG-I2C-loadable unified true-dual-port BRAM,
 CPU run/reset control, and a `tohost` result mailbox. The first physical port
-serves falling-edge instruction fetches or debug writes while reset; the second
-serves rising-edge LSU reads and writes. After timing closure, routing, and
-packing
+serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
+the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
+the CPU-side instruction buffer consumes two 32-bit instructions from each
+line. After timing closure, routing, and packing
 `riscv/build/riscv-hardware-test-125.bit`, program it and run the bundled RV64
 ELFs on the EVN with:
 
@@ -133,6 +150,19 @@ checks the status and 64-bit `tohost` result. The physical test RAM accepts a
 4 KiB reset trampoline at `0x00000000..0x00000fff` and 252 KiB of ACT4 memory
 at `0x80000000..0x8003efff`. The timing-critical high region maps directly to
 BRAM; the trampoline is relocated to the final physical 4 KiB.
+
+When the USB adapter is attached to a Windows-side openFPGALoader XVC server,
+the same runner programs the FPGA and drives the JTAG-I2C protocol directly
+over TCP:
+
+```sh
+cargo run --locked --offline --release -p verify-riscv \
+  --bin hardware-riscv-tests -- --xvc HOST:PORT
+```
+
+`--act4` selects all 51 pinned ACT4 RV64I ELFs. It is functional with either
+transport, but the current byte-oriented I2C loader is slow over an XVC server
+whose maximum shift packet is 2048 bits.
 
 The board wrapper binds the EVN's 12 MHz reference to a 124.8 MHz EHXPLLL. Its
 ROM increments x31 immediately after reset and then enters a delay/branch loop
@@ -166,14 +196,16 @@ Generate a native bitstream only after the Texo run reports timing closure:
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
-pack; no local architecture override is needed. The pinned Texo revision can
-import both ports and applies their independent active edges in STA, but the
-current 256 KiB wrapper does not close at 124.8 MHz in Texo either. Do not run
-bit generation or program an older 4 KiB artifact as though it represented
-this design.
+pack; no local architecture override is needed. The pinned Texo revision is
+`18b4932f54d263d912fe7da65d9edee0f36d566e`. On the current 256 KiB wrapper it
+loads the architecture in 3.60 s and completes the first negotiated route in
+6.36 s, roughly twice as fast as the previous revision in this run. Physical
+synthesis improves WNS from -0.607 ns to -0.313 ns, but 124.8 MHz still does
+not close, so do not generate a Texo bitstream from this checkpoint.
 
-JTAG detection, SRAM programming, ELF upload, CPU execution, and mailbox
-readback were verified on the previous 4 KiB wrapper at 124.8 MHz. Actual-board
-verification of the current 256 KiB wrapper remains pending timing closure.
+The nextpnr seed-6 bitstream is timing-qualified by the explicit related-clock
+validator. JTAG detection, SRAM programming, ELF upload, CPU execution, and
+mailbox readback pass all six bundled RV64 ELFs on the current 256 KiB wrapper
+at 124.8 MHz, using both direct USB and XVC transports.
 Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
 bitstream with the wrong device ID and configuration semantics.

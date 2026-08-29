@@ -6,6 +6,7 @@
 module HardwareTestTop (
     clk        : input  'reference clock             ,
     clk_cpu    : input  'cpu       clock             ,
+    clk_mem    : input  'memory    clock             ,
     pll_locked : input  'cpu       logic             ,
     led        : output 'cpu       logic          <8>,
     jtag_tdi   : input  'tap       logic             ,
@@ -20,15 +21,15 @@ module HardwareTestTop (
     jtag_tdo1  : output 'tap       logic             ,
     jtag_tdo2  : output 'tap       logic             ,
 ) {
-    var shift_register: 'tap logic          <2>;
-    var master_scl    : 'tap logic             ;
-    var master_sda_low: 'tap logic             ;
-    var target_scl    : 'cpu logic             ;
-    var target_sda_low: 'cpu logic             ;
-    var wired_sda     : 'cpu logic             ;
-    var debug_reset_async_n: 'cpu reset_async_low;
-    var debug_reset_sync_q : 'cpu logic           <2>;
-    var debug_rst_n   : 'cpu reset_async_low   ;
+    var shift_register     : 'tap logic          <2>;
+    var master_scl         : 'tap logic             ;
+    var master_sda_low     : 'tap logic             ;
+    var target_scl         : 'cpu logic             ;
+    var target_sda_low     : 'cpu logic             ;
+    var wired_sda          : 'cpu logic             ;
+    var debug_reset_async_n: 'cpu reset_async_low   ;
+    var debug_reset_sync_q : 'cpu logic          <2>;
+    var debug_rst_n        : 'cpu reset_async_low   ;
 
     var debug_address       : 'cpu logic<8>;
     var debug_write_data    : 'cpu logic<8>;
@@ -50,28 +51,36 @@ module HardwareTestTop (
     var cpu_rst_n           : 'cpu reset_async_low    ;
     var memory_debug_write  : 'cpu logic              ;
     var memory_debug_addr   : 'cpu logic          <32>;
-    var memory_debug_write_q: 'cpu logic              ;
+    var memory_debug_write_q: 'cpu logic          <2> ;
     var memory_debug_addr_q : 'cpu logic          <32>;
     var memory_debug_data_q : 'cpu logic          <8> ;
 
-    var instruction            : 'cpu logic<32>;
-    var cpu_pc                 : 'cpu logic<64>;
-    var data_addr              : 'cpu logic<64>;
-    var data_rdata             : 'cpu logic<64>;
-    var data_wdata             : 'cpu logic<64>;
-    var data_wmask             : 'cpu logic<8> ;
-    var data_we                : 'cpu logic    ;
-    var halted                 : 'cpu logic    ;
-    var commit_valid           : 'cpu logic    ;
-    var debug_x31              : 'cpu logic<64>;
-    var unused_commit_pc       : 'cpu logic<64>;
-    var unused_commit_instr    : 'cpu logic<32>;
-    var unused_commit_rd       : 'cpu logic<5> ;
-    var unused_commit_data     : 'cpu logic<64>;
-    var unused_commit_mem_we   : 'cpu logic    ;
-    var unused_commit_mem_addr : 'cpu logic<64>;
-    var unused_commit_mem_wdata: 'cpu logic<64>;
-    var unused_commit_mem_wmask: 'cpu logic<8> ;
+    var instruction                  : 'cpu    logic<32>;
+    var instruction_valid            : 'cpu    logic    ;
+    var memory_instr_address         : 'memory logic<32>;
+    var memory_instr_line            : 'memory logic<64>;
+    var memory_instr_response_address: 'memory logic<32>;
+    var memory_instr_response_valid  : 'memory logic    ;
+    var cpu_pc                       : 'cpu    logic<64>;
+    var data_addr                    : 'cpu    logic<64>;
+    var data_memory_addr             : 'cpu    logic<64>;
+    var data_rdata                   : 'cpu    logic<64>;
+    var data_wdata                   : 'cpu    logic<64>;
+    var data_wmask                   : 'cpu    logic<8> ;
+    var data_we                      : 'cpu    logic    ;
+    var data_request_sequence        : 'cpu    logic    ;
+    var data_response_sequence       : 'cpu    logic    ;
+    var halted                       : 'cpu    logic    ;
+    var commit_valid                 : 'cpu    logic    ;
+    var debug_x31                    : 'cpu    logic<64>;
+    var unused_commit_pc             : 'cpu    logic<64>;
+    var unused_commit_instr          : 'cpu    logic<32>;
+    var unused_commit_rd             : 'cpu    logic<5> ;
+    var unused_commit_data           : 'cpu    logic<64>;
+    var unused_commit_mem_we         : 'cpu    logic    ;
+    var unused_commit_mem_addr       : 'cpu    logic<64>;
+    var unused_commit_mem_wdata      : 'cpu    logic<64>;
+    var unused_commit_mem_wmask      : 'cpu    logic<8> ;
 
     inst i2c_target: rica_i2c::I2cTarget250 (
         clk               : clk_cpu           ,
@@ -85,45 +94,72 @@ module HardwareTestTop (
         debug_read_data   : debug_read_data   ,
     );
 
-    inst memory: HardwareMemory (
-        clk              : clk_cpu                 ,
-        clk_n            : clk_cpu as clock_negedge,
-        cpu_instr_address: cpu_pc[31:0]            ,
-        cpu_instruction  : instruction             ,
-        cpu_data_address : data_addr[31:0]         ,
-        cpu_data_read    : data_rdata              ,
-        cpu_data_write   : data_wdata              ,
-        cpu_data_mask    : data_wmask              ,
-        cpu_data_we      : data_we                 ,
-        debug_write      : memory_debug_write_q    ,
-        debug_address    : memory_debug_addr_q     ,
-        debug_data       : memory_debug_data_q     ,
+    inst instruction_buffer: InstructionBuffer (
+        clk: clk_cpu,
+        // Loading a new ELF resets the CPU without reconfiguring the FPGA.
+        // Flush cached lines with that same reset so a previous test cannot
+        // execute stale instructions at identical virtual addresses.
+        rst_n                  : cpu_rst_n                    ,
+        pc                     : cpu_pc[31:0]                 ,
+        instruction            : instruction                  ,
+        instruction_valid      : instruction_valid            ,
+        memory_request_address : memory_instr_address         ,
+        memory_response_address: memory_instr_response_address,
+        memory_response_line   : memory_instr_line            ,
+        memory_response_valid  : memory_instr_response_valid  ,
     );
 
+    unsafe (cdc) {
+        inst hardware_memory: HardwareMemory (
+            clk                       : clk_mem                      ,
+            rst_n                     : debug_rst_n                  ,
+            cpu_instr_address         : memory_instr_address         ,
+            cpu_instr_line            : memory_instr_line            ,
+            cpu_instr_response_address: memory_instr_response_address,
+            cpu_instr_response_valid  : memory_instr_response_valid  ,
+            cpu_data_address          : data_memory_addr[31:0]       ,
+            cpu_data_read             : data_rdata                   ,
+            cpu_data_write            : data_wdata                   ,
+            cpu_data_mask             : data_wmask                   ,
+            cpu_data_we               : data_we                      ,
+            cpu_data_request_sequence : data_request_sequence        ,
+            cpu_data_response_sequence: data_response_sequence       ,
+            debug_write               : memory_debug_write_q != 2'd0,
+            debug_address             : memory_debug_addr_q          ,
+            debug_data                : memory_debug_data_q          ,
+        );
+    }
+
     inst core: Core #(
-        COMMIT_PAYLOAD  : 0,
-        SYNC_DATA_MEMORY: 1,
+        COMMIT_PAYLOAD   : 0,
+        SYNC_INSTR_MEMORY: 0,
+        SYNC_DATA_MEMORY : 1,
+        RELOCATE_LOW_DATA: 1,
     ) (
-        clk             : clk_cpu                ,
-        rst_n           : cpu_rst_n              ,
-        instr           : instruction            ,
-        data_rdata      : data_rdata             ,
-        pc              : cpu_pc                 ,
-        data_addr       : data_addr              ,
-        data_wdata      : data_wdata             ,
-        data_wmask      : data_wmask             ,
-        data_we         : data_we                ,
-        halted          : halted                 ,
-        commit_valid    : commit_valid           ,
-        commit_pc       : unused_commit_pc       ,
-        commit_instr    : unused_commit_instr    ,
-        commit_rd       : unused_commit_rd       ,
-        commit_data     : unused_commit_data     ,
-        commit_mem_we   : unused_commit_mem_we   ,
-        commit_mem_addr : unused_commit_mem_addr ,
-        commit_mem_wdata: unused_commit_mem_wdata,
-        commit_mem_wmask: unused_commit_mem_wmask,
-        debug_x31       : debug_x31              ,
+        clk                   : clk_cpu                ,
+        rst_n                 : cpu_rst_n              ,
+        instr                 : instruction            ,
+        instr_valid           : instruction_valid      ,
+        data_rdata            : data_rdata             ,
+        data_response_sequence: data_response_sequence ,
+        pc                    : cpu_pc                 ,
+        data_addr             : data_addr              ,
+        data_memory_addr      : data_memory_addr       ,
+        data_wdata            : data_wdata             ,
+        data_wmask            : data_wmask             ,
+        data_we               : data_we                ,
+        data_request_sequence : data_request_sequence  ,
+        halted                : halted                 ,
+        commit_valid          : commit_valid           ,
+        commit_pc             : unused_commit_pc       ,
+        commit_instr          : unused_commit_instr    ,
+        commit_rd             : unused_commit_rd       ,
+        commit_data           : unused_commit_data     ,
+        commit_mem_we         : unused_commit_mem_we   ,
+        commit_mem_addr       : unused_commit_mem_addr ,
+        commit_mem_wdata      : unused_commit_mem_wdata,
+        commit_mem_wmask      : unused_commit_mem_wmask,
+        debug_x31             : debug_x31              ,
     );
 
     always_ff (jtag_tck, jtag_rst_n) {
@@ -158,10 +194,10 @@ module HardwareTestTop (
     unsafe (cdc) {
         assign debug_reset_async_n = jtag_rst_n && pll_locked;
         assign debug_rst_n         = debug_reset_sync_q[1];
-        assign target_scl  = master_scl;
-        assign wired_sda   = !(master_sda_low || target_sda_low);
-        assign jtag_tdo1   = wired_sda;
-        assign jtag_tdo2   = pll_locked;
+        assign target_scl          = master_scl;
+        assign wired_sda           = !(master_sda_low || target_sda_low);
+        assign jtag_tdo1           = wired_sda;
+        assign jtag_tdo2           = pll_locked;
     }
 
     always_comb {
@@ -234,15 +270,17 @@ module HardwareTestTop (
             result_q             = 64'h0000_0000_0000_0000;
             result_valid_q       = 1'b0;
             activity_q           = 24'h000000;
-            memory_debug_write_q = 1'b0;
+            memory_debug_write_q = 2'd0;
             memory_debug_addr_q  = 32'h0000_0000;
             memory_debug_data_q  = 8'h00;
         } else {
-            activity_q           = activity_q + 24'd1;
-            memory_debug_write_q = memory_debug_write;
+            activity_q = activity_q + 24'd1;
             if memory_debug_write {
-                memory_debug_addr_q = memory_debug_addr;
-                memory_debug_data_q = debug_write_data;
+                memory_debug_write_q = 2'd3;
+                memory_debug_addr_q  = memory_debug_addr;
+                memory_debug_data_q  = debug_write_data;
+            } else if memory_debug_write_q != 2'd0 {
+                memory_debug_write_q = memory_debug_write_q - 2'd1;
             }
             if debug_write_strobe {
                 case debug_address {

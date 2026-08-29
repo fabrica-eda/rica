@@ -507,13 +507,17 @@ fn $function(
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
+    let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
+    let data_response_sequence = simulator.signal("data_response_sequence");
     let expected = program();
 
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
+        io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
+        io.set(data_response_sequence, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;
@@ -677,8 +681,8 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
     }
 
     let mut simulator = SimulatorBuilder::new(source, "HardwareCoreTestTop").build_native()?;
-    let clk = simulator.event("clk");
-    let clk_n = simulator.event("clk_n");
+    let clk_cpu = simulator.event("clk_cpu");
+    let clk_mem = simulator.event("clk_mem");
     let rst_n = simulator.signal("rst_n");
     let debug_write = simulator.signal("debug_write");
     let debug_address = simulator.signal("debug_address");
@@ -689,20 +693,18 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
         io.set(debug_address, 0_u32);
         io.set(debug_data, 0_u8);
     })?;
-    simulator.tick(clk_n)?;
-    simulator.tick(clk)?;
+    simulator.tick(clk_cpu)?;
+    simulator.tick(clk_mem)?;
     for (address, byte) in loaded {
         simulator.modify(|io| {
             io.set(debug_write, 1_u8);
             io.set(debug_address, address);
             io.set(debug_data, byte);
         })?;
-        simulator.tick(clk_n)?;
-        simulator.tick(clk)?;
+        simulator.tick(clk_mem)?;
     }
     simulator.modify(|io| io.set(debug_write, 0_u8))?;
-    simulator.tick(clk_n)?;
-    simulator.tick(clk)?;
+    simulator.tick(clk_mem)?;
     simulator.modify(|io| io.set(rst_n, 1_u8))?;
 
     let mut trace = std::collections::VecDeque::with_capacity(20);
@@ -710,7 +712,6 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
     let mut commits = 0_usize;
     let mut reset_entries = 0_usize;
     for cycle in 1..=100_000 {
-        simulator.tick(clk_n)?;
         let store = (value_native(&mut simulator, "data_we") != 0).then(|| {
             (
                 value_native(&mut simulator, "data_addr"),
@@ -718,7 +719,10 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
                 value_native(&mut simulator, "data_wmask"),
             )
         });
-        simulator.tick(clk)?;
+        simulator.tick(clk_cpu)?;
+        if cycle % 2 == 0 {
+            simulator.tick(clk_mem)?;
+        }
         if value_native(&mut simulator, "commit_valid") != 0 {
             commits += 1;
             let commit_pc = value_native(&mut simulator, "commit_pc");
@@ -816,6 +820,7 @@ fn verify_hardware_memory_rtl(
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
         verify_riscv::core_source(project)?,
+        fs::read_to_string(project.join("src/InstructionBuffer.veryl"))?,
         hardware_memory,
         fs::read_to_string(project.join("src/HardwareCoreTestTop.veryl"))?,
     ]
@@ -858,12 +863,16 @@ fn verify_board_diagnostic(
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
+    let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
+    let data_response_sequence = simulator.signal("data_response_sequence");
 
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
+        io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
+        io.set(data_response_sequence, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;

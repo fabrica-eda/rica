@@ -191,11 +191,15 @@ pub fn run_elf(
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
+    let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
+    let data_response_sequence = simulator.signal("data_response_sequence");
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
+        io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
+        io.set(data_response_sequence, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;

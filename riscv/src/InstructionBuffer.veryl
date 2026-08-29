@@ -1,0 +1,126 @@
+/// Two-entry instruction-line buffer between the related 62.4 MHz memory
+/// clock and 124.8 MHz CPU clock.
+///
+/// A registered request address removes cache-hit logic from the related-clock
+/// boundary. HardwareMemory returns a tagged 64-bit line on every memory edge;
+/// a CPU-domain response register gives that bundle a complete CPU cycle to
+/// settle before cache state consumes it. Keeping the current and prefetched
+/// line lets the CPU consume both 32-bit words without making the BRAM run at
+/// the CPU frequency.
+module InstructionBuffer (
+    clk                    : input  'cpu    clock              ,
+    rst_n                  : input  'cpu    reset_async_low    ,
+    pc                     : input  'cpu    logic          <32>,
+    instruction            : output 'cpu    logic          <32>,
+    instruction_valid      : output 'cpu    logic              ,
+    memory_request_address : output 'memory logic          <32>,
+    memory_response_address: input  'memory logic          <32>,
+    memory_response_line   : input  'memory logic          <64>,
+    memory_response_valid  : input  'memory logic              ,
+) {
+    var response_address_async: 'cpu logic<32>;
+    var response_line_async   : 'cpu logic<64>;
+    var response_valid_async  : 'cpu logic    ;
+    var response_address_q    : 'cpu logic<32>;
+    var response_line_q       : 'cpu logic<64>;
+    var response_valid_q      : 'cpu logic    ;
+    var request_address_q     : 'cpu logic<32>;
+    var desired_address       : 'cpu logic<32>;
+
+    var cache_address_0_q: 'cpu logic<32>;
+    var cache_address_1_q: 'cpu logic<32>;
+    var cache_line_0_q   : 'cpu logic<64>;
+    var cache_line_1_q   : 'cpu logic<64>;
+    var cache_valid_0_q  : 'cpu logic    ;
+    var cache_valid_1_q  : 'cpu logic    ;
+    var replace_q        : 'cpu logic    ;
+    var hit_0            : 'cpu logic    ;
+    var hit_1            : 'cpu logic    ;
+    var pc_line          : 'cpu logic<32>;
+
+    unsafe (cdc) {
+        assign response_address_async = memory_response_address;
+        assign response_line_async    = memory_response_line;
+        assign response_valid_async   = memory_response_valid;
+        assign memory_request_address = request_address_q;
+    }
+
+    always_comb {
+        pc_line = {pc[31:3], 3'b000};
+        hit_0   = cache_valid_0_q && (cache_address_0_q == pc_line);
+        hit_1   = cache_valid_1_q && (cache_address_1_q == pc_line);
+
+        instruction_valid = hit_0 || hit_1;
+        instruction       = 32'h0000_0013;
+        if hit_0 {
+            if pc[2] {
+                instruction = cache_line_0_q[63:32];
+            } else {
+                instruction = cache_line_0_q[31:0];
+            }
+        } else if hit_1 {
+            if pc[2] {
+                instruction = cache_line_1_q[63:32];
+            } else {
+                instruction = cache_line_1_q[31:0];
+            }
+        }
+
+        // A hit means the current line is already local, so spend the next
+        // memory cycle fetching its successor. A redirect miss requests the
+        // redirect target instead.
+        desired_address = pc_line;
+        if instruction_valid {
+            desired_address = pc_line + 32'd8;
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            cache_address_0_q  = 32'h0000_0000;
+            cache_address_1_q  = 32'h0000_0000;
+            cache_line_0_q     = 64'h0000_0000_0000_0013;
+            cache_line_1_q     = 64'h0000_0000_0000_0013;
+            cache_valid_0_q    = 1'b0;
+            cache_valid_1_q    = 1'b0;
+            replace_q          = 1'b0;
+            response_address_q = 32'h0000_0000;
+            response_line_q    = 64'h0000_0013_0000_0013;
+            response_valid_q   = 1'b0;
+            request_address_q  = 32'h0000_0000;
+        } else {
+            // Cache state consumes the preceding sample, giving the related-
+            // clock payload one complete CPU period to settle.
+            response_address_q = response_address_async;
+            response_line_q    = response_line_async;
+            response_valid_q   = response_valid_async;
+
+            // On the fill edge, advance directly from the returned tag. This
+            // removes the otherwise empty cycle in which cache-hit state has
+            // not yet observed the new line. A redirect keeps priority by
+            // failing the tag-to-current-PC comparison.
+            request_address_q = desired_address;
+            if response_valid_q && (response_address_q == pc_line) {
+                request_address_q = response_address_q + 32'd8;
+            }
+
+            if response_valid_q {
+                if cache_valid_0_q && (cache_address_0_q == response_address_q) {
+                    cache_line_0_q = response_line_q;
+                } else if cache_valid_1_q && (cache_address_1_q == response_address_q) {
+                    cache_line_1_q = response_line_q;
+                } else if !cache_valid_0_q || (!cache_valid_1_q && !replace_q) {
+                    cache_address_0_q = response_address_q;
+                    cache_line_0_q    = response_line_q;
+                    cache_valid_0_q   = 1'b1;
+                    replace_q         = 1'b1;
+                } else {
+                    cache_address_1_q = response_address_q;
+                    cache_line_1_q    = response_line_q;
+                    cache_valid_1_q   = 1'b1;
+                    replace_q         = 1'b0;
+                }
+            }
+        }
+    }
+}

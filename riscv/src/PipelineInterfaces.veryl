@@ -49,6 +49,7 @@ interface DecodeBus {
 /// not younger than an already-taken redirect.
 interface CsrBus {
     var index       : logic<4> ;
+    var write_index : logic<4> ;
     var read_data   : logic<64>;
     var legal       : logic    ;
     var writable    : logic    ;
@@ -65,6 +66,7 @@ interface CsrBus {
 
     modport core {
         index       : output,
+        write_index : output,
         write_enable: output,
         write_op    : output,
         write_source: output,
@@ -82,6 +84,7 @@ interface CsrBus {
 
     modport file {
         index       : input ,
+        write_index : input ,
         write_enable: input ,
         write_op    : input ,
         write_source: input ,
@@ -102,6 +105,7 @@ interface CsrBus {
 /// candidates leave separately so the pipeline can preserve a short bypass.
 interface ExecuteBus {
     var alu_op            : logic<4> ;
+    var subtract          : logic    ;
     var link              : logic    ;
     var word_op           : logic    ;
     var operand_a         : logic<64>;
@@ -119,6 +123,7 @@ interface ExecuteBus {
 
     modport pipeline {
         alu_op   : output,
+        subtract : output,
         link     : output,
         word_op  : output,
         operand_a: output,
@@ -128,6 +133,7 @@ interface ExecuteBus {
 
     modport execute {
         alu_op   : input,
+        subtract : input,
         link     : input,
         word_op  : input,
         operand_a: input,

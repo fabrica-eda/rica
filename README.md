@@ -19,12 +19,15 @@ explicitly with `cargo run --locked --offline -p verify-riscv -- --post-map`.
 
 The nominal CPU target is 125 MHz. The data-sheet-valid board PLL runs at
 124.8 MHz. Performance work is measured as instruction
-throughput, not Fmax alone: consecutive dependent ALU instructions now sustain
-one instruction per clock through registered EX bypasses, while load-, shift-,
-and compare-use dependencies stall once. The complete board wrapper reaches
-131.37 MHz in nextpnr seed 4. With the nextpnr-compatible ECP5 timing model it
-also closes in Texo with +0.009 ns setup and +0.290 ns hold slack. Bitstreams
-from both flows pass the complete hardware suite at 124.8 MHz.
+throughput, not Fmax alone: consecutive dependent ALU instructions sustain one
+instruction per clock through registered EX bypasses, while load-, shift-, and
+compare-use dependencies wait only for their producing stage. Board BRAM runs
+at 62.4 MHz behind response-token handshakes and a two-line instruction buffer.
+The current nextpnr seed-6 route reaches 126.23 MHz in the CPU domain and also
+passes explicit 8.012 ns related-clock checks in both directions. The same
+bitstream passes all six bundled ELFs on the physical EVN, both over direct USB
+and through an openFPGALoader XVC server. Texo revision `18b4932` improves this
+design to -0.313 ns WNS at the same target, but does not yet close 125 MHz.
 
 Run the I2C regressions with:
 

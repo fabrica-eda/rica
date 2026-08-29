@@ -17,6 +17,7 @@ module AddTimingTop (
 
     always_comb {
         execute_bus.alu_op    = 4'd0;
+        execute_bus.subtract  = 1'b0;
         execute_bus.link      = 1'b0;
         execute_bus.word_op   = 1'b0;
         execute_bus.operand_a = operand_a_q;
@@ -53,6 +54,7 @@ module MergedAluTimingTop (
 
     always_comb {
         execute_bus.alu_op    = alu_op_q;
+        execute_bus.subtract  = alu_op_q == 4'd1;
         execute_bus.link      = 1'b0;
         execute_bus.word_op   = word_op_q;
         execute_bus.operand_a = operand_a_q;
@@ -105,6 +107,7 @@ module AluTimingTop (
 
     always_comb {
         execute_bus.alu_op    = alu_op_q;
+        execute_bus.subtract  = alu_op_q == 4'd1;
         execute_bus.link      = 1'b0;
         execute_bus.word_op   = word_op_q;
         execute_bus.operand_a = operand_a_q;
@@ -174,6 +177,7 @@ module FullAluTimingTop (
 
     always_comb {
         execute_bus.alu_op    = alu_op_q;
+        execute_bus.subtract  = alu_op_q == 4'd1;
         execute_bus.link      = 1'b0;
         execute_bus.word_op   = word_op_q;
         execute_bus.operand_a = operand_a_q;

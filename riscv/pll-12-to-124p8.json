@@ -3,6 +3,9 @@
   "output_clock_port": "clk_cpu",
   "locked_port": "pll_locked",
   "fabric_output": "CLKOS",
+  "additional_output_clock_ports": {
+    "clk_mem": "CLKOS2"
+  },
   "feedback_output": "CLKINTFB",
   "parameters": {
     "PLLRST_ENA": "DISABLED",
@@ -22,12 +25,17 @@
     "CLKOS_DIV": "5",
     "CLKOS_CPHASE": "0",
     "CLKOS_FPHASE": "0",
+    "CLKOS2_ENABLE": "ENABLED",
+    "CLKOS2_DIV": "10",
+    "CLKOS2_CPHASE": "0",
+    "CLKOS2_FPHASE": "0",
     "FEEDBK_PATH": "INT_OP",
     "CLKFB_DIV": "1"
   },
   "attributes": {
     "FREQUENCY_PIN_CLKI": "12",
     "FREQUENCY_PIN_CLKOS": "124.8",
+    "FREQUENCY_PIN_CLKOS2": "62.4",
     "ICP_CURRENT": "12",
     "LPF_RESISTOR": "8",
     "MFG_ENABLE_FILTEROPAMP": "1",

@@ -15,13 +15,13 @@ module ExecuteUnit (
     );
 
     always_comb {
-        if execute.alu_op == 4'd1 {
+        if execute.subtract {
             arithmetic_b = ~execute.operand_b;
         } else {
             arithmetic_b = execute.operand_b;
         }
         sum_low = {1'b0, execute.operand_a[31:0]} + {1'b0, arithmetic_b[31:0]};
-        if execute.alu_op == 4'd1 {
+        if execute.subtract {
             sum_low = sum_low + 33'd1;
         }
 

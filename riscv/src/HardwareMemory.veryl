@@ -1,132 +1,146 @@
 /// 256 KiB unified hardware-test memory with a byte-wide debug loader.
 ///
-/// Port A fetches instructions on the falling CPU edge and becomes the debug
-/// write port while the CPU is held in reset. Port B performs synchronous LSU
-/// reads and writes on the rising edge. Eight byte banks preserve arbitrary
-/// RV64 load/store alignment without requiring a third memory port.
+/// Port A fetches instruction lines on the rising memory edge and becomes the
+/// debug write port while the CPU is held in reset. Port B performs synchronous
+/// LSU reads and writes on that same 62.4 MHz edge. Eight byte banks preserve
+/// arbitrary RV64 load/store alignment without requiring a third memory port.
 ///
 /// Addresses at 0x8000_0000 map directly to the first 252 KiB of BRAM. The
-/// reset trampoline at address zero is relocated to the final 4 KiB, so the
-/// timing-critical instruction and LSU paths require no address addition.
+/// reset trampoline at address zero is relocated to the final 4 KiB. The Core
+/// holds each LSU request until its response. This module captures that bundle
+/// once in the memory domain before address translation and BRAM selection, so
+/// related-clock crossings end at simple registers instead of BRAM logic.
 module HardwareMemory (
-    clk              : input  'cpu clock            ,
-    clk_n            : input  'cpu clock_negedge    ,
-    cpu_instr_address: input  'cpu logic        <32>,
-    cpu_instruction  : output 'cpu logic        <32>,
-    cpu_data_address : input  'cpu logic        <32>,
-    cpu_data_read    : output 'cpu logic        <64>,
-    cpu_data_write   : input  'cpu logic        <64>,
-    cpu_data_mask    : input  'cpu logic        <8> ,
-    cpu_data_we      : input  'cpu logic            ,
-    debug_write      : input  'cpu logic            ,
-    debug_address    : input  'cpu logic        <32>,
-    debug_data       : input  'cpu logic        <8> ,
+    clk                       : input  'memory clock              ,
+    rst_n                     : input  'memory reset_async_low    ,
+    cpu_instr_address         : input  'memory logic          <32>,
+    cpu_instr_line            : output 'memory logic          <64>,
+    cpu_instr_response_address: output 'memory logic          <32>,
+    cpu_instr_response_valid  : output 'memory logic              ,
+    cpu_data_address          : input  'memory logic          <32>,
+    cpu_data_read             : output 'memory logic          <64>,
+    cpu_data_write            : input  'memory logic          <64>,
+    cpu_data_mask             : input  'memory logic          <8> ,
+    cpu_data_we               : input  'memory logic              ,
+    cpu_data_request_sequence : input  'memory logic              ,
+    cpu_data_response_sequence: output 'memory logic              ,
+    debug_write               : input  'memory logic              ,
+    debug_address             : input  'memory logic          <32>,
+    debug_data                : input  'memory logic          <8> ,
 ) {
     #[sv("struo_memory = \"required\"")]
-    var mem_0_low: 'cpu logic<8> [16384];
+    var mem_0_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_0_high: 'cpu logic<8> [16384];
+    var mem_0_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_1_low: 'cpu logic<8> [16384];
+    var mem_1_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_1_high: 'cpu logic<8> [16384];
+    var mem_1_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_2_low: 'cpu logic<8> [16384];
+    var mem_2_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_2_high: 'cpu logic<8> [16384];
+    var mem_2_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_3_low: 'cpu logic<8> [16384];
+    var mem_3_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_3_high: 'cpu logic<8> [16384];
+    var mem_3_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_4_low: 'cpu logic<8> [16384];
+    var mem_4_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_4_high: 'cpu logic<8> [16384];
+    var mem_4_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_5_low: 'cpu logic<8> [16384];
+    var mem_5_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_5_high: 'cpu logic<8> [16384];
+    var mem_5_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_6_low: 'cpu logic<8> [16384];
+    var mem_6_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_6_high: 'cpu logic<8> [16384];
+    var mem_6_high: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_7_low: 'cpu logic<8> [16384];
+    var mem_7_low: 'memory logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var mem_7_high: 'cpu logic<8> [16384];
+    var mem_7_high: 'memory logic<8> [16384];
 
-    var instr_physical: 'cpu logic<18>;
-    var debug_physical: 'cpu logic<18>;
-    var data_physical : 'cpu logic<18>;
-    var store_physical: 'cpu logic<18>;
+    var instr_physical     : 'memory logic<18>;
+    var instr_port_physical: 'memory logic<18>;
+    var debug_physical     : 'memory logic<18>;
+    var data_physical      : 'memory logic<18>;
 
-    var instr_read_0     : 'cpu logic<8>;
-    var instr_read_1     : 'cpu logic<8>;
-    var instr_read_2     : 'cpu logic<8>;
-    var instr_read_3     : 'cpu logic<8>;
-    var instr_read_4     : 'cpu logic<8>;
-    var instr_read_5     : 'cpu logic<8>;
-    var instr_read_6     : 'cpu logic<8>;
-    var instr_read_7     : 'cpu logic<8>;
-    var instr_read_0_low : 'cpu logic<8>;
-    var instr_read_0_high: 'cpu logic<8>;
-    var instr_read_1_low : 'cpu logic<8>;
-    var instr_read_1_high: 'cpu logic<8>;
-    var instr_read_2_low : 'cpu logic<8>;
-    var instr_read_2_high: 'cpu logic<8>;
-    var instr_read_3_low : 'cpu logic<8>;
-    var instr_read_3_high: 'cpu logic<8>;
-    var instr_read_4_low : 'cpu logic<8>;
-    var instr_read_4_high: 'cpu logic<8>;
-    var instr_read_5_low : 'cpu logic<8>;
-    var instr_read_5_high: 'cpu logic<8>;
-    var instr_read_6_low : 'cpu logic<8>;
-    var instr_read_6_high: 'cpu logic<8>;
-    var instr_read_7_low : 'cpu logic<8>;
-    var instr_read_7_high: 'cpu logic<8>;
+    var instr_read_0     : 'memory logic<8>;
+    var instr_read_1     : 'memory logic<8>;
+    var instr_read_2     : 'memory logic<8>;
+    var instr_read_3     : 'memory logic<8>;
+    var instr_read_4     : 'memory logic<8>;
+    var instr_read_5     : 'memory logic<8>;
+    var instr_read_6     : 'memory logic<8>;
+    var instr_read_7     : 'memory logic<8>;
+    var instr_read_0_low : 'memory logic<8>;
+    var instr_read_0_high: 'memory logic<8>;
+    var instr_read_1_low : 'memory logic<8>;
+    var instr_read_1_high: 'memory logic<8>;
+    var instr_read_2_low : 'memory logic<8>;
+    var instr_read_2_high: 'memory logic<8>;
+    var instr_read_3_low : 'memory logic<8>;
+    var instr_read_3_high: 'memory logic<8>;
+    var instr_read_4_low : 'memory logic<8>;
+    var instr_read_4_high: 'memory logic<8>;
+    var instr_read_5_low : 'memory logic<8>;
+    var instr_read_5_high: 'memory logic<8>;
+    var instr_read_6_low : 'memory logic<8>;
+    var instr_read_6_high: 'memory logic<8>;
+    var instr_read_7_low : 'memory logic<8>;
+    var instr_read_7_high: 'memory logic<8>;
 
-    var data_bank_read_0     : 'cpu logic<8>;
-    var data_bank_read_1     : 'cpu logic<8>;
-    var data_bank_read_2     : 'cpu logic<8>;
-    var data_bank_read_3     : 'cpu logic<8>;
-    var data_bank_read_4     : 'cpu logic<8>;
-    var data_bank_read_5     : 'cpu logic<8>;
-    var data_bank_read_6     : 'cpu logic<8>;
-    var data_bank_read_7     : 'cpu logic<8>;
-    var data_bank_read_0_low : 'cpu logic<8>;
-    var data_bank_read_0_high: 'cpu logic<8>;
-    var data_bank_read_1_low : 'cpu logic<8>;
-    var data_bank_read_1_high: 'cpu logic<8>;
-    var data_bank_read_2_low : 'cpu logic<8>;
-    var data_bank_read_2_high: 'cpu logic<8>;
-    var data_bank_read_3_low : 'cpu logic<8>;
-    var data_bank_read_3_high: 'cpu logic<8>;
-    var data_bank_read_4_low : 'cpu logic<8>;
-    var data_bank_read_4_high: 'cpu logic<8>;
-    var data_bank_read_5_low : 'cpu logic<8>;
-    var data_bank_read_5_high: 'cpu logic<8>;
-    var data_bank_read_6_low : 'cpu logic<8>;
-    var data_bank_read_6_high: 'cpu logic<8>;
-    var data_bank_read_7_low : 'cpu logic<8>;
-    var data_bank_read_7_high: 'cpu logic<8>;
+    var data_bank_read_0     : 'memory logic<8>;
+    var data_bank_read_1     : 'memory logic<8>;
+    var data_bank_read_2     : 'memory logic<8>;
+    var data_bank_read_3     : 'memory logic<8>;
+    var data_bank_read_4     : 'memory logic<8>;
+    var data_bank_read_5     : 'memory logic<8>;
+    var data_bank_read_6     : 'memory logic<8>;
+    var data_bank_read_7     : 'memory logic<8>;
+    var data_bank_read_0_low : 'memory logic<8>;
+    var data_bank_read_0_high: 'memory logic<8>;
+    var data_bank_read_1_low : 'memory logic<8>;
+    var data_bank_read_1_high: 'memory logic<8>;
+    var data_bank_read_2_low : 'memory logic<8>;
+    var data_bank_read_2_high: 'memory logic<8>;
+    var data_bank_read_3_low : 'memory logic<8>;
+    var data_bank_read_3_high: 'memory logic<8>;
+    var data_bank_read_4_low : 'memory logic<8>;
+    var data_bank_read_4_high: 'memory logic<8>;
+    var data_bank_read_5_low : 'memory logic<8>;
+    var data_bank_read_5_high: 'memory logic<8>;
+    var data_bank_read_6_low : 'memory logic<8>;
+    var data_bank_read_6_high: 'memory logic<8>;
+    var data_bank_read_7_low : 'memory logic<8>;
+    var data_bank_read_7_high: 'memory logic<8>;
 
-    var data_read_row     : 'cpu logic<15> [8];
-    var store_write_row   : 'cpu logic<15> [8];
-    var store_bank_data   : 'cpu logic<8>  [8];
-    var store_bank_mask   : 'cpu logic     [8];
-    var store_data_rotated: 'cpu logic<64>    ;
-    var store_mask_rotated: 'cpu logic<8>     ;
-    var data_read_mux     : 'cpu logic<64>    ;
-    var data_read_q       : 'cpu logic<64>    ;
-    var instr_port_row    : 'cpu logic<14>    ;
-    var instr_port_high   : 'cpu logic        ;
-    var data_port_row     : 'cpu logic<14> [8];
-    var data_port_high    : 'cpu logic     [8];
-
-    var cpu_data_address_q: 'cpu logic<32>;
-    var cpu_data_write_q  : 'cpu logic<64>;
-    var cpu_data_mask_q   : 'cpu logic<8> ;
-    var cpu_data_we_q     : 'cpu logic    ;
+    var data_read_row             : 'memory logic<15> [8];
+    var store_write_row           : 'memory logic<15> [8];
+    var store_bank_data           : 'memory logic<8>  [8];
+    var store_bank_mask           : 'memory logic     [8];
+    var store_data_request_rotated: 'memory logic<64>    ;
+    var store_mask_request_rotated: 'memory logic<8>     ;
+    var data_read_mux             : 'memory logic<64>    ;
+    var instr_port_row            : 'memory logic<14>    ;
+    var instr_port_high           : 'memory logic        ;
+    var instr_response_high_q     : 'memory logic        ;
+    var instr_response_address_q  : 'memory logic<32>    ;
+    var instr_response_valid_q    : 'memory logic        ;
+    var data_port_row             : 'memory logic<14> [8];
+    var data_port_high            : 'memory logic     [8];
+    var data_response_high_q      : 'memory logic<8>     ;
+    var data_response_offset_q    : 'memory logic<3>     ;
+    var data_address_q            : 'memory logic<32>    ;
+    var data_write_q              : 'memory logic<64>    ;
+    var data_mask_q               : 'memory logic<8>     ;
+    var data_we_q                 : 'memory logic        ;
+    var data_request_sequence_q   : 'memory logic        ;
+    var data_request_handled_q    : 'memory logic        ;
+    var data_response_sequence_q  : 'memory logic        ;
+    var data_output_q             : 'memory logic<64>    ;
+    var data_request_new          : 'memory logic        ;
 
     always_comb {
         instr_physical = cpu_instr_address[17:0];
@@ -137,21 +151,14 @@ module HardwareMemory (
         if !debug_address[31] {
             debug_physical = {6'h3f, debug_address[11:0]};
         }
-        data_physical = cpu_data_address[17:0];
-        if !cpu_data_address[31] {
-            data_physical = {6'h3f, cpu_data_address[11:0]};
-        }
-        store_physical = cpu_data_address_q[17:0];
-        if !cpu_data_address_q[31] {
-            store_physical = {6'h3f, cpu_data_address_q[11:0]};
-        }
+        data_physical = data_address_q[17:0];
         if debug_write {
-            instr_port_row  = debug_physical[16:3];
-            instr_port_high = debug_physical[17];
+            instr_port_physical = debug_physical;
         } else {
-            instr_port_row  = instr_physical[16:3];
-            instr_port_high = instr_physical[17];
+            instr_port_physical = instr_physical;
         }
+        instr_port_row  = instr_port_physical[16:3];
+        instr_port_high = instr_port_physical[17];
 
         data_read_row[0] = data_physical[17:3];
         data_read_row[1] = data_physical[17:3];
@@ -183,111 +190,113 @@ module HardwareMemory (
             data_read_row[6] = data_physical[17:3] + 15'd1;
         }
 
-        store_write_row[0] = store_physical[17:3];
-        store_write_row[1] = store_physical[17:3];
-        store_write_row[2] = store_physical[17:3];
-        store_write_row[3] = store_physical[17:3];
-        store_write_row[4] = store_physical[17:3];
-        store_write_row[5] = store_physical[17:3];
-        store_write_row[6] = store_physical[17:3];
-        store_write_row[7] = store_physical[17:3];
-        if store_physical[2:0] >: 3'd0 {
-            store_write_row[0] = store_physical[17:3] + 15'd1;
+        store_write_row[0] = data_physical[17:3];
+        store_write_row[1] = data_physical[17:3];
+        store_write_row[2] = data_physical[17:3];
+        store_write_row[3] = data_physical[17:3];
+        store_write_row[4] = data_physical[17:3];
+        store_write_row[5] = data_physical[17:3];
+        store_write_row[6] = data_physical[17:3];
+        store_write_row[7] = data_physical[17:3];
+        if data_address_q[2:0] >: 3'd0 {
+            store_write_row[0] = data_physical[17:3] + 15'd1;
         }
-        if store_physical[2:0] >: 3'd1 {
-            store_write_row[1] = store_physical[17:3] + 15'd1;
+        if data_address_q[2:0] >: 3'd1 {
+            store_write_row[1] = data_physical[17:3] + 15'd1;
         }
-        if store_physical[2:0] >: 3'd2 {
-            store_write_row[2] = store_physical[17:3] + 15'd1;
+        if data_address_q[2:0] >: 3'd2 {
+            store_write_row[2] = data_physical[17:3] + 15'd1;
         }
-        if store_physical[2:0] >: 3'd3 {
-            store_write_row[3] = store_physical[17:3] + 15'd1;
+        if data_address_q[2:0] >: 3'd3 {
+            store_write_row[3] = data_physical[17:3] + 15'd1;
         }
-        if store_physical[2:0] >: 3'd4 {
-            store_write_row[4] = store_physical[17:3] + 15'd1;
+        if data_address_q[2:0] >: 3'd4 {
+            store_write_row[4] = data_physical[17:3] + 15'd1;
         }
-        if store_physical[2:0] >: 3'd5 {
-            store_write_row[5] = store_physical[17:3] + 15'd1;
+        if data_address_q[2:0] >: 3'd5 {
+            store_write_row[5] = data_physical[17:3] + 15'd1;
         }
-        if store_physical[2:0] >: 3'd6 {
-            store_write_row[6] = store_physical[17:3] + 15'd1;
+        if data_address_q[2:0] >: 3'd6 {
+            store_write_row[6] = data_physical[17:3] + 15'd1;
         }
 
-        case cpu_data_address_q[2:0] {
+        case data_address_q[2:0] {
             3'd0: {
-                store_data_rotated = {
-                    cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32],
-                    cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0]
+                store_data_request_rotated = {
+                    data_write_q[63:56], data_write_q[55:48], data_write_q[47:40], data_write_q[39:32],
+                    data_write_q[31:24], data_write_q[23:16], data_write_q[15:8], data_write_q[7:0]
                 };
-                store_mask_rotated = cpu_data_mask_q;
+                store_mask_request_rotated = data_mask_q;
             }
             3'd1: {
-                store_data_rotated = {
-                    cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24],
-                    cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56]
+                store_data_request_rotated = {
+                    data_write_q[55:48], data_write_q[47:40], data_write_q[39:32], data_write_q[31:24],
+                    data_write_q[23:16], data_write_q[15:8], data_write_q[7:0], data_write_q[63:56]
                 };
-                store_mask_rotated = {cpu_data_mask_q[6:0], cpu_data_mask_q[7]};
+                store_mask_request_rotated = {data_mask_q[6:0], data_mask_q[7]};
             }
             3'd2: {
-                store_data_rotated = {
-                    cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16],
-                    cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48]
+                store_data_request_rotated = {
+                    data_write_q[47:40], data_write_q[39:32], data_write_q[31:24], data_write_q[23:16],
+                    data_write_q[15:8], data_write_q[7:0], data_write_q[63:56], data_write_q[55:48]
                 };
-                store_mask_rotated = {cpu_data_mask_q[5:0], cpu_data_mask_q[7:6]};
+                store_mask_request_rotated = {data_mask_q[5:0], data_mask_q[7:6]};
             }
             3'd3: {
-                store_data_rotated = {
-                    cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8],
-                    cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40]
+                store_data_request_rotated = {
+                    data_write_q[39:32], data_write_q[31:24], data_write_q[23:16], data_write_q[15:8],
+                    data_write_q[7:0], data_write_q[63:56], data_write_q[55:48], data_write_q[47:40]
                 };
-                store_mask_rotated = {cpu_data_mask_q[4:0], cpu_data_mask_q[7:5]};
+                store_mask_request_rotated = {data_mask_q[4:0], data_mask_q[7:5]};
             }
             3'd4: {
-                store_data_rotated = {
-                    cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0],
-                    cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32]
+                store_data_request_rotated = {
+                    data_write_q[31:24], data_write_q[23:16], data_write_q[15:8], data_write_q[7:0],
+                    data_write_q[63:56], data_write_q[55:48], data_write_q[47:40], data_write_q[39:32]
                 };
-                store_mask_rotated = {cpu_data_mask_q[3:0], cpu_data_mask_q[7:4]};
+                store_mask_request_rotated = {data_mask_q[3:0], data_mask_q[7:4]};
             }
             3'd5: {
-                store_data_rotated = {
-                    cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56],
-                    cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24]
+                store_data_request_rotated = {
+                    data_write_q[23:16], data_write_q[15:8], data_write_q[7:0], data_write_q[63:56],
+                    data_write_q[55:48], data_write_q[47:40], data_write_q[39:32], data_write_q[31:24]
                 };
-                store_mask_rotated = {cpu_data_mask_q[2:0], cpu_data_mask_q[7:3]};
+                store_mask_request_rotated = {data_mask_q[2:0], data_mask_q[7:3]};
             }
             3'd6: {
-                store_data_rotated = {
-                    cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48],
-                    cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16]
+                store_data_request_rotated = {
+                    data_write_q[15:8], data_write_q[7:0], data_write_q[63:56], data_write_q[55:48],
+                    data_write_q[47:40], data_write_q[39:32], data_write_q[31:24], data_write_q[23:16]
                 };
-                store_mask_rotated = {cpu_data_mask_q[1:0], cpu_data_mask_q[7:2]};
+                store_mask_request_rotated = {data_mask_q[1:0], data_mask_q[7:2]};
             }
             default: {
-                store_data_rotated = {
-                    cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40],
-                    cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8]
+                store_data_request_rotated = {
+                    data_write_q[7:0], data_write_q[63:56], data_write_q[55:48], data_write_q[47:40],
+                    data_write_q[39:32], data_write_q[31:24], data_write_q[23:16], data_write_q[15:8]
                 };
-                store_mask_rotated = {cpu_data_mask_q[0], cpu_data_mask_q[7:1]};
+                store_mask_request_rotated = {data_mask_q[0], data_mask_q[7:1]};
             }
         }
 
-        store_bank_data[0] = store_data_rotated[7:0];
-        store_bank_data[1] = store_data_rotated[15:8];
-        store_bank_data[2] = store_data_rotated[23:16];
-        store_bank_data[3] = store_data_rotated[31:24];
-        store_bank_data[4] = store_data_rotated[39:32];
-        store_bank_data[5] = store_data_rotated[47:40];
-        store_bank_data[6] = store_data_rotated[55:48];
-        store_bank_data[7] = store_data_rotated[63:56];
-        store_bank_mask[0] = store_mask_rotated[0];
-        store_bank_mask[1] = store_mask_rotated[1];
-        store_bank_mask[2] = store_mask_rotated[2];
-        store_bank_mask[3] = store_mask_rotated[3];
-        store_bank_mask[4] = store_mask_rotated[4];
-        store_bank_mask[5] = store_mask_rotated[5];
-        store_bank_mask[6] = store_mask_rotated[6];
-        store_bank_mask[7] = store_mask_rotated[7];
+        store_bank_data[0] = store_data_request_rotated[7:0];
+        store_bank_data[1] = store_data_request_rotated[15:8];
+        store_bank_data[2] = store_data_request_rotated[23:16];
+        store_bank_data[3] = store_data_request_rotated[31:24];
+        store_bank_data[4] = store_data_request_rotated[39:32];
+        store_bank_data[5] = store_data_request_rotated[47:40];
+        store_bank_data[6] = store_data_request_rotated[55:48];
+        store_bank_data[7] = store_data_request_rotated[63:56];
+        store_bank_mask[0] = store_mask_request_rotated[0];
+        store_bank_mask[1] = store_mask_request_rotated[1];
+        store_bank_mask[2] = store_mask_request_rotated[2];
+        store_bank_mask[3] = store_mask_request_rotated[3];
+        store_bank_mask[4] = store_mask_request_rotated[4];
+        store_bank_mask[5] = store_mask_request_rotated[5];
+        store_bank_mask[6] = store_mask_request_rotated[6];
+        store_bank_mask[7] = store_mask_request_rotated[7];
+
+        data_request_new = data_request_sequence_q != data_request_handled_q;
 
         data_port_row[0]  = data_read_row[0][13:0];
         data_port_row[1]  = data_read_row[1][13:0];
@@ -305,105 +314,105 @@ module HardwareMemory (
         data_port_high[5] = data_read_row[5][14];
         data_port_high[6] = data_read_row[6][14];
         data_port_high[7] = data_read_row[7][14];
-        if cpu_data_we_q && store_bank_mask[0] {
+        if data_request_new && data_we_q && store_bank_mask[0] {
             data_port_row[0]  = store_write_row[0][13:0];
             data_port_high[0] = store_write_row[0][14];
         }
-        if cpu_data_we_q && store_bank_mask[1] {
+        if data_request_new && data_we_q && store_bank_mask[1] {
             data_port_row[1]  = store_write_row[1][13:0];
             data_port_high[1] = store_write_row[1][14];
         }
-        if cpu_data_we_q && store_bank_mask[2] {
+        if data_request_new && data_we_q && store_bank_mask[2] {
             data_port_row[2]  = store_write_row[2][13:0];
             data_port_high[2] = store_write_row[2][14];
         }
-        if cpu_data_we_q && store_bank_mask[3] {
+        if data_request_new && data_we_q && store_bank_mask[3] {
             data_port_row[3]  = store_write_row[3][13:0];
             data_port_high[3] = store_write_row[3][14];
         }
-        if cpu_data_we_q && store_bank_mask[4] {
+        if data_request_new && data_we_q && store_bank_mask[4] {
             data_port_row[4]  = store_write_row[4][13:0];
             data_port_high[4] = store_write_row[4][14];
         }
-        if cpu_data_we_q && store_bank_mask[5] {
+        if data_request_new && data_we_q && store_bank_mask[5] {
             data_port_row[5]  = store_write_row[5][13:0];
             data_port_high[5] = store_write_row[5][14];
         }
-        if cpu_data_we_q && store_bank_mask[6] {
+        if data_request_new && data_we_q && store_bank_mask[6] {
             data_port_row[6]  = store_write_row[6][13:0];
             data_port_high[6] = store_write_row[6][14];
         }
-        if cpu_data_we_q && store_bank_mask[7] {
+        if data_request_new && data_we_q && store_bank_mask[7] {
             data_port_row[7]  = store_write_row[7][13:0];
             data_port_high[7] = store_write_row[7][14];
         }
 
-        instr_read_0     = instr_read_0_low;
-        if instr_physical[17] {
-            instr_read_0     = instr_read_0_high;
+        instr_read_0 = instr_read_0_low;
+        if instr_response_high_q {
+            instr_read_0 = instr_read_0_high;
         }
-        instr_read_1     = instr_read_1_low;
-        if instr_physical[17] {
-            instr_read_1     = instr_read_1_high;
+        instr_read_1 = instr_read_1_low;
+        if instr_response_high_q {
+            instr_read_1 = instr_read_1_high;
         }
-        instr_read_2     = instr_read_2_low;
-        if instr_physical[17] {
-            instr_read_2     = instr_read_2_high;
+        instr_read_2 = instr_read_2_low;
+        if instr_response_high_q {
+            instr_read_2 = instr_read_2_high;
         }
-        instr_read_3     = instr_read_3_low;
-        if instr_physical[17] {
-            instr_read_3     = instr_read_3_high;
+        instr_read_3 = instr_read_3_low;
+        if instr_response_high_q {
+            instr_read_3 = instr_read_3_high;
         }
-        instr_read_4     = instr_read_4_low;
-        if instr_physical[17] {
-            instr_read_4     = instr_read_4_high;
+        instr_read_4 = instr_read_4_low;
+        if instr_response_high_q {
+            instr_read_4 = instr_read_4_high;
         }
-        instr_read_5     = instr_read_5_low;
-        if instr_physical[17] {
-            instr_read_5     = instr_read_5_high;
+        instr_read_5 = instr_read_5_low;
+        if instr_response_high_q {
+            instr_read_5 = instr_read_5_high;
         }
-        instr_read_6     = instr_read_6_low;
-        if instr_physical[17] {
-            instr_read_6     = instr_read_6_high;
+        instr_read_6 = instr_read_6_low;
+        if instr_response_high_q {
+            instr_read_6 = instr_read_6_high;
         }
-        instr_read_7     = instr_read_7_low;
-        if instr_physical[17] {
-            instr_read_7     = instr_read_7_high;
+        instr_read_7 = instr_read_7_low;
+        if instr_response_high_q {
+            instr_read_7 = instr_read_7_high;
         }
         data_bank_read_0 = data_bank_read_0_low;
-        if data_read_row[0][14] {
+        if data_response_high_q[0] {
             data_bank_read_0 = data_bank_read_0_high;
         }
         data_bank_read_1 = data_bank_read_1_low;
-        if data_read_row[1][14] {
+        if data_response_high_q[1] {
             data_bank_read_1 = data_bank_read_1_high;
         }
         data_bank_read_2 = data_bank_read_2_low;
-        if data_read_row[2][14] {
+        if data_response_high_q[2] {
             data_bank_read_2 = data_bank_read_2_high;
         }
         data_bank_read_3 = data_bank_read_3_low;
-        if data_read_row[3][14] {
+        if data_response_high_q[3] {
             data_bank_read_3 = data_bank_read_3_high;
         }
         data_bank_read_4 = data_bank_read_4_low;
-        if data_read_row[4][14] {
+        if data_response_high_q[4] {
             data_bank_read_4 = data_bank_read_4_high;
         }
         data_bank_read_5 = data_bank_read_5_low;
-        if data_read_row[5][14] {
+        if data_response_high_q[5] {
             data_bank_read_5 = data_bank_read_5_high;
         }
         data_bank_read_6 = data_bank_read_6_low;
-        if data_read_row[6][14] {
+        if data_response_high_q[6] {
             data_bank_read_6 = data_bank_read_6_high;
         }
         data_bank_read_7 = data_bank_read_7_low;
-        if data_read_row[7][14] {
+        if data_response_high_q[7] {
             data_bank_read_7 = data_bank_read_7_high;
         }
 
-        case cpu_data_address[2:0] {
+        case data_response_offset_q {
             3'd0   : data_read_mux = {
                 data_bank_read_7, data_bank_read_6, data_bank_read_5, data_bank_read_4, data_bank_read_3,
                 data_bank_read_2, data_bank_read_1, data_bank_read_0
@@ -438,245 +447,286 @@ module HardwareMemory (
             };
         }
 
-        if instr_physical[2] {
-            cpu_instruction = {instr_read_7, instr_read_6, instr_read_5, instr_read_4};
-        } else {
-            cpu_instruction = {instr_read_3, instr_read_2, instr_read_1, instr_read_0};
-        }
-        cpu_data_read = data_read_q;
+        cpu_instr_line             = {
+            instr_read_7, instr_read_6, instr_read_5, instr_read_4, instr_read_3, instr_read_2, instr_read_1,
+            instr_read_0
+        };
+        cpu_instr_response_address = instr_response_address_q;
+        cpu_instr_response_valid   = instr_response_valid_q;
+        cpu_data_read              = data_output_q;
+        cpu_data_response_sequence = data_response_sequence_q;
     }
 
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd0) && !instr_port_high {
             mem_0_low[instr_port_row] = debug_data;
         } else {
-            instr_read_0_low          = mem_0_low[instr_port_row];
+            instr_read_0_low = mem_0_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd0) && instr_port_high {
             mem_0_high[instr_port_row] = debug_data;
         } else {
-            instr_read_0_high          = mem_0_high[instr_port_row];
+            instr_read_0_high = mem_0_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd1) && !instr_port_high {
             mem_1_low[instr_port_row] = debug_data;
         } else {
-            instr_read_1_low          = mem_1_low[instr_port_row];
+            instr_read_1_low = mem_1_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd1) && instr_port_high {
             mem_1_high[instr_port_row] = debug_data;
         } else {
-            instr_read_1_high          = mem_1_high[instr_port_row];
+            instr_read_1_high = mem_1_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd2) && !instr_port_high {
             mem_2_low[instr_port_row] = debug_data;
         } else {
-            instr_read_2_low          = mem_2_low[instr_port_row];
+            instr_read_2_low = mem_2_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd2) && instr_port_high {
             mem_2_high[instr_port_row] = debug_data;
         } else {
-            instr_read_2_high          = mem_2_high[instr_port_row];
+            instr_read_2_high = mem_2_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd3) && !instr_port_high {
             mem_3_low[instr_port_row] = debug_data;
         } else {
-            instr_read_3_low          = mem_3_low[instr_port_row];
+            instr_read_3_low = mem_3_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd3) && instr_port_high {
             mem_3_high[instr_port_row] = debug_data;
         } else {
-            instr_read_3_high          = mem_3_high[instr_port_row];
+            instr_read_3_high = mem_3_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd4) && !instr_port_high {
             mem_4_low[instr_port_row] = debug_data;
         } else {
-            instr_read_4_low          = mem_4_low[instr_port_row];
+            instr_read_4_low = mem_4_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd4) && instr_port_high {
             mem_4_high[instr_port_row] = debug_data;
         } else {
-            instr_read_4_high          = mem_4_high[instr_port_row];
+            instr_read_4_high = mem_4_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd5) && !instr_port_high {
             mem_5_low[instr_port_row] = debug_data;
         } else {
-            instr_read_5_low          = mem_5_low[instr_port_row];
+            instr_read_5_low = mem_5_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd5) && instr_port_high {
             mem_5_high[instr_port_row] = debug_data;
         } else {
-            instr_read_5_high          = mem_5_high[instr_port_row];
+            instr_read_5_high = mem_5_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd6) && !instr_port_high {
             mem_6_low[instr_port_row] = debug_data;
         } else {
-            instr_read_6_low          = mem_6_low[instr_port_row];
+            instr_read_6_low = mem_6_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd6) && instr_port_high {
             mem_6_high[instr_port_row] = debug_data;
         } else {
-            instr_read_6_high          = mem_6_high[instr_port_row];
+            instr_read_6_high = mem_6_high[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd7) && !instr_port_high {
             mem_7_low[instr_port_row] = debug_data;
         } else {
-            instr_read_7_low          = mem_7_low[instr_port_row];
+            instr_read_7_low = mem_7_low[instr_port_row];
         }
     }
-    always_ff (clk_n) {
+    always_ff (clk) {
         if debug_write && (debug_physical[2:0] == 3'd7) && instr_port_high {
             mem_7_high[instr_port_row] = debug_data;
         } else {
-            instr_read_7_high          = mem_7_high[instr_port_row];
+            instr_read_7_high = mem_7_high[instr_port_row];
         }
     }
 
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[0] && !data_port_high[0] {
+        if data_request_new && data_we_q && store_bank_mask[0] && !data_port_high[0] {
             mem_0_low[data_port_row[0]] = store_bank_data[0];
         } else {
-            data_bank_read_0_low        = mem_0_low[data_port_row[0]];
+            data_bank_read_0_low = mem_0_low[data_port_row[0]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[0] && data_port_high[0] {
+        if data_request_new && data_we_q && store_bank_mask[0] && data_port_high[0] {
             mem_0_high[data_port_row[0]] = store_bank_data[0];
         } else {
-            data_bank_read_0_high        = mem_0_high[data_port_row[0]];
+            data_bank_read_0_high = mem_0_high[data_port_row[0]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[1] && !data_port_high[1] {
+        if data_request_new && data_we_q && store_bank_mask[1] && !data_port_high[1] {
             mem_1_low[data_port_row[1]] = store_bank_data[1];
         } else {
-            data_bank_read_1_low        = mem_1_low[data_port_row[1]];
+            data_bank_read_1_low = mem_1_low[data_port_row[1]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[1] && data_port_high[1] {
+        if data_request_new && data_we_q && store_bank_mask[1] && data_port_high[1] {
             mem_1_high[data_port_row[1]] = store_bank_data[1];
         } else {
-            data_bank_read_1_high        = mem_1_high[data_port_row[1]];
+            data_bank_read_1_high = mem_1_high[data_port_row[1]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[2] && !data_port_high[2] {
+        if data_request_new && data_we_q && store_bank_mask[2] && !data_port_high[2] {
             mem_2_low[data_port_row[2]] = store_bank_data[2];
         } else {
-            data_bank_read_2_low        = mem_2_low[data_port_row[2]];
+            data_bank_read_2_low = mem_2_low[data_port_row[2]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[2] && data_port_high[2] {
+        if data_request_new && data_we_q && store_bank_mask[2] && data_port_high[2] {
             mem_2_high[data_port_row[2]] = store_bank_data[2];
         } else {
-            data_bank_read_2_high        = mem_2_high[data_port_row[2]];
+            data_bank_read_2_high = mem_2_high[data_port_row[2]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[3] && !data_port_high[3] {
+        if data_request_new && data_we_q && store_bank_mask[3] && !data_port_high[3] {
             mem_3_low[data_port_row[3]] = store_bank_data[3];
         } else {
-            data_bank_read_3_low        = mem_3_low[data_port_row[3]];
+            data_bank_read_3_low = mem_3_low[data_port_row[3]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[3] && data_port_high[3] {
+        if data_request_new && data_we_q && store_bank_mask[3] && data_port_high[3] {
             mem_3_high[data_port_row[3]] = store_bank_data[3];
         } else {
-            data_bank_read_3_high        = mem_3_high[data_port_row[3]];
+            data_bank_read_3_high = mem_3_high[data_port_row[3]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[4] && !data_port_high[4] {
+        if data_request_new && data_we_q && store_bank_mask[4] && !data_port_high[4] {
             mem_4_low[data_port_row[4]] = store_bank_data[4];
         } else {
-            data_bank_read_4_low        = mem_4_low[data_port_row[4]];
+            data_bank_read_4_low = mem_4_low[data_port_row[4]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[4] && data_port_high[4] {
+        if data_request_new && data_we_q && store_bank_mask[4] && data_port_high[4] {
             mem_4_high[data_port_row[4]] = store_bank_data[4];
         } else {
-            data_bank_read_4_high        = mem_4_high[data_port_row[4]];
+            data_bank_read_4_high = mem_4_high[data_port_row[4]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[5] && !data_port_high[5] {
+        if data_request_new && data_we_q && store_bank_mask[5] && !data_port_high[5] {
             mem_5_low[data_port_row[5]] = store_bank_data[5];
         } else {
-            data_bank_read_5_low        = mem_5_low[data_port_row[5]];
+            data_bank_read_5_low = mem_5_low[data_port_row[5]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[5] && data_port_high[5] {
+        if data_request_new && data_we_q && store_bank_mask[5] && data_port_high[5] {
             mem_5_high[data_port_row[5]] = store_bank_data[5];
         } else {
-            data_bank_read_5_high        = mem_5_high[data_port_row[5]];
+            data_bank_read_5_high = mem_5_high[data_port_row[5]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[6] && !data_port_high[6] {
+        if data_request_new && data_we_q && store_bank_mask[6] && !data_port_high[6] {
             mem_6_low[data_port_row[6]] = store_bank_data[6];
         } else {
-            data_bank_read_6_low        = mem_6_low[data_port_row[6]];
+            data_bank_read_6_low = mem_6_low[data_port_row[6]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[6] && data_port_high[6] {
+        if data_request_new && data_we_q && store_bank_mask[6] && data_port_high[6] {
             mem_6_high[data_port_row[6]] = store_bank_data[6];
         } else {
-            data_bank_read_6_high        = mem_6_high[data_port_row[6]];
+            data_bank_read_6_high = mem_6_high[data_port_row[6]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[7] && !data_port_high[7] {
+        if data_request_new && data_we_q && store_bank_mask[7] && !data_port_high[7] {
             mem_7_low[data_port_row[7]] = store_bank_data[7];
         } else {
-            data_bank_read_7_low        = mem_7_low[data_port_row[7]];
+            data_bank_read_7_low = mem_7_low[data_port_row[7]];
         }
     }
     always_ff (clk) {
-        if cpu_data_we_q && store_bank_mask[7] && data_port_high[7] {
+        if data_request_new && data_we_q && store_bank_mask[7] && data_port_high[7] {
             mem_7_high[data_port_row[7]] = store_bank_data[7];
         } else {
-            data_bank_read_7_high        = mem_7_high[data_port_row[7]];
+            data_bank_read_7_high = mem_7_high[data_port_row[7]];
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            instr_response_address_q = 32'h0000_0000;
+            instr_response_valid_q   = 1'b0;
+            data_address_q           = 32'h0000_0000;
+            data_write_q             = 64'h0000_0000_0000_0000;
+            data_mask_q              = 8'h00;
+            data_we_q                = 1'b0;
+            data_request_sequence_q  = 1'b0;
+            data_request_handled_q   = 1'b0;
+            data_response_sequence_q = 1'b0;
+            data_output_q            = 64'h0000_0000_0000_0000;
+        } else {
+            // Core keeps this bundle stable until the response token returns.
+            // Capturing it here moves address translation and byte-bank
+            // selection wholly behind the CPU-to-memory timing boundary.
+            data_address_q          = cpu_data_address;
+            data_write_q            = cpu_data_write;
+            data_mask_q             = cpu_data_mask;
+            data_we_q               = cpu_data_we;
+            data_request_sequence_q = cpu_data_request_sequence;
+            // The bank/high/byte selection cone is registered in the slow
+            // domain. Publish its token on the same edge, then let Core's
+            // CPU-domain stage capture the stable bundle.
+            data_output_q            = data_read_mux;
+            data_response_sequence_q = data_request_handled_q;
+            instr_response_address_q = {cpu_instr_address[31:3], 3'b000};
+            instr_response_valid_q   = !debug_write;
+            if data_request_new {
+                data_request_handled_q = data_request_sequence_q;
+            }
         }
     }
 
     always_ff (clk) {
-        data_read_q        = data_read_mux;
-        cpu_data_address_q = cpu_data_address;
-        cpu_data_write_q   = cpu_data_write;
-        cpu_data_mask_q    = cpu_data_mask;
-        cpu_data_we_q      = cpu_data_we;
+        instr_response_high_q   = instr_port_physical[17];
+        data_response_high_q[0] = data_read_row[0][14];
+        data_response_high_q[1] = data_read_row[1][14];
+        data_response_high_q[2] = data_read_row[2][14];
+        data_response_high_q[3] = data_read_row[3][14];
+        data_response_high_q[4] = data_read_row[4][14];
+        data_response_high_q[5] = data_read_row[5][14];
+        data_response_high_q[6] = data_read_row[6][14];
+        data_response_high_q[7] = data_read_row[7][14];
+        data_response_offset_q  = data_address_q[2:0];
     }
 }

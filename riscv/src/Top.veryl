@@ -5,50 +5,56 @@ module Top (
     pll_locked: input  'cpu       logic   ,
     led       : output 'cpu       logic<8>,
 ) {
-    var core_rst_n           : 'cpu reset_async_low    ;
-    var core_pc              : 'cpu logic          <64>;
-    var instruction          : 'cpu logic          <32>;
-    var unused_data_addr     : 'cpu logic          <64>;
-    var unused_data_wdata    : 'cpu logic          <64>;
-    var unused_data_wmask    : 'cpu logic          <8> ;
-    var unused_data_we       : 'cpu logic              ;
-    var unused_halted        : 'cpu logic              ;
-    var unused_commit_valid  : 'cpu logic              ;
-    var unused_commit_pc     : 'cpu logic          <64>;
-    var unused_commit_instr  : 'cpu logic          <32>;
-    var unused_commit_rd     : 'cpu logic          <5> ;
-    var unused_commit_data   : 'cpu logic          <64>;
-    var unused_commit_mem_we : 'cpu logic              ;
-    var unused_commit_address: 'cpu logic          <64>;
-    var unused_commit_wdata  : 'cpu logic          <64>;
-    var unused_commit_wmask  : 'cpu logic          <8> ;
-    var x31                  : 'cpu logic          <64>;
-    var commit_count_q       : 'cpu logic          <25>;
-    var led_count_q          : 'cpu logic          <6> ;
+    var core_rst_n                  : 'cpu reset_async_low    ;
+    var core_pc                     : 'cpu logic          <64>;
+    var instruction                 : 'cpu logic          <32>;
+    var unused_data_addr            : 'cpu logic          <64>;
+    var unused_memory_addr          : 'cpu logic          <64>;
+    var unused_data_wdata           : 'cpu logic          <64>;
+    var unused_data_wmask           : 'cpu logic          <8> ;
+    var unused_data_we              : 'cpu logic              ;
+    var unused_data_request_sequence: 'cpu logic              ;
+    var unused_halted               : 'cpu logic              ;
+    var unused_commit_valid         : 'cpu logic              ;
+    var unused_commit_pc            : 'cpu logic          <64>;
+    var unused_commit_instr         : 'cpu logic          <32>;
+    var unused_commit_rd            : 'cpu logic          <5> ;
+    var unused_commit_data          : 'cpu logic          <64>;
+    var unused_commit_mem_we        : 'cpu logic              ;
+    var unused_commit_address       : 'cpu logic          <64>;
+    var unused_commit_wdata         : 'cpu logic          <64>;
+    var unused_commit_wmask         : 'cpu logic          <8> ;
+    var x31                         : 'cpu logic          <64>;
+    var commit_count_q              : 'cpu logic          <25>;
+    var led_count_q                 : 'cpu logic          <6> ;
 
     inst core: Core #(
         COMMIT_PAYLOAD: 0,
     ) (
-        clk             : clk_cpu                ,
-        rst_n           : core_rst_n             ,
-        instr           : instruction            ,
-        data_rdata      : 64'h0000_0000_0000_0000,
-        pc              : core_pc                ,
-        data_addr       : unused_data_addr       ,
-        data_wdata      : unused_data_wdata      ,
-        data_wmask      : unused_data_wmask      ,
-        data_we         : unused_data_we         ,
-        halted          : unused_halted          ,
-        commit_valid    : unused_commit_valid    ,
-        commit_pc       : unused_commit_pc       ,
-        commit_instr    : unused_commit_instr    ,
-        commit_rd       : unused_commit_rd       ,
-        commit_data     : unused_commit_data     ,
-        commit_mem_we   : unused_commit_mem_we   ,
-        commit_mem_addr : unused_commit_address  ,
-        commit_mem_wdata: unused_commit_wdata    ,
-        commit_mem_wmask: unused_commit_wmask    ,
-        debug_x31       : x31                    ,
+        clk                   : clk_cpu                     ,
+        rst_n                 : core_rst_n                  ,
+        instr                 : instruction                 ,
+        instr_valid           : 1'b1                        ,
+        data_rdata            : 64'h0000_0000_0000_0000     ,
+        data_response_sequence: 1'b0                        ,
+        pc                    : core_pc                     ,
+        data_addr             : unused_data_addr            ,
+        data_memory_addr      : unused_memory_addr          ,
+        data_wdata            : unused_data_wdata           ,
+        data_wmask            : unused_data_wmask           ,
+        data_we               : unused_data_we              ,
+        data_request_sequence : unused_data_request_sequence,
+        halted                : unused_halted               ,
+        commit_valid          : unused_commit_valid         ,
+        commit_pc             : unused_commit_pc            ,
+        commit_instr          : unused_commit_instr         ,
+        commit_rd             : unused_commit_rd            ,
+        commit_data           : unused_commit_data          ,
+        commit_mem_we         : unused_commit_mem_we        ,
+        commit_mem_addr       : unused_commit_address       ,
+        commit_mem_wdata      : unused_commit_wdata         ,
+        commit_mem_wmask      : unused_commit_wmask         ,
+        debug_x31             : x31                         ,
     );
 
     // clk_cpu and pll_locked are logical PLL boundary ports. Texo replaces
