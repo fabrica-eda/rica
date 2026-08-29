@@ -239,16 +239,24 @@ pub fn run_elf(
                 .into());
             }
             image.write_masked(address, data, mask);
-            if address == image.tohost && data != 0 {
-                if data == 1 {
+            // ACT4's Sail harness uses the same 64-bit `tohost` mailbox for
+            // both console output and termination. It updates the low word
+            // first and commits the message by writing the high word: a zero
+            // high word is pass/fail, while 0x01010000 is a console byte.
+            // Do not mistake that transient low-word character for failure.
+            let mailbox_committed = (address == image.tohost && mask == 0xff)
+                || (address == image.tohost.wrapping_add(4) && mask == 0x0f);
+            let tohost = image.read_doubleword(image.tohost);
+            if mailbox_committed && tohost != 0 && (tohost >> 32) == 0 {
+                if tohost == 1 {
                     return Ok(ElfRun {
                         cycles: cycle,
                         commits,
                     });
                 }
                 return Err(format!(
-                    "self-check failed with tohost=0x{data:016x} (test {}) at cycle {cycle}\n{}",
-                    data >> 1,
+                    "self-check failed with tohost=0x{tohost:016x} (test {}) at cycle {cycle}\n{}",
+                    tohost >> 1,
                     format_trace(&trace)
                 )
                 .into());

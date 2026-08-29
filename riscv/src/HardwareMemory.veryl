@@ -1,9 +1,13 @@
-/// 4 KiB Harvard test memory with a byte-wide debug loader.
+/// 256 KiB unified hardware-test memory with a byte-wide debug loader.
 ///
-/// The CPU produces its instruction and LSU addresses on the rising edge.
-/// Reading the instruction ECP5 block RAMs on the falling edge returns the
-/// instruction before the following rising edge. Data uses full-cycle reads.
-/// Byte banks retain native CPU store masks and remain ordinary 1R1W BRAMs.
+/// Port A fetches instructions on the falling CPU edge and becomes the debug
+/// write port while the CPU is held in reset. Port B performs synchronous LSU
+/// reads and writes on the rising edge. Eight byte banks preserve arbitrary
+/// RV64 load/store alignment without requiring a third memory port.
+///
+/// Addresses at 0x8000_0000 map directly to the first 252 KiB of BRAM. The
+/// reset trampoline at address zero is relocated to the final 4 KiB, so the
+/// timing-critical instruction and LSU paths require no address addition.
 module HardwareMemory (
     clk              : input  'cpu clock            ,
     clk_n            : input  'cpu clock_negedge    ,
@@ -19,249 +23,657 @@ module HardwareMemory (
     debug_data       : input  'cpu logic        <8> ,
 ) {
     #[sv("struo_memory = \"required\"")]
-    var imem_0: 'cpu logic<8> [1024];
+    var mem_0_low: 'cpu logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var imem_1: 'cpu logic<8> [1024];
+    var mem_0_high: 'cpu logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var imem_2: 'cpu logic<8> [1024];
+    var mem_1_low: 'cpu logic<8> [16384];
     #[sv("struo_memory = \"required\"")]
-    var imem_3: 'cpu logic<8> [1024];
+    var mem_1_high: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_2_low: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_2_high: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_3_low: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_3_high: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_4_low: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_4_high: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_5_low: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_5_high: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_6_low: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_6_high: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_7_low: 'cpu logic<8> [16384];
+    #[sv("struo_memory = \"required\"")]
+    var mem_7_high: 'cpu logic<8> [16384];
 
-    #[sv("struo_memory = \"required\"")]
-    var dmem_0: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_1: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_2: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_3: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_4: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_5: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_6: 'cpu logic<8> [512];
-    #[sv("struo_memory = \"required\"")]
-    var dmem_7: 'cpu logic<8> [512];
+    var instr_physical: 'cpu logic<18>;
+    var debug_physical: 'cpu logic<18>;
+    var data_physical : 'cpu logic<18>;
+    var store_physical: 'cpu logic<18>;
 
-    var imem_read_0       : 'cpu logic<8>     ;
-    var imem_read_1       : 'cpu logic<8>     ;
-    var imem_read_2       : 'cpu logic<8>     ;
-    var imem_read_3       : 'cpu logic<8>     ;
-    var dmem_read_0       : 'cpu logic<8>     ;
-    var dmem_read_1       : 'cpu logic<8>     ;
-    var dmem_read_2       : 'cpu logic<8>     ;
-    var dmem_read_3       : 'cpu logic<8>     ;
-    var dmem_read_4       : 'cpu logic<8>     ;
-    var dmem_read_5       : 'cpu logic<8>     ;
-    var dmem_read_6       : 'cpu logic<8>     ;
-    var dmem_read_7       : 'cpu logic<8>     ;
+    var instr_read_0     : 'cpu logic<8>;
+    var instr_read_1     : 'cpu logic<8>;
+    var instr_read_2     : 'cpu logic<8>;
+    var instr_read_3     : 'cpu logic<8>;
+    var instr_read_4     : 'cpu logic<8>;
+    var instr_read_5     : 'cpu logic<8>;
+    var instr_read_6     : 'cpu logic<8>;
+    var instr_read_7     : 'cpu logic<8>;
+    var instr_read_0_low : 'cpu logic<8>;
+    var instr_read_0_high: 'cpu logic<8>;
+    var instr_read_1_low : 'cpu logic<8>;
+    var instr_read_1_high: 'cpu logic<8>;
+    var instr_read_2_low : 'cpu logic<8>;
+    var instr_read_2_high: 'cpu logic<8>;
+    var instr_read_3_low : 'cpu logic<8>;
+    var instr_read_3_high: 'cpu logic<8>;
+    var instr_read_4_low : 'cpu logic<8>;
+    var instr_read_4_high: 'cpu logic<8>;
+    var instr_read_5_low : 'cpu logic<8>;
+    var instr_read_5_high: 'cpu logic<8>;
+    var instr_read_6_low : 'cpu logic<8>;
+    var instr_read_6_high: 'cpu logic<8>;
+    var instr_read_7_low : 'cpu logic<8>;
+    var instr_read_7_high: 'cpu logic<8>;
+
+    var data_bank_read_0     : 'cpu logic<8>;
+    var data_bank_read_1     : 'cpu logic<8>;
+    var data_bank_read_2     : 'cpu logic<8>;
+    var data_bank_read_3     : 'cpu logic<8>;
+    var data_bank_read_4     : 'cpu logic<8>;
+    var data_bank_read_5     : 'cpu logic<8>;
+    var data_bank_read_6     : 'cpu logic<8>;
+    var data_bank_read_7     : 'cpu logic<8>;
+    var data_bank_read_0_low : 'cpu logic<8>;
+    var data_bank_read_0_high: 'cpu logic<8>;
+    var data_bank_read_1_low : 'cpu logic<8>;
+    var data_bank_read_1_high: 'cpu logic<8>;
+    var data_bank_read_2_low : 'cpu logic<8>;
+    var data_bank_read_2_high: 'cpu logic<8>;
+    var data_bank_read_3_low : 'cpu logic<8>;
+    var data_bank_read_3_high: 'cpu logic<8>;
+    var data_bank_read_4_low : 'cpu logic<8>;
+    var data_bank_read_4_high: 'cpu logic<8>;
+    var data_bank_read_5_low : 'cpu logic<8>;
+    var data_bank_read_5_high: 'cpu logic<8>;
+    var data_bank_read_6_low : 'cpu logic<8>;
+    var data_bank_read_6_high: 'cpu logic<8>;
+    var data_bank_read_7_low : 'cpu logic<8>;
+    var data_bank_read_7_high: 'cpu logic<8>;
+
+    var data_read_row     : 'cpu logic<15> [8];
+    var store_write_row   : 'cpu logic<15> [8];
+    var store_bank_data   : 'cpu logic<8>  [8];
+    var store_bank_mask   : 'cpu logic     [8];
+    var store_data_rotated: 'cpu logic<64>    ;
+    var store_mask_rotated: 'cpu logic<8>     ;
     var data_read_mux     : 'cpu logic<64>    ;
     var data_read_q       : 'cpu logic<64>    ;
-    var store_data_aligned: 'cpu logic<64>    ;
-    var store_mask_aligned: 'cpu logic<8>     ;
-    var dmem_write_address: 'cpu logic<9>     ;
-    var dmem_write_data   : 'cpu logic<8>  [8];
-    var dmem_write_enable : 'cpu logic     [8];
-    var cpu_data_address_q: 'cpu logic<32>    ;
-    var cpu_data_write_q  : 'cpu logic<64>    ;
-    var cpu_data_mask_q   : 'cpu logic<8>     ;
-    var cpu_data_we_q     : 'cpu logic        ;
+    var instr_port_row    : 'cpu logic<14>    ;
+    var instr_port_high   : 'cpu logic        ;
+    var data_port_row     : 'cpu logic<14> [8];
+    var data_port_high    : 'cpu logic     [8];
+
+    var cpu_data_address_q: 'cpu logic<32>;
+    var cpu_data_write_q  : 'cpu logic<64>;
+    var cpu_data_mask_q   : 'cpu logic<8> ;
+    var cpu_data_we_q     : 'cpu logic    ;
+
     always_comb {
+        instr_physical = cpu_instr_address[17:0];
+        if !cpu_instr_address[31] {
+            instr_physical = {6'h3f, cpu_instr_address[11:0]};
+        }
+        debug_physical = debug_address[17:0];
+        if !debug_address[31] {
+            debug_physical = {6'h3f, debug_address[11:0]};
+        }
+        data_physical = cpu_data_address[17:0];
+        if !cpu_data_address[31] {
+            data_physical = {6'h3f, cpu_data_address[11:0]};
+        }
+        store_physical = cpu_data_address_q[17:0];
+        if !cpu_data_address_q[31] {
+            store_physical = {6'h3f, cpu_data_address_q[11:0]};
+        }
+        if debug_write {
+            instr_port_row  = debug_physical[16:3];
+            instr_port_high = debug_physical[17];
+        } else {
+            instr_port_row  = instr_physical[16:3];
+            instr_port_high = instr_physical[17];
+        }
+
+        data_read_row[0] = data_physical[17:3];
+        data_read_row[1] = data_physical[17:3];
+        data_read_row[2] = data_physical[17:3];
+        data_read_row[3] = data_physical[17:3];
+        data_read_row[4] = data_physical[17:3];
+        data_read_row[5] = data_physical[17:3];
+        data_read_row[6] = data_physical[17:3];
+        data_read_row[7] = data_physical[17:3];
+        if data_physical[2:0] >: 3'd0 {
+            data_read_row[0] = data_physical[17:3] + 15'd1;
+        }
+        if data_physical[2:0] >: 3'd1 {
+            data_read_row[1] = data_physical[17:3] + 15'd1;
+        }
+        if data_physical[2:0] >: 3'd2 {
+            data_read_row[2] = data_physical[17:3] + 15'd1;
+        }
+        if data_physical[2:0] >: 3'd3 {
+            data_read_row[3] = data_physical[17:3] + 15'd1;
+        }
+        if data_physical[2:0] >: 3'd4 {
+            data_read_row[4] = data_physical[17:3] + 15'd1;
+        }
+        if data_physical[2:0] >: 3'd5 {
+            data_read_row[5] = data_physical[17:3] + 15'd1;
+        }
+        if data_physical[2:0] >: 3'd6 {
+            data_read_row[6] = data_physical[17:3] + 15'd1;
+        }
+
+        store_write_row[0] = store_physical[17:3];
+        store_write_row[1] = store_physical[17:3];
+        store_write_row[2] = store_physical[17:3];
+        store_write_row[3] = store_physical[17:3];
+        store_write_row[4] = store_physical[17:3];
+        store_write_row[5] = store_physical[17:3];
+        store_write_row[6] = store_physical[17:3];
+        store_write_row[7] = store_physical[17:3];
+        if store_physical[2:0] >: 3'd0 {
+            store_write_row[0] = store_physical[17:3] + 15'd1;
+        }
+        if store_physical[2:0] >: 3'd1 {
+            store_write_row[1] = store_physical[17:3] + 15'd1;
+        }
+        if store_physical[2:0] >: 3'd2 {
+            store_write_row[2] = store_physical[17:3] + 15'd1;
+        }
+        if store_physical[2:0] >: 3'd3 {
+            store_write_row[3] = store_physical[17:3] + 15'd1;
+        }
+        if store_physical[2:0] >: 3'd4 {
+            store_write_row[4] = store_physical[17:3] + 15'd1;
+        }
+        if store_physical[2:0] >: 3'd5 {
+            store_write_row[5] = store_physical[17:3] + 15'd1;
+        }
+        if store_physical[2:0] >: 3'd6 {
+            store_write_row[6] = store_physical[17:3] + 15'd1;
+        }
+
         case cpu_data_address_q[2:0] {
             3'd0: {
-                store_data_aligned = cpu_data_write_q;
-                store_mask_aligned = cpu_data_mask_q;
+                store_data_rotated = {
+                    cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32],
+                    cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0]
+                };
+                store_mask_rotated = cpu_data_mask_q;
             }
             3'd1: {
-                store_data_aligned = {cpu_data_write_q[55:0], 8'h00};
-                store_mask_aligned = {cpu_data_mask_q[6:0], 1'b0};
+                store_data_rotated = {
+                    cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24],
+                    cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56]
+                };
+                store_mask_rotated = {cpu_data_mask_q[6:0], cpu_data_mask_q[7]};
             }
             3'd2: {
-                store_data_aligned = {cpu_data_write_q[47:0], 16'h0000};
-                store_mask_aligned = {cpu_data_mask_q[5:0], 2'b00};
+                store_data_rotated = {
+                    cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16],
+                    cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48]
+                };
+                store_mask_rotated = {cpu_data_mask_q[5:0], cpu_data_mask_q[7:6]};
             }
             3'd3: {
-                store_data_aligned = {cpu_data_write_q[39:0], 24'h000000};
-                store_mask_aligned = {cpu_data_mask_q[4:0], 3'b000};
+                store_data_rotated = {
+                    cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8],
+                    cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40]
+                };
+                store_mask_rotated = {cpu_data_mask_q[4:0], cpu_data_mask_q[7:5]};
             }
             3'd4: {
-                store_data_aligned = {cpu_data_write_q[31:0], 32'h0000_0000};
-                store_mask_aligned = {cpu_data_mask_q[3:0], 4'b0000};
+                store_data_rotated = {
+                    cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0],
+                    cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32]
+                };
+                store_mask_rotated = {cpu_data_mask_q[3:0], cpu_data_mask_q[7:4]};
             }
             3'd5: {
-                store_data_aligned = {cpu_data_write_q[23:0], 40'h0000_0000_00};
-                store_mask_aligned = {cpu_data_mask_q[2:0], 5'b00000};
+                store_data_rotated = {
+                    cpu_data_write_q[23:16], cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56],
+                    cpu_data_write_q[55:48], cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24]
+                };
+                store_mask_rotated = {cpu_data_mask_q[2:0], cpu_data_mask_q[7:3]};
             }
             3'd6: {
-                store_data_aligned = {cpu_data_write_q[15:0], 48'h0000_0000_0000};
-                store_mask_aligned = {cpu_data_mask_q[1:0], 6'b000000};
+                store_data_rotated = {
+                    cpu_data_write_q[15:8], cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48],
+                    cpu_data_write_q[47:40], cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16]
+                };
+                store_mask_rotated = {cpu_data_mask_q[1:0], cpu_data_mask_q[7:2]};
             }
             default: {
-                store_data_aligned = {cpu_data_write_q[7:0], 56'h0000_0000_0000_00};
-                store_mask_aligned = {cpu_data_mask_q[0], 7'b0000000};
+                store_data_rotated = {
+                    cpu_data_write_q[7:0], cpu_data_write_q[63:56], cpu_data_write_q[55:48], cpu_data_write_q[47:40],
+                    cpu_data_write_q[39:32], cpu_data_write_q[31:24], cpu_data_write_q[23:16], cpu_data_write_q[15:8]
+                };
+                store_mask_rotated = {cpu_data_mask_q[0], cpu_data_mask_q[7:1]};
             }
         }
 
-        if debug_write {
-            dmem_write_address = debug_address[11:3];
-            dmem_write_data[0] = debug_data;
-            dmem_write_data[1] = debug_data;
-            dmem_write_data[2] = debug_data;
-            dmem_write_data[3] = debug_data;
-            dmem_write_data[4] = debug_data;
-            dmem_write_data[5] = debug_data;
-            dmem_write_data[6] = debug_data;
-            dmem_write_data[7] = debug_data;
-        } else {
-            dmem_write_address = {cpu_data_address_q[31], cpu_data_address_q[10:3]};
-            dmem_write_data[0] = store_data_aligned[7:0];
-            dmem_write_data[1] = store_data_aligned[15:8];
-            dmem_write_data[2] = store_data_aligned[23:16];
-            dmem_write_data[3] = store_data_aligned[31:24];
-            dmem_write_data[4] = store_data_aligned[39:32];
-            dmem_write_data[5] = store_data_aligned[47:40];
-            dmem_write_data[6] = store_data_aligned[55:48];
-            dmem_write_data[7] = store_data_aligned[63:56];
-        }
-        dmem_write_enable[0] = (debug_write && (debug_address[2:0] == 3'd0))
-            || (cpu_data_we_q && store_mask_aligned[0]);
-        dmem_write_enable[1] = (debug_write && (debug_address[2:0] == 3'd1))
-            || (cpu_data_we_q && store_mask_aligned[1]);
-        dmem_write_enable[2] = (debug_write && (debug_address[2:0] == 3'd2))
-            || (cpu_data_we_q && store_mask_aligned[2]);
-        dmem_write_enable[3] = (debug_write && (debug_address[2:0] == 3'd3))
-            || (cpu_data_we_q && store_mask_aligned[3]);
-        dmem_write_enable[4] = (debug_write && (debug_address[2:0] == 3'd4))
-            || (cpu_data_we_q && store_mask_aligned[4]);
-        dmem_write_enable[5] = (debug_write && (debug_address[2:0] == 3'd5))
-            || (cpu_data_we_q && store_mask_aligned[5]);
-        dmem_write_enable[6] = (debug_write && (debug_address[2:0] == 3'd6))
-            || (cpu_data_we_q && store_mask_aligned[6]);
-        dmem_write_enable[7] = (debug_write && (debug_address[2:0] == 3'd7))
-            || (cpu_data_we_q && store_mask_aligned[7]);
+        store_bank_data[0] = store_data_rotated[7:0];
+        store_bank_data[1] = store_data_rotated[15:8];
+        store_bank_data[2] = store_data_rotated[23:16];
+        store_bank_data[3] = store_data_rotated[31:24];
+        store_bank_data[4] = store_data_rotated[39:32];
+        store_bank_data[5] = store_data_rotated[47:40];
+        store_bank_data[6] = store_data_rotated[55:48];
+        store_bank_data[7] = store_data_rotated[63:56];
+        store_bank_mask[0] = store_mask_rotated[0];
+        store_bank_mask[1] = store_mask_rotated[1];
+        store_bank_mask[2] = store_mask_rotated[2];
+        store_bank_mask[3] = store_mask_rotated[3];
+        store_bank_mask[4] = store_mask_rotated[4];
+        store_bank_mask[5] = store_mask_rotated[5];
+        store_bank_mask[6] = store_mask_rotated[6];
+        store_bank_mask[7] = store_mask_rotated[7];
 
-        cpu_instruction = {imem_read_3, imem_read_2, imem_read_1, imem_read_0};
+        data_port_row[0]  = data_read_row[0][13:0];
+        data_port_row[1]  = data_read_row[1][13:0];
+        data_port_row[2]  = data_read_row[2][13:0];
+        data_port_row[3]  = data_read_row[3][13:0];
+        data_port_row[4]  = data_read_row[4][13:0];
+        data_port_row[5]  = data_read_row[5][13:0];
+        data_port_row[6]  = data_read_row[6][13:0];
+        data_port_row[7]  = data_read_row[7][13:0];
+        data_port_high[0] = data_read_row[0][14];
+        data_port_high[1] = data_read_row[1][14];
+        data_port_high[2] = data_read_row[2][14];
+        data_port_high[3] = data_read_row[3][14];
+        data_port_high[4] = data_read_row[4][14];
+        data_port_high[5] = data_read_row[5][14];
+        data_port_high[6] = data_read_row[6][14];
+        data_port_high[7] = data_read_row[7][14];
+        if cpu_data_we_q && store_bank_mask[0] {
+            data_port_row[0]  = store_write_row[0][13:0];
+            data_port_high[0] = store_write_row[0][14];
+        }
+        if cpu_data_we_q && store_bank_mask[1] {
+            data_port_row[1]  = store_write_row[1][13:0];
+            data_port_high[1] = store_write_row[1][14];
+        }
+        if cpu_data_we_q && store_bank_mask[2] {
+            data_port_row[2]  = store_write_row[2][13:0];
+            data_port_high[2] = store_write_row[2][14];
+        }
+        if cpu_data_we_q && store_bank_mask[3] {
+            data_port_row[3]  = store_write_row[3][13:0];
+            data_port_high[3] = store_write_row[3][14];
+        }
+        if cpu_data_we_q && store_bank_mask[4] {
+            data_port_row[4]  = store_write_row[4][13:0];
+            data_port_high[4] = store_write_row[4][14];
+        }
+        if cpu_data_we_q && store_bank_mask[5] {
+            data_port_row[5]  = store_write_row[5][13:0];
+            data_port_high[5] = store_write_row[5][14];
+        }
+        if cpu_data_we_q && store_bank_mask[6] {
+            data_port_row[6]  = store_write_row[6][13:0];
+            data_port_high[6] = store_write_row[6][14];
+        }
+        if cpu_data_we_q && store_bank_mask[7] {
+            data_port_row[7]  = store_write_row[7][13:0];
+            data_port_high[7] = store_write_row[7][14];
+        }
+
+        instr_read_0     = instr_read_0_low;
+        if instr_physical[17] {
+            instr_read_0     = instr_read_0_high;
+        }
+        instr_read_1     = instr_read_1_low;
+        if instr_physical[17] {
+            instr_read_1     = instr_read_1_high;
+        }
+        instr_read_2     = instr_read_2_low;
+        if instr_physical[17] {
+            instr_read_2     = instr_read_2_high;
+        }
+        instr_read_3     = instr_read_3_low;
+        if instr_physical[17] {
+            instr_read_3     = instr_read_3_high;
+        }
+        instr_read_4     = instr_read_4_low;
+        if instr_physical[17] {
+            instr_read_4     = instr_read_4_high;
+        }
+        instr_read_5     = instr_read_5_low;
+        if instr_physical[17] {
+            instr_read_5     = instr_read_5_high;
+        }
+        instr_read_6     = instr_read_6_low;
+        if instr_physical[17] {
+            instr_read_6     = instr_read_6_high;
+        }
+        instr_read_7     = instr_read_7_low;
+        if instr_physical[17] {
+            instr_read_7     = instr_read_7_high;
+        }
+        data_bank_read_0 = data_bank_read_0_low;
+        if data_read_row[0][14] {
+            data_bank_read_0 = data_bank_read_0_high;
+        }
+        data_bank_read_1 = data_bank_read_1_low;
+        if data_read_row[1][14] {
+            data_bank_read_1 = data_bank_read_1_high;
+        }
+        data_bank_read_2 = data_bank_read_2_low;
+        if data_read_row[2][14] {
+            data_bank_read_2 = data_bank_read_2_high;
+        }
+        data_bank_read_3 = data_bank_read_3_low;
+        if data_read_row[3][14] {
+            data_bank_read_3 = data_bank_read_3_high;
+        }
+        data_bank_read_4 = data_bank_read_4_low;
+        if data_read_row[4][14] {
+            data_bank_read_4 = data_bank_read_4_high;
+        }
+        data_bank_read_5 = data_bank_read_5_low;
+        if data_read_row[5][14] {
+            data_bank_read_5 = data_bank_read_5_high;
+        }
+        data_bank_read_6 = data_bank_read_6_low;
+        if data_read_row[6][14] {
+            data_bank_read_6 = data_bank_read_6_high;
+        }
+        data_bank_read_7 = data_bank_read_7_low;
+        if data_read_row[7][14] {
+            data_bank_read_7 = data_bank_read_7_high;
+        }
+
         case cpu_data_address[2:0] {
             3'd0   : data_read_mux = {
-                dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3, dmem_read_2, dmem_read_1, dmem_read_0
+                data_bank_read_7, data_bank_read_6, data_bank_read_5, data_bank_read_4, data_bank_read_3,
+                data_bank_read_2, data_bank_read_1, data_bank_read_0
             };
             3'd1   : data_read_mux = {
-                8'h00, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3, dmem_read_2, dmem_read_1
+                data_bank_read_0, data_bank_read_7, data_bank_read_6, data_bank_read_5, data_bank_read_4,
+                data_bank_read_3, data_bank_read_2, data_bank_read_1
             };
             3'd2   : data_read_mux = {
-                16'h0000, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3, dmem_read_2
+                data_bank_read_1, data_bank_read_0, data_bank_read_7, data_bank_read_6, data_bank_read_5,
+                data_bank_read_4, data_bank_read_3, data_bank_read_2
             };
-            3'd3   : data_read_mux = {24'h000000, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4, dmem_read_3};
-            3'd4   : data_read_mux = {32'h0000_0000, dmem_read_7, dmem_read_6, dmem_read_5, dmem_read_4};
-            3'd5   : data_read_mux = {40'h0000_0000_00, dmem_read_7, dmem_read_6, dmem_read_5};
-            3'd6   : data_read_mux = {48'h0000_0000_0000, dmem_read_7, dmem_read_6};
-            default: data_read_mux = {56'h0000_0000_0000_00, dmem_read_7};
+            3'd3   : data_read_mux = {
+                data_bank_read_2, data_bank_read_1, data_bank_read_0, data_bank_read_7, data_bank_read_6,
+                data_bank_read_5, data_bank_read_4, data_bank_read_3
+            };
+            3'd4   : data_read_mux = {
+                data_bank_read_3, data_bank_read_2, data_bank_read_1, data_bank_read_0, data_bank_read_7,
+                data_bank_read_6, data_bank_read_5, data_bank_read_4
+            };
+            3'd5   : data_read_mux = {
+                data_bank_read_4, data_bank_read_3, data_bank_read_2, data_bank_read_1, data_bank_read_0,
+                data_bank_read_7, data_bank_read_6, data_bank_read_5
+            };
+            3'd6   : data_read_mux = {
+                data_bank_read_5, data_bank_read_4, data_bank_read_3, data_bank_read_2, data_bank_read_1,
+                data_bank_read_0, data_bank_read_7, data_bank_read_6
+            };
+            default: data_read_mux = {
+                data_bank_read_6, data_bank_read_5, data_bank_read_4, data_bank_read_3, data_bank_read_2,
+                data_bank_read_1, data_bank_read_0, data_bank_read_7
+            };
+        }
+
+        if instr_physical[2] {
+            cpu_instruction = {instr_read_7, instr_read_6, instr_read_5, instr_read_4};
+        } else {
+            cpu_instruction = {instr_read_3, instr_read_2, instr_read_1, instr_read_0};
         }
         cpu_data_read = data_read_q;
     }
 
     always_ff (clk_n) {
-        if debug_write && (debug_address[1:0] == 2'd0) {
-            imem_0[debug_address[11:2]] = debug_data;
+        if debug_write && (debug_physical[2:0] == 3'd0) && !instr_port_high {
+            mem_0_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_0_low          = mem_0_low[instr_port_row];
         }
     }
     always_ff (clk_n) {
-        if debug_write && (debug_address[1:0] == 2'd1) {
-            imem_1[debug_address[11:2]] = debug_data;
+        if debug_write && (debug_physical[2:0] == 3'd0) && instr_port_high {
+            mem_0_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_0_high          = mem_0_high[instr_port_row];
         }
     }
     always_ff (clk_n) {
-        if debug_write && (debug_address[1:0] == 2'd2) {
-            imem_2[debug_address[11:2]] = debug_data;
+        if debug_write && (debug_physical[2:0] == 3'd1) && !instr_port_high {
+            mem_1_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_1_low          = mem_1_low[instr_port_row];
         }
     }
     always_ff (clk_n) {
-        if debug_write && (debug_address[1:0] == 2'd3) {
-            imem_3[debug_address[11:2]] = debug_data;
+        if debug_write && (debug_physical[2:0] == 3'd1) && instr_port_high {
+            mem_1_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_1_high          = mem_1_high[instr_port_row];
         }
     }
     always_ff (clk_n) {
-        imem_read_0 = imem_0[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+        if debug_write && (debug_physical[2:0] == 3'd2) && !instr_port_high {
+            mem_2_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_2_low          = mem_2_low[instr_port_row];
+        }
     }
     always_ff (clk_n) {
-        imem_read_1 = imem_1[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+        if debug_write && (debug_physical[2:0] == 3'd2) && instr_port_high {
+            mem_2_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_2_high          = mem_2_high[instr_port_row];
+        }
     }
     always_ff (clk_n) {
-        imem_read_2 = imem_2[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+        if debug_write && (debug_physical[2:0] == 3'd3) && !instr_port_high {
+            mem_3_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_3_low          = mem_3_low[instr_port_row];
+        }
     }
     always_ff (clk_n) {
-        imem_read_3 = imem_3[{cpu_instr_address[31], cpu_instr_address[10:2]}];
+        if debug_write && (debug_physical[2:0] == 3'd3) && instr_port_high {
+            mem_3_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_3_high          = mem_3_high[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd4) && !instr_port_high {
+            mem_4_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_4_low          = mem_4_low[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd4) && instr_port_high {
+            mem_4_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_4_high          = mem_4_high[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd5) && !instr_port_high {
+            mem_5_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_5_low          = mem_5_low[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd5) && instr_port_high {
+            mem_5_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_5_high          = mem_5_high[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd6) && !instr_port_high {
+            mem_6_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_6_low          = mem_6_low[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd6) && instr_port_high {
+            mem_6_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_6_high          = mem_6_high[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd7) && !instr_port_high {
+            mem_7_low[instr_port_row] = debug_data;
+        } else {
+            instr_read_7_low          = mem_7_low[instr_port_row];
+        }
+    }
+    always_ff (clk_n) {
+        if debug_write && (debug_physical[2:0] == 3'd7) && instr_port_high {
+            mem_7_high[instr_port_row] = debug_data;
+        } else {
+            instr_read_7_high          = mem_7_high[instr_port_row];
+        }
     }
 
     always_ff (clk) {
-        if dmem_write_enable[0] {
-            dmem_0[dmem_write_address] = dmem_write_data[0];
+        if cpu_data_we_q && store_bank_mask[0] && !data_port_high[0] {
+            mem_0_low[data_port_row[0]] = store_bank_data[0];
+        } else {
+            data_bank_read_0_low        = mem_0_low[data_port_row[0]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[1] {
-            dmem_1[dmem_write_address] = dmem_write_data[1];
+        if cpu_data_we_q && store_bank_mask[0] && data_port_high[0] {
+            mem_0_high[data_port_row[0]] = store_bank_data[0];
+        } else {
+            data_bank_read_0_high        = mem_0_high[data_port_row[0]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[2] {
-            dmem_2[dmem_write_address] = dmem_write_data[2];
+        if cpu_data_we_q && store_bank_mask[1] && !data_port_high[1] {
+            mem_1_low[data_port_row[1]] = store_bank_data[1];
+        } else {
+            data_bank_read_1_low        = mem_1_low[data_port_row[1]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[3] {
-            dmem_3[dmem_write_address] = dmem_write_data[3];
+        if cpu_data_we_q && store_bank_mask[1] && data_port_high[1] {
+            mem_1_high[data_port_row[1]] = store_bank_data[1];
+        } else {
+            data_bank_read_1_high        = mem_1_high[data_port_row[1]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[4] {
-            dmem_4[dmem_write_address] = dmem_write_data[4];
+        if cpu_data_we_q && store_bank_mask[2] && !data_port_high[2] {
+            mem_2_low[data_port_row[2]] = store_bank_data[2];
+        } else {
+            data_bank_read_2_low        = mem_2_low[data_port_row[2]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[5] {
-            dmem_5[dmem_write_address] = dmem_write_data[5];
+        if cpu_data_we_q && store_bank_mask[2] && data_port_high[2] {
+            mem_2_high[data_port_row[2]] = store_bank_data[2];
+        } else {
+            data_bank_read_2_high        = mem_2_high[data_port_row[2]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[6] {
-            dmem_6[dmem_write_address] = dmem_write_data[6];
+        if cpu_data_we_q && store_bank_mask[3] && !data_port_high[3] {
+            mem_3_low[data_port_row[3]] = store_bank_data[3];
+        } else {
+            data_bank_read_3_low        = mem_3_low[data_port_row[3]];
         }
     }
     always_ff (clk) {
-        if dmem_write_enable[7] {
-            dmem_7[dmem_write_address] = dmem_write_data[7];
+        if cpu_data_we_q && store_bank_mask[3] && data_port_high[3] {
+            mem_3_high[data_port_row[3]] = store_bank_data[3];
+        } else {
+            data_bank_read_3_high        = mem_3_high[data_port_row[3]];
         }
     }
     always_ff (clk) {
-        dmem_read_0 = dmem_0[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[4] && !data_port_high[4] {
+            mem_4_low[data_port_row[4]] = store_bank_data[4];
+        } else {
+            data_bank_read_4_low        = mem_4_low[data_port_row[4]];
+        }
     }
     always_ff (clk) {
-        dmem_read_1 = dmem_1[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[4] && data_port_high[4] {
+            mem_4_high[data_port_row[4]] = store_bank_data[4];
+        } else {
+            data_bank_read_4_high        = mem_4_high[data_port_row[4]];
+        }
     }
     always_ff (clk) {
-        dmem_read_2 = dmem_2[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[5] && !data_port_high[5] {
+            mem_5_low[data_port_row[5]] = store_bank_data[5];
+        } else {
+            data_bank_read_5_low        = mem_5_low[data_port_row[5]];
+        }
     }
     always_ff (clk) {
-        dmem_read_3 = dmem_3[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[5] && data_port_high[5] {
+            mem_5_high[data_port_row[5]] = store_bank_data[5];
+        } else {
+            data_bank_read_5_high        = mem_5_high[data_port_row[5]];
+        }
     }
     always_ff (clk) {
-        dmem_read_4 = dmem_4[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[6] && !data_port_high[6] {
+            mem_6_low[data_port_row[6]] = store_bank_data[6];
+        } else {
+            data_bank_read_6_low        = mem_6_low[data_port_row[6]];
+        }
     }
     always_ff (clk) {
-        dmem_read_5 = dmem_5[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[6] && data_port_high[6] {
+            mem_6_high[data_port_row[6]] = store_bank_data[6];
+        } else {
+            data_bank_read_6_high        = mem_6_high[data_port_row[6]];
+        }
     }
     always_ff (clk) {
-        dmem_read_6 = dmem_6[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[7] && !data_port_high[7] {
+            mem_7_low[data_port_row[7]] = store_bank_data[7];
+        } else {
+            data_bank_read_7_low        = mem_7_low[data_port_row[7]];
+        }
     }
     always_ff (clk) {
-        dmem_read_7 = dmem_7[{cpu_data_address[31], cpu_data_address[10:3]}];
+        if cpu_data_we_q && store_bank_mask[7] && data_port_high[7] {
+            mem_7_high[data_port_row[7]] = store_bank_data[7];
+        } else {
+            data_bank_read_7_high        = mem_7_high[data_port_row[7]];
+        }
     }
+
     always_ff (clk) {
-        data_read_q = data_read_mux;
-    }
-    always_ff (clk) {
+        data_read_q        = data_read_mux;
         cpu_data_address_q = cpu_data_address;
         cpu_data_write_q   = cpu_data_write;
         cpu_data_mask_q    = cpu_data_mask;

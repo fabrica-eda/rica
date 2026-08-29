@@ -47,13 +47,14 @@ uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, a 624 MHz VCO, and a
 divide-by-five `CLKOS` output to generate 124.8 MHz. Exact 125 MHz and the older
 126 MHz configuration require an input divider greater than one and put the
 phase detector below its data-sheet range, so neither is used. The board
-disables unused commit payload registers
-while retaining `commit_valid` for its heartbeat; the verification build keeps
-the full architectural commit trace. Struo estimates the core at 7.160 ns.
-nextpnr 0.6 seed 4 routes the complete hardware wrapper at 125.88 MHz and
-passes its derived 124.8 MHz clock constraint with 68 ps setup slack. The
-resulting bitstream passes all six bundled RV64 hardware tests, including the
-machine-mode CSR/trap regression.
+disables unused commit payload registers while retaining `commit_valid` for its
+heartbeat; the verification build keeps the full architectural commit trace.
+The earlier 4 KiB hardware wrapper met 124.8 MHz, but the current 256 KiB
+unified true-dual-port memory does not yet: two bounded physical-feedback passes
+improve nextpnr seed 4 from 71.83 MHz to 88.79 MHz. The remaining path is the
+half-cycle instruction/debug address route across the full BRAM column. A
+full-cycle instruction-memory response stage is required before producing a
+timing-qualified replacement bitstream.
 
 ## Verification
 
@@ -70,8 +71,9 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests
 ```
 
 The official ACT4 tests are pinned as the `third_party/riscv-arch-test`
-submodule. The runner discovers the complete RV64I catalog there and reports
-tests not yet enabled by `tests/act4-rv64-enabled.txt` as `IGNORE`:
+submodule. All 51 tests in the pinned RV64I catalog are enabled by
+`tests/act4-rv64-enabled.txt` and pass both the ordinary Core simulator and the
+synchronous hardware-memory RTL model:
 
 ```sh
 git submodule update --init
@@ -80,8 +82,7 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --act4
 
 It also accepts externally generated self-checking ELFs. See
 `tests/README.md` for the `tohost` contract, ACT4 ELF directory option, and the
-exact implemented ISA subset; this is not yet a full RV64I certification
-claim.
+exact implemented ISA subset.
 
 Compiling the post-map simulation model can take several minutes. Run that
 regression explicitly when needed:
@@ -112,8 +113,11 @@ ecppack riscv/build/riscv-hardware-test-125.bit.config \
   riscv/build/riscv-hardware-test-125.bit --compress --freq 62.0
 ```
 
-`HardwareTestTop` adds 4 KiB of JTAG-I2C-loadable Harvard BRAM, CPU run/reset
-control, and a `tohost` result mailbox. After routing and packing
+`HardwareTestTop` adds 256 KiB of JTAG-I2C-loadable unified true-dual-port BRAM,
+CPU run/reset control, and a `tohost` result mailbox. The first physical port
+serves falling-edge instruction fetches or debug writes while reset; the second
+serves rising-edge LSU reads and writes. After timing closure, routing, and
+packing
 `riscv/build/riscv-hardware-test-125.bit`, program it and run the bundled RV64
 ELFs on the EVN with:
 
@@ -124,10 +128,11 @@ cargo run --locked --offline --release -p verify-riscv \
 
 Pass `--no-program` to reuse the current SRAM image, or pass ELF paths after
 the options to run external self-checking programs. The host validates the
-debug identity, loads both instruction and data BRAM through ER1, starts the
-CPU, waits, and checks the status and 64-bit `tohost` result. The physical test
-RAM accepts `0x00000000..0x000007ff` and
-`0x80000000..0x800007ff`.
+debug identity, loads the unified BRAM through ER1, starts the CPU, waits, and
+checks the status and 64-bit `tohost` result. The physical test RAM accepts a
+4 KiB reset trampoline at `0x00000000..0x00000fff` and 252 KiB of ACT4 memory
+at `0x80000000..0x8003efff`. The timing-critical high region maps directly to
+BRAM; the trampoline is relocated to the final physical 4 KiB.
 
 The board wrapper binds the EVN's 12 MHz reference to a 124.8 MHz EHXPLLL. Its
 ROM increments x31 immediately after reset and then enters a delay/branch loop
@@ -161,13 +166,14 @@ Generate a native bitstream only after the Texo run reports timing closure:
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
-pack; no local architecture override is needed. The pinned Texo revision
-closes this enlarged CSR/trap implementation with 20 ps setup and 290 ps hold
-slack at 124.8 MHz. Its native bitstream passes the same complete six-test
-hardware suite as the nextpnr bitstream.
+pack; no local architecture override is needed. The pinned Texo revision can
+import both ports and applies their independent active edges in STA, but the
+current 256 KiB wrapper does not close at 124.8 MHz in Texo either. Do not run
+bit generation or program an older 4 KiB artifact as though it represented
+this design.
 
 JTAG detection, SRAM programming, ELF upload, CPU execution, and mailbox
-readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz. The complete `alu`,
-`compare`, `control`, `memory`, `shift`, and `system` hardware suite passes on
-both current bitstreams. Use `--um5g-85k`, not `--85k`: the latter targets LFE5U
-and produces a bitstream with the wrong device ID and configuration semantics.
+readback were verified on the previous 4 KiB wrapper at 124.8 MHz. Actual-board
+verification of the current 256 KiB wrapper remains pending timing closure.
+Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
+bitstream with the wrong device ID and configuration semantics.

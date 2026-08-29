@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -12,8 +11,10 @@ use verify_riscv::ElfImage;
 const WINDOW_START: u8 = 0x20;
 const WINDOW_LENGTH: usize = 0xe0;
 const DEFAULT_RUN_TCK: usize = 1_000_000;
-type MemoryRange = (usize, usize);
-type HardwareMemoryImage = ([u8; 4096], Vec<MemoryRange>);
+const HARDWARE_MEMORY_BYTES: usize = 256 * 1024;
+const TRAMPOLINE_WINDOW_BYTES: usize = 4 * 1024;
+type MemoryRange = (u32, usize, usize);
+type HardwareMemoryImage = (Vec<u8>, Vec<MemoryRange>);
 
 fn checked_command(command: &mut Command) -> Result<(), Box<dyn Error>> {
     let printable = format!("{command:?}");
@@ -231,41 +232,35 @@ impl SvfI2c {
 }
 
 fn physical_index(address: u64) -> Result<usize, Box<dyn Error>> {
-    let page = address & !0x7ff;
-    let offset = usize::try_from(address & 0x7ff)?;
-    match page {
-        0 => Ok(offset),
-        0x8000_0000 => Ok(0x800 | offset),
-        _ => Err(format!(
-            "address 0x{address:016x} is outside the hardware test RAM windows 0x0..0x7ff and 0x80000000..0x800007ff"
-        )
-        .into()),
+    if address < TRAMPOLINE_WINDOW_BYTES as u64 {
+        return Ok(usize::try_from(address)?);
     }
+    let act4_bytes = HARDWARE_MEMORY_BYTES - TRAMPOLINE_WINDOW_BYTES;
+    if (0x8000_0000..0x8000_0000 + act4_bytes as u64).contains(&address) {
+        return Ok(TRAMPOLINE_WINDOW_BYTES + usize::try_from(address - 0x8000_0000)?);
+    }
+    Err(format!(
+        "address 0x{address:016x} is outside the hardware test RAM windows 0x0..0xfff and 0x80000000..0x8003efff"
+    )
+    .into())
 }
 
 fn memory_image(image: &ElfImage) -> Result<HardwareMemoryImage, Box<dyn Error>> {
-    let mut bytes = [0_u8; 4096];
-    let mut owners = BTreeMap::<usize, u64>::new();
+    let mut bytes = vec![0_u8; HARDWARE_MEMORY_BYTES];
     let mut maxima = [None::<usize>; 2];
     for (address, byte) in image.load_bytes() {
         let index = physical_index(address)?;
-        if let Some(previous) = owners.insert(index, address)
-            && previous != address
-        {
-            return Err(format!(
-                "hardware RAM alias: 0x{previous:016x} and 0x{address:016x} both map to 0x{index:03x}"
-            )
-            .into());
-        }
         bytes[index] = byte;
-        let half = index >> 11;
-        maxima[half] = Some(maxima[half].map_or(index, |maximum| maximum.max(index)));
+        let window = usize::from(index >= TRAMPOLINE_WINDOW_BYTES);
+        maxima[window] = Some(maxima[window].map_or(index, |maximum| maximum.max(index)));
     }
-    let ranges = maxima
-        .into_iter()
-        .enumerate()
-        .filter_map(|(half, maximum)| maximum.map(|maximum| (half << 11, maximum + 1)))
-        .collect();
+    let mut ranges = Vec::new();
+    if let Some(maximum) = maxima[0] {
+        ranges.push((0, 0, maximum + 1));
+    }
+    if let Some(maximum) = maxima[1] {
+        ranges.push((0x8000_0000, TRAMPOLINE_WINDOW_BYTES, maximum + 1));
+    }
     Ok((bytes, ranges))
 }
 
@@ -281,10 +276,11 @@ fn test_svf(
     bus.write_registers(0x10, &[0x02]);
     bus.write_registers(0x08, &(image.tohost as u32).to_le_bytes());
 
-    for (start, end) in ranges {
+    for (address_base, start, end) in ranges {
         for offset in (start..end).step_by(WINDOW_LENGTH) {
             let chunk_end = end.min(offset + WINDOW_LENGTH);
-            bus.write_registers(0x04, &(offset as u32).to_le_bytes());
+            let aperture = address_base + u32::try_from(offset - start)?;
+            bus.write_registers(0x04, &aperture.to_le_bytes());
             bus.write_registers(WINDOW_START, &memory[offset..chunk_end]);
         }
     }

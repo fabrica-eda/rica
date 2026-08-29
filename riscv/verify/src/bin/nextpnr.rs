@@ -5,7 +5,9 @@ use std::path::Path;
 
 use struo_frontend_veryl::analyze_and_lower;
 use struo_synth::synthesize;
-use struo_target_ecp5::{JtaggBinding, MappingOptions, PllBinding, map_to_ecp5_with_options};
+use struo_target_ecp5::{
+    JtaggBinding, MappingOptions, PhysicalFeedback, PllBinding, map_to_ecp5_with_options,
+};
 
 fn validated_pll(path: &Path) -> Result<PllBinding, Box<dyn Error>> {
     let pll: PllBinding = serde_json::from_str(&fs::read_to_string(path)?)?;
@@ -38,7 +40,12 @@ fn board_pll(project: &Path) -> Result<PllBinding, Box<dyn Error>> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let top = env::args().nth(1).unwrap_or_else(|| "Core".to_owned());
+    let mut arguments = env::args().skip(1);
+    let top = arguments.next().unwrap_or_else(|| "Core".to_owned());
+    let feedback_arguments = arguments.collect::<Vec<_>>();
+    if feedback_arguments.len() % 2 != 0 {
+        return Err("each physical feedback step requires REPORT.json and PLACED.json".into());
+    }
     let (output_name, timing_goal_mhz) = match top.as_str() {
         "Core" => ("riscv-125.nextpnr.json", 125),
         "Top" => ("riscv-top-125.nextpnr.json", 125),
@@ -85,6 +92,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         mapped.bind_jtagg(&JtaggBinding::with_prefix("jtag"))?;
         let pll = board_pll(project)?;
         mapped.bind_pll(&pll)?;
+    }
+    for [report, placed] in feedback_arguments.as_chunks::<2>().0 {
+        let feedback = PhysicalFeedback::from_nextpnr_json(
+            &fs::read_to_string(report)?,
+            &fs::read_to_string(placed)?,
+        )?;
+        mapped = mapped.apply_physical_feedback(&feedback);
     }
 
     let output = project.join("build").join(output_name);

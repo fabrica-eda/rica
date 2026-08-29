@@ -44,14 +44,16 @@ all bundled tests. `--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
 execution window. `--expect-tohost value` selects an exact diagnostic mailbox
 value. Positional ELF paths select individual or external tests.
-Each ELF must fit in the two 2 KiB physical windows
-`0x00000000..0x000007ff` and `0x80000000..0x800007ff`.
+Each ELF must fit in the 4 KiB reset-trampoline window
+`0x00000000..0x00000fff` and the 252 KiB test window
+`0x80000000..0x8003efff`.
 
 The runner writes generated SVF files under `build/hardware-rv64`. A successful
 result covers the entire board path: JTAGG ER1, I2C register transport, BRAM
-loading, PLL/reset, RV64 execution, and `tohost` readback. All six bundled
-tests, including the directed `SW; LD; LD; BNE` memory regression and the
-machine-mode CSR/trap regression, pass on the EVN at 124.8 MHz.
+loading, PLL/reset, RV64 execution, and `tohost` readback. The previous 4 KiB
+wrapper passed all six bundled smoke tests on the EVN at 124.8 MHz. The current
+256 KiB unified-memory wrapper must not be programmed as a qualified image
+until its 124.8 MHz timing failure is closed.
 
 ## Architectural test integration
 
@@ -72,17 +74,12 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- \
   --act4 --act4-elf-dir path/to/act4/elfs
 ```
 
-The runner discovers every `I-*-00.S` test directly from the submodule. Tests
-absent from `act4-rv64-enabled.txt` are printed as `IGNORE`; enabled tests must
-have a matching ELF and must pass. New tests added by a later submodule update
-are therefore ignored by default instead of silently disappearing from the
+The runner discovers every `I-*-00.S` test directly from the submodule. All 51
+tests in the pinned RV64I catalog are enabled in `act4-rv64-enabled.txt` and
+pass both the ordinary Core simulator and the synchronous HardwareMemory RTL
+model. Tests added by a later submodule update are printed as `IGNORE` until
+they are reviewed and enabled, instead of silently disappearing from the
 suite. No official test source is copied, renamed, or patched in Rica.
-
-`act4-rv64-enabled.txt` is intentionally empty today. ACT4's common RV64I
-bootstrap uses `SLLI` and `SRLI` while initializing registers, so even an
-`ADD` test is not runnable on the current subset Core yet. Add a test stem only
-after both the instruction under test and all shared harness instructions are
-supported.
 
 The local `rv64i-subset/` programs remain fast bring-up smoke tests, not a
 replacement for or fork of ACT4. They currently cover:
@@ -100,9 +97,9 @@ replacement for or fork of ACT4. They currently cover:
   machine-mode CSRs through the Zicsr register and immediate forms
 - dependent ALU forwarding and a load-use dependency
 
-Full ACT4 RV64I certification still requires the remaining ISA surface and a
-supported ACT4 execution environment. A bundled test reports through `tohost`
-and then enters a terminal loop; `ECALL` is handled architecturally as a
-machine-mode exception rather than as a simulation halt.
+Passing the pinned catalog is a regression result rather than an external
+certification claim. A bundled test reports through `tohost` and then enters a
+terminal loop; `ECALL` is handled architecturally as a machine-mode exception
+rather than as a simulation halt.
 
 [act4]: https://github.com/riscv/riscv-arch-test

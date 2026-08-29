@@ -336,10 +336,8 @@ module Core #(
         } else {
             csr_source = alu_operand_a;
         }
-        csr_access_illegal = ex_is_csr_q
-            && (!csr_bus.legal || (ex_csr_write_q && !csr_bus.writable));
-        ex_exception = ex_valid_q
-            && (ex_illegal_q || csr_access_illegal || ex_is_ecall_q || ex_is_ebreak_q);
+        csr_access_illegal = ex_is_csr_q && (!csr_bus.legal || (ex_csr_write_q && !csr_bus.writable));
+        ex_exception       = ex_valid_q && (ex_illegal_q || csr_access_illegal || ex_is_ecall_q || ex_is_ebreak_q);
         if ex_is_ecall_q {
             ex_exception_cause = 64'd11;
         } else if ex_is_ebreak_q {
@@ -372,24 +370,27 @@ module Core #(
         // Applying an older redirect takes one extra cycle. Control transfers
         // still present in the younger pipeline during that cycle are
         // wrong-path work and must not enqueue another redirect.
-        memory_wait    = SYNC_DATA_MEMORY && cm_valid_q
+        // A pending older redirect makes the current completion-stage memory
+        // operation wrong-path work. It must be flushed immediately instead
+        // of stalling the pipeline and thereby dropping the redirect.
+        memory_wait = SYNC_DATA_MEMORY && !redirect_pending_q && cm_valid_q
             && ((cm_is_load_q && (cm_load_wait_q != 2'd2)) || (cm_is_store_q && (cm_load_wait_q != 2'd1)));
         // An older taken branch wins over every EX side effect. A pending
         // redirect likewise proves that the current EX instruction is wrong
         // path, so it may not touch CSR state or raise a trap.
-        ex_trap_event      = ex_exception && !memory_wait && !redirect_pending_q && !branch_redirect_valid;
-        ex_mret_event      = ex_valid_q && ex_is_mret_q && !memory_wait
+        ex_trap_event        = ex_exception && !memory_wait && !redirect_pending_q && !branch_redirect_valid;
+        ex_mret_event        = ex_valid_q && ex_is_mret_q && !memory_wait && !redirect_pending_q
+            && !branch_redirect_valid;
+        ex_system_redirect   = ex_trap_event || ex_mret_event;
+        csr_bus.write_enable = ex_valid_q && ex_is_csr_q && ex_csr_write_q && !csr_access_illegal && !memory_wait
             && !redirect_pending_q && !branch_redirect_valid;
-        ex_system_redirect = ex_trap_event || ex_mret_event;
-        csr_bus.write_enable = ex_valid_q && ex_is_csr_q && ex_csr_write_q
-            && !csr_access_illegal && !memory_wait && !redirect_pending_q && !branch_redirect_valid;
         csr_bus.write_op     = ex_csr_op_q;
         csr_bus.write_source = csr_source;
-        csr_bus.trap_enter = ex_trap_event;
-        csr_bus.trap_pc    = ex_pc_q;
-        csr_bus.trap_cause = ex_exception_cause;
-        csr_bus.trap_value = ex_exception_value;
-        csr_bus.mret       = ex_mret_event;
+        csr_bus.trap_enter   = ex_trap_event;
+        csr_bus.trap_pc      = ex_pc_q;
+        csr_bus.trap_cause   = ex_exception_cause;
+        csr_bus.trap_value   = ex_exception_value;
+        csr_bus.mret         = ex_mret_event;
 
         redirect_valid = !memory_wait && !redirect_pending_q
             && (ex_redirect_valid || ex_system_redirect || branch_redirect_valid);
@@ -416,11 +417,12 @@ module Core #(
         data_addr  = cm_lsu_address_q;
         data_wdata = cm_lsu_wdata_q;
         data_wmask = completion_bus.store_mask;
-        data_we    = cm_valid_q && cm_is_store_q && (!SYNC_DATA_MEMORY || (cm_load_wait_q == 2'd0));
+        data_we    = cm_valid_q && cm_is_store_q && !redirect_pending_q
+            && (!SYNC_DATA_MEMORY || (cm_load_wait_q == 2'd0));
         // There is no architectural halt instruction. This output remains for
         // the board debug ABI and will be used by a future debug halt request.
-        halted     = 1'b0;
-        debug_x31  = debug_x31_q;
+        halted    = 1'b0;
+        debug_x31 = debug_x31_q;
 
     }
 
@@ -604,6 +606,13 @@ module Core #(
                 // then complete/forward it when the BRAM value is available.
                 wb_valid_q     = 1'b0;
                 cm_load_wait_q = cm_load_wait_q + 2'd1;
+                // RX already owns the register-file response associated with
+                // its instruction. Preserve that response while the RF read
+                // ports are frozen, and fold in any older CM/WB forwarding
+                // value before its producer retires during the stall.
+                rx_stalled_q      = 1'b1;
+                rx_stall_data_a_q = forwarded_rs1;
+                rx_stall_data_b_q = forwarded_rs2;
             } else {
                 cm_load_wait_q = 2'd0;
                 wb_valid_q     = cm_valid_q;
@@ -647,7 +656,7 @@ module Core #(
                 } else {
                     cm_arithmetic_q = execute_bus.arithmetic;
                 }
-                cm_shift_low_q       = execute_bus.shift_result;
+                cm_shift_low_q = execute_bus.shift_result;
                 if ex_word_op_q {
                     cm_shift_amount_q = {1'b0, alu_operand_b[4:3]};
                 } else {

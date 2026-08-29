@@ -1,5 +1,53 @@
-# ACT4 RV64I tests become runnable by adding their stem here, one per line.
-#
-# Add a test only after its complete shared bootstrap has run successfully on
-# the Core. Tests not listed here are discovered from the pinned submodule and
-# reported as IGNORE; they are not copied or renamed in this repository.
+# Complete ACT4 RV64I catalog at the pinned riscv-arch-test revision.
+# The runner fails if an enabled ELF is missing or does not self-check.
+I-add-00
+I-addi-00
+I-addiw-00
+I-addw-00
+I-and-00
+I-andi-00
+I-auipc-00
+I-beq-00
+I-bge-00
+I-bgeu-00
+I-blt-00
+I-bltu-00
+I-bne-00
+I-fence-00
+I-jal-00
+I-jalr-00
+I-lb-00
+I-lbu-00
+I-ld-00
+I-lh-00
+I-lhu-00
+I-lui-00
+I-lw-00
+I-lwu-00
+I-nop-00
+I-or-00
+I-ori-00
+I-sb-00
+I-sd-00
+I-sh-00
+I-sll-00
+I-slli-00
+I-slliw-00
+I-sllw-00
+I-slt-00
+I-slti-00
+I-sltiu-00
+I-sltu-00
+I-sra-00
+I-srai-00
+I-sraiw-00
+I-sraw-00
+I-srl-00
+I-srli-00
+I-srliw-00
+I-srlw-00
+I-sub-00
+I-subw-00
+I-sw-00
+I-xor-00
+I-xori-00

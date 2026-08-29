@@ -1,10 +1,11 @@
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{cmp, collections::HashMap};
 
 use celox::SimulatorBuilder;
+use object::{Object, ObjectSymbol};
 use struo_celox::ecp5_simulator;
 use struo_frontend_veryl::analyze_and_lower;
 use struo_synth::synthesize;
@@ -652,23 +653,28 @@ define_verifier!(verify_post_map, value_post_map, celox03::Simulator);
 
 fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(), Box<dyn Error>> {
     let image = ElfImage::load(elf)?;
-    let mut bytes = [0_u8; 4096];
-    let mut loaded = Vec::new();
+    let elf_bytes = fs::read(elf)?;
+    let object = object::File::parse(elf_bytes.as_slice())?;
+    let failure_entries = object
+        .symbols()
+        .filter_map(|symbol| {
+            let name = symbol.name().ok()?;
+            matches!(
+                name,
+                "failedtest_x5_x4" | "failedtest_x8_x7" | "failedtest_x14_x13"
+            )
+            .then_some(symbol.address())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut loaded = Vec::<(u32, u8)>::new();
     for (address, byte) in image.load_bytes() {
-        let physical = match address & !0x7ff {
-            0 => usize::try_from(address & 0x7ff)?,
-            0x8000_0000 => 0x800 | usize::try_from(address & 0x7ff)?,
-            _ => {
-                return Err(
-                    format!("hardware RTL address 0x{address:016x} is out of range").into(),
-                );
-            }
-        };
-        bytes[physical] = byte;
-        loaded.push(physical);
+        let in_trampoline = address < 0x1000;
+        let in_act4 = (0x8000_0000..0x8003_f000).contains(&address);
+        if !in_trampoline && !in_act4 {
+            return Err(format!("hardware RTL address 0x{address:016x} is out of range").into());
+        }
+        loaded.push((u32::try_from(address)?, byte));
     }
-    loaded.sort_unstable();
-    loaded.dedup();
 
     let mut simulator = SimulatorBuilder::new(source, "HardwareCoreTestTop").build_native()?;
     let clk = simulator.event("clk");
@@ -685,11 +691,11 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
     })?;
     simulator.tick(clk_n)?;
     simulator.tick(clk)?;
-    for address in loaded {
+    for (address, byte) in loaded {
         simulator.modify(|io| {
             io.set(debug_write, 1_u8);
-            io.set(debug_address, address as u32);
-            io.set(debug_data, bytes[address]);
+            io.set(debug_address, address);
+            io.set(debug_data, byte);
         })?;
         simulator.tick(clk_n)?;
         simulator.tick(clk)?;
@@ -700,7 +706,10 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
     simulator.modify(|io| io.set(rst_n, 1_u8))?;
 
     let mut trace = std::collections::VecDeque::with_capacity(20);
-    for cycle in 1..=4_000 {
+    let mut mailbox_low = 0_u64;
+    let mut commits = 0_usize;
+    let mut reset_entries = 0_usize;
+    for cycle in 1..=100_000 {
         simulator.tick(clk_n)?;
         let store = (value_native(&mut simulator, "data_we") != 0).then(|| {
             (
@@ -711,21 +720,9 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
         });
         simulator.tick(clk)?;
         if value_native(&mut simulator, "commit_valid") != 0 {
-            if trace.len() == trace.capacity() {
-                trace.pop_front();
-            }
-            trace.push_back((
-                value_native(&mut simulator, "commit_pc"),
-                value_native(&mut simulator, "commit_instr"),
-                value_native(&mut simulator, "commit_rd"),
-                value_native(&mut simulator, "commit_data"),
-            ));
-        }
-        if let Some((address, data, mask)) = store
-            && address == image.tohost
-            && data != 0
-        {
-            if data != 1 {
+            commits += 1;
+            let commit_pc = value_native(&mut simulator, "commit_pc");
+            if failure_entries.contains(&commit_pc) {
                 let recent = trace
                     .iter()
                     .map(|(pc, instr, rd, value)| {
@@ -734,8 +731,64 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(format!(
-                    "hardware-memory RTL {label} failed: tohost={data} (test {}) at cycle {cycle}, mask={mask:#04x}\n{recent}",
-                    data >> 1
+                    "hardware-memory RTL {label} entered {commit_pc:#010x} at cycle {cycle}\n{recent}"
+                )
+                .into());
+            }
+            if commit_pc == 0 {
+                reset_entries += 1;
+                if reset_entries == 2 {
+                    let recent = trace
+                        .iter()
+                        .map(|(pc, instr, rd, value)| {
+                            format!(
+                                "  pc={pc:#06x} instr={instr:#010x} rd=x{rd} data={value:#018x}"
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Err(format!(
+                        "hardware-memory RTL {label} unexpectedly re-entered the reset trampoline at cycle {cycle}\n{recent}"
+                    )
+                    .into());
+                }
+            }
+            if trace.len() == trace.capacity() {
+                trace.pop_front();
+            }
+            trace.push_back((
+                commit_pc,
+                value_native(&mut simulator, "commit_instr"),
+                value_native(&mut simulator, "commit_rd"),
+                value_native(&mut simulator, "commit_data"),
+            ));
+        }
+        let mailbox = store.and_then(|(address, data, mask)| {
+            if address == image.tohost && mask == 0xff {
+                Some(data)
+            } else if address == image.tohost && mask == 0x0f {
+                mailbox_low = data & 0xffff_ffff;
+                None
+            } else if address == image.tohost + 4 && mask == 0x0f && data & 0xffff_ffff == 0 {
+                Some(mailbox_low)
+            } else {
+                None
+            }
+        });
+        if let Some(result) = mailbox
+            && result != 0
+        {
+            if result != 1 {
+                let recent = trace
+                    .iter()
+                    .map(|(pc, instr, rd, value)| {
+                        format!("  pc={pc:#06x} instr={instr:#010x} rd=x{rd} data={value:#018x}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(format!(
+                    "hardware-memory RTL {label} failed: tohost={result} (test {}) at cycle {cycle}\n{recent}",
+                    result >> 1
                 )
                 .into());
             }
@@ -750,10 +803,16 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Err(format!("hardware-memory RTL {label} timed out\n{recent}").into())
+    Err(format!(
+        "hardware-memory RTL {label} timed out after {commits} commits and {reset_entries} reset entries\n{recent}"
+    )
+    .into())
 }
 
-fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
+fn verify_hardware_memory_rtl(
+    project: &Path,
+    requested_elfs: &[PathBuf],
+) -> Result<(), Box<dyn Error>> {
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
         verify_riscv::core_source(project)?,
@@ -761,13 +820,20 @@ fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
         fs::read_to_string(project.join("src/HardwareCoreTestTop.veryl"))?,
     ]
     .join("\n");
-    for name in ["alu", "compare", "control", "memory", "shift", "system"] {
-        let label = format!("{name}.elf");
-        verify_hardware_memory_elf(
-            &source,
-            &project.join("build/rv64i-subset").join(&label),
-            &label,
-        )?;
+    if requested_elfs.is_empty() {
+        for name in ["alu", "compare", "control", "memory", "shift", "system"] {
+            let label = format!("{name}.elf");
+            verify_hardware_memory_elf(
+                &source,
+                &project.join("build/rv64i-subset").join(&label),
+                &label,
+            )?;
+        }
+    } else {
+        for elf in requested_elfs {
+            let label = elf.file_name().unwrap_or_default().to_string_lossy();
+            verify_hardware_memory_elf(&source, elf, &label)?;
+        }
     }
     Ok(())
 }
@@ -1053,7 +1119,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .any(|argument| argument == "--hardware-memory-rtl")
     {
-        return verify_hardware_memory_rtl(project);
+        let requested_elfs = arguments
+            .iter()
+            .skip_while(|argument| *argument != "--hardware-memory-rtl")
+            .skip(1)
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        return verify_hardware_memory_rtl(project, &requested_elfs);
     }
     verify_register_file(project)?;
     if register_file_only {
