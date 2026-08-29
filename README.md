@@ -17,13 +17,14 @@ cargo run --locked --offline -p verify-riscv
 The pipelined core's expensive post-map Celox regression is available
 explicitly with `cargo run --locked --offline -p verify-riscv -- --post-map`.
 
-The CPU target is 126 MHz. Performance work is measured as instruction
+The nominal CPU target is 125 MHz. The data-sheet-valid board PLL runs at
+124.8 MHz. Performance work is measured as instruction
 throughput, not Fmax alone: consecutive dependent ALU instructions now sustain
 one instruction per clock through registered EX bypasses, while load-, shift-,
-and compare-use dependencies stall once. The EVN board's 12 MHz reference
-generates exactly 126 MHz with the ECP5 integer PLL. The complete board wrapper
-routes at 132.01 MHz in nextpnr seed 1 and closes in Texo with +0.053 ns setup
-and +0.290 ns hold slack.
+and compare-use dependencies stall once. The complete board wrapper reaches
+131.37 MHz in nextpnr seed 4. With the nextpnr-compatible ECP5 timing model it
+also closes in Texo with +0.009 ns setup and +0.290 ns hold slack. Bitstreams
+from both flows pass the complete hardware suite at 124.8 MHz.
 
 Run the I2C regressions with:
 

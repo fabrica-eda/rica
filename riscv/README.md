@@ -141,7 +141,7 @@ advance. `Top` registers the x31 polarity conversion, so its display
 trails by one CPU cycle without putting those LED pads directly on the
 CPU's combinational output path. The PLL lock alone releases CPU reset; the
 generic SW4 input is not required for autonomous bring-up.
-Use the same PLL binding for the current Texo diagnostic flow:
+Use the same PLL binding for the Texo flow:
 
 ```sh
 ../texo/target/release/texo pnr riscv --top HardwareTestTop --package CABGA381 --speed 8 \
@@ -151,14 +151,20 @@ Use the same PLL binding for the current Texo diagnostic flow:
   --output riscv/build/riscv-hardware-test-125.texo.json
 ```
 
-This is currently a diagnostic rather than the verified bitstream path: Texo's
-clock-uncertainty policy is not equivalent to nextpnr 0.6 and does not close
-this wrapper at 125 MHz. The command automatically downloads and verifies the
-corrected ECP5 v4 target pack; no local architecture override is needed.
+Texo's nextpnr-compatible ECP5 QoR model closes this implementation with +9 ps
+setup and +290 ps hold slack. Generate its native bitstream with:
+
+```sh
+../texo/target/release/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
+  --bit riscv/build/riscv-hardware-test-125-texo.bit
+```
+
+The command automatically downloads and verifies the corrected ECP5 v4 target
+pack; no local architecture override is needed.
 
 JTAG detection, SRAM programming, ELF upload, CPU execution, and mailbox
-readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz using the nextpnr
-bitstream above. The complete `alu`, `compare`, `control`, `memory`, and
-`shift` hardware suite passes 30/30 across six full runs. Use `--um5g-85k`, not
-`--85k`: the latter targets LFE5U and produces a bitstream with the wrong
-device ID and configuration semantics.
+readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz using both nextpnr
+and Texo-native bitstreams. For each bitstream, the complete `alu`, `compare`,
+`control`, `memory`, and `shift` hardware suite passes 30/30 across six full
+runs. Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
+bitstream with the wrong device ID and configuration semantics.

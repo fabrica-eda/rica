@@ -114,8 +114,10 @@ The current core commits the 58-instruction mixed trace in 102 clocks and
 keeps consecutive dependent one-cycle integer ALU operations at one per
 clock. With the 124.8 MHz PLL, the complete wrapper reaches 131.37 MHz in
 nextpnr 0.6 seed 4 and the resulting bitstream passes six complete hardware
-suites (30/30). Texo currently applies a separate clock-uncertainty policy, so
-its WNS is not used as a nextpnr-compatible QoR result. The retired 250 MHz
-design met timing while taking fifteen clocks per instruction; it remains in
-Texo as a physical-design regression precisely so this CPU is not optimized
-around that result.
+suites (30/30). Texo's nextpnr-compatible ECP5 QoR model closes the same
+wrapper with +9 ps setup and +290 ps hold slack; its native bitstream also
+passes six complete hardware suites (30/30). The much smaller Texo setup
+margin shows that placement QoR still differs even though the STA margin policy
+now matches. The retired 250 MHz design met timing while taking fifteen clocks
+per instruction; it remains in Texo as a physical-design regression precisely
+so this CPU is not optimized around that result.
