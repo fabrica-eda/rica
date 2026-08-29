@@ -161,15 +161,13 @@ Generate a native bitstream only after the Texo run reports timing closure:
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
-pack; no local architecture override is needed. The currently pinned Texo
-revision does not yet close this enlarged CSR/trap implementation: its timing
-optimizer reached negative setup slack and then restarted placement for a
-physical-synthesis candidate. nextpnr is therefore the current sign-off and
-hardware-tested flow; an unfinished Texo run must not be reported as closure.
+pack; no local architecture override is needed. The pinned Texo revision
+closes this enlarged CSR/trap implementation with 20 ps setup and 290 ps hold
+slack at 124.8 MHz. Its native bitstream passes the same complete six-test
+hardware suite as the nextpnr bitstream.
 
 JTAG detection, SRAM programming, ELF upload, CPU execution, and mailbox
 readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz. The complete `alu`,
 `compare`, `control`, `memory`, `shift`, and `system` hardware suite passes on
-the current nextpnr bitstream. Use `--um5g-85k`, not `--85k`: the latter targets
-LFE5U and produces a bitstream with the wrong device ID and configuration
-semantics.
+both current bitstreams. Use `--um5g-85k`, not `--85k`: the latter targets LFE5U
+and produces a bitstream with the wrong device ID and configuration semantics.
