@@ -44,8 +44,34 @@ module Decoder (
         decode.branch_op     = 3'b000;
         decode.is_jal        = 1'b0;
         decode.is_jalr       = 1'b0;
-        // Unsupported encodings retire as a halt.
-        decode.halt = 1'b1;
+        decode.is_csr        = 1'b0;
+        decode.csr_op        = 2'b00;
+        decode.csr_use_imm   = 1'b0;
+        decode.csr_write     = 1'b0;
+        // Predecode CSR addresses before the RX/EX registers. The compact
+        // index keeps architectural CSR reads and writes off a 12-bit address
+        // comparator in the EX critical path. Zero denotes an unknown CSR.
+        decode.csr_index = 4'd0;
+        case decode.instr[31:20] {
+            12'h300: decode.csr_index = 4'd1;  // mstatus
+            12'h301: decode.csr_index = 4'd2;  // misa
+            12'h305: decode.csr_index = 4'd3;  // mtvec
+            12'h340: decode.csr_index = 4'd4;  // mscratch
+            12'h341: decode.csr_index = 4'd5;  // mepc
+            12'h342: decode.csr_index = 4'd6;  // mcause
+            12'h343: decode.csr_index = 4'd7;  // mtval
+            12'hf11: decode.csr_index = 4'd8;  // mvendorid
+            12'hf12: decode.csr_index = 4'd9;  // marchid
+            12'hf13: decode.csr_index = 4'd10; // mimpid
+            12'hf14: decode.csr_index = 4'd11; // mhartid
+            default: {}
+        }
+        decode.is_ecall      = 1'b0;
+        decode.is_ebreak     = 1'b0;
+        decode.is_mret       = 1'b0;
+        // Every unsupported or reserved encoding raises an illegal-instruction
+        // exception instead of silently retiring or stopping the core.
+        decode.illegal       = 1'b1;
 
         case opcode {
             7'b0110111: { // LUI
@@ -53,20 +79,20 @@ module Decoder (
                 decode.alu_op        = 4'd5;
                 decode.use_immediate = 1'b1;
                 decode.write_enable  = 1'b1;
-                decode.halt          = 1'b0;
+                decode.illegal          = 1'b0;
             }
             7'b0010111: { // AUIPC
                 decode.immediate     = imm_u;
                 decode.use_pc        = 1'b1;
                 decode.use_immediate = 1'b1;
                 decode.write_enable  = 1'b1;
-                decode.halt          = 1'b0;
+                decode.illegal          = 1'b0;
             }
             7'b1101111: { // JAL
                 decode.immediate    = imm_j;
                 decode.write_enable = 1'b1;
                 decode.is_jal       = 1'b1;
-                decode.halt         = 1'b0;
+                decode.illegal         = 1'b0;
             }
             7'b1100111: { // JALR
                 if funct3 == 3'b000 {
@@ -74,7 +100,7 @@ module Decoder (
                     decode.use_rs1      = 1'b1;
                     decode.write_enable = 1'b1;
                     decode.is_jalr      = 1'b1;
-                    decode.halt         = 1'b0;
+                    decode.illegal         = 1'b0;
                 }
             }
             7'b1100011: { // BEQ/BNE/BLT/BGE/BLTU/BGEU
@@ -85,7 +111,7 @@ module Decoder (
                     decode.branch_op = funct3;
                     decode.use_rs1   = 1'b1;
                     decode.use_rs2   = 1'b1;
-                    decode.halt      = 1'b0;
+                    decode.illegal      = 1'b0;
                     if (funct3 == 3'b100) || (funct3 == 3'b101) {
                         decode.alu_op = 4'd9;
                     } else if (funct3 == 3'b110) || (funct3 == 3'b111) {
@@ -102,7 +128,7 @@ module Decoder (
                     decode.is_load       = 1'b1;
                     decode.load_size     = funct3[1:0];
                     decode.load_unsigned = funct3[2];
-                    decode.halt          = 1'b0;
+                    decode.illegal          = 1'b0;
                 }
             }
             7'b0100011: { // SB/SH/SW/SD
@@ -113,15 +139,88 @@ module Decoder (
                     decode.use_rs2       = 1'b1;
                     decode.is_store      = 1'b1;
                     decode.store_size    = funct3[1:0];
-                    decode.halt          = 1'b0;
+                    decode.illegal          = 1'b0;
                 }
             }
-            7'b0001111: { // FENCE
+            7'b0001111: { // FENCE/FENCE.I
                 // The core exposes one in-order memory interface and has no
-                // cache or speculative memory accesses, so FENCE is already
-                // satisfied when it reaches the head of the pipeline.
+                // cache, instruction cache, or speculative memory accesses, so
+                // both fences are satisfied when they reach the pipeline.
                 if funct3 == 3'b000 {
-                    decode.halt = 1'b0;
+                    decode.illegal = 1'b0;
+                } else if (funct3 == 3'b001) && (decode.instr[31:15] == 17'd0)
+                    && (decode.instr[11:7] == 5'd0) {
+                    decode.illegal = 1'b0;
+                }
+            }
+            7'b1110011: { // SYSTEM / Zicsr
+                case funct3 {
+                    3'b000: {
+                        case decode.instr {
+                            32'h0000_0073: {
+                                decode.is_ecall = 1'b1;
+                                decode.illegal  = 1'b0;
+                            }
+                            32'h0010_0073: {
+                                decode.is_ebreak = 1'b1;
+                                decode.illegal   = 1'b0;
+                            }
+                            32'h3020_0073: {
+                                decode.is_mret  = 1'b1;
+                                decode.illegal = 1'b0;
+                            }
+                            default: {}
+                        }
+                    }
+                    3'b001: { // CSRRW
+                        decode.is_csr       = 1'b1;
+                        decode.csr_op       = 2'd0;
+                        decode.csr_write    = 1'b1;
+                        decode.use_rs1      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.illegal      = 1'b0;
+                    }
+                    3'b010: { // CSRRS
+                        decode.is_csr       = 1'b1;
+                        decode.csr_op       = 2'd1;
+                        decode.csr_write    = decode.rs1 != 5'd0;
+                        decode.use_rs1      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.illegal      = 1'b0;
+                    }
+                    3'b011: { // CSRRC
+                        decode.is_csr       = 1'b1;
+                        decode.csr_op       = 2'd2;
+                        decode.csr_write    = decode.rs1 != 5'd0;
+                        decode.use_rs1      = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.illegal      = 1'b0;
+                    }
+                    3'b101: { // CSRRWI
+                        decode.is_csr        = 1'b1;
+                        decode.csr_op        = 2'd0;
+                        decode.csr_use_imm   = 1'b1;
+                        decode.csr_write     = 1'b1;
+                        decode.write_enable = 1'b1;
+                        decode.illegal       = 1'b0;
+                    }
+                    3'b110: { // CSRRSI
+                        decode.is_csr        = 1'b1;
+                        decode.csr_op        = 2'd1;
+                        decode.csr_use_imm   = 1'b1;
+                        decode.csr_write     = decode.rs1 != 5'd0;
+                        decode.write_enable = 1'b1;
+                        decode.illegal       = 1'b0;
+                    }
+                    3'b111: { // CSRRCI
+                        decode.is_csr        = 1'b1;
+                        decode.csr_op        = 2'd2;
+                        decode.csr_use_imm   = 1'b1;
+                        decode.csr_write     = decode.rs1 != 5'd0;
+                        decode.write_enable = 1'b1;
+                        decode.illegal       = 1'b0;
+                    }
+                    default: {}
                 }
             }
             7'b0010011: { // OP-IMM
@@ -131,7 +230,7 @@ module Decoder (
                         decode.use_immediate = 1'b1;
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     3'b001: { // SLLI
                         if decode.instr[31:26] == 6'b000000 {
@@ -139,7 +238,7 @@ module Decoder (
                             decode.use_immediate = 1'b1;
                             decode.use_rs1       = 1'b1;
                             decode.write_enable  = 1'b1;
-                            decode.halt          = 1'b0;
+                            decode.illegal          = 1'b0;
                         }
                     }
                     3'b010: { // SLTI
@@ -147,21 +246,21 @@ module Decoder (
                         decode.use_immediate = 1'b1;
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     3'b011: { // SLTIU
                         decode.alu_op        = 4'd11;
                         decode.use_immediate = 1'b1;
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     3'b100: {
                         decode.alu_op        = 4'd2;
                         decode.use_immediate = 1'b1;
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     3'b101: { // SRLI/SRAI
                         if decode.instr[31:26] == 6'b000000 {
@@ -169,13 +268,13 @@ module Decoder (
                             decode.use_immediate = 1'b1;
                             decode.use_rs1       = 1'b1;
                             decode.write_enable  = 1'b1;
-                            decode.halt          = 1'b0;
+                            decode.illegal          = 1'b0;
                         } else if decode.instr[31:26] == 6'b010000 {
                             decode.alu_op        = 4'd8;
                             decode.use_immediate = 1'b1;
                             decode.use_rs1       = 1'b1;
                             decode.write_enable  = 1'b1;
-                            decode.halt          = 1'b0;
+                            decode.illegal          = 1'b0;
                         }
                     }
                     3'b110: {
@@ -183,14 +282,14 @@ module Decoder (
                         decode.use_immediate = 1'b1;
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     3'b111: {
                         decode.alu_op        = 4'd4;
                         decode.use_immediate = 1'b1;
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     default: {}
                 }
@@ -203,13 +302,13 @@ module Decoder (
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         } else if funct7 == 7'b0100000 {
                             decode.alu_op       = 4'd1;
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         }
                     }
                     3'b001: { // SLL
@@ -218,7 +317,7 @@ module Decoder (
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         }
                     }
                     3'b010: { // SLT
@@ -227,7 +326,7 @@ module Decoder (
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         }
                     }
                     3'b011: { // SLTU
@@ -236,7 +335,7 @@ module Decoder (
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         }
                     }
                     3'b100: {
@@ -244,7 +343,7 @@ module Decoder (
                         decode.use_rs1      = 1'b1;
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     }
                     3'b101: { // SRL/SRA
                         if funct7 == 7'b0000000 {
@@ -252,13 +351,13 @@ module Decoder (
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         } else if funct7 == 7'b0100000 {
                             decode.alu_op       = 4'd8;
                             decode.use_rs1      = 1'b1;
                             decode.use_rs2      = 1'b1;
                             decode.write_enable = 1'b1;
-                            decode.halt         = 1'b0;
+                            decode.illegal         = 1'b0;
                         }
                     }
                     3'b110: {
@@ -266,14 +365,14 @@ module Decoder (
                         decode.use_rs1      = 1'b1;
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     }
                     3'b111: {
                         decode.alu_op       = 4'd4;
                         decode.use_rs1      = 1'b1;
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     }
                     default: {}
                 }
@@ -286,7 +385,7 @@ module Decoder (
                         decode.use_rs1       = 1'b1;
                         decode.write_enable  = 1'b1;
                         decode.word_op       = 1'b1;
-                        decode.halt          = 1'b0;
+                        decode.illegal          = 1'b0;
                     }
                     3'b001: { // SLLIW
                         if funct7 == 7'b0000000 {
@@ -295,7 +394,7 @@ module Decoder (
                             decode.use_rs1       = 1'b1;
                             decode.write_enable  = 1'b1;
                             decode.word_op       = 1'b1;
-                            decode.halt          = 1'b0;
+                            decode.illegal          = 1'b0;
                         }
                     }
                     3'b101: { // SRLIW/SRAIW
@@ -305,14 +404,14 @@ module Decoder (
                             decode.use_rs1       = 1'b1;
                             decode.write_enable  = 1'b1;
                             decode.word_op       = 1'b1;
-                            decode.halt          = 1'b0;
+                            decode.illegal          = 1'b0;
                         } else if funct7 == 7'b0100000 {
                             decode.alu_op        = 4'd8;
                             decode.use_immediate = 1'b1;
                             decode.use_rs1       = 1'b1;
                             decode.write_enable  = 1'b1;
                             decode.word_op       = 1'b1;
-                            decode.halt          = 1'b0;
+                            decode.illegal          = 1'b0;
                         }
                     }
                     default: {}
@@ -326,14 +425,14 @@ module Decoder (
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
                         decode.word_op      = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     } else if funct7 == 7'b0100000 {
                         decode.alu_op       = 4'd1;
                         decode.use_rs1      = 1'b1;
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
                         decode.word_op      = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     }
                 } else if funct3 == 3'b001 { // SLLW
                     if funct7 == 7'b0000000 {
@@ -342,7 +441,7 @@ module Decoder (
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
                         decode.word_op      = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     }
                 } else if funct3 == 3'b101 { // SRLW/SRAW
                     if funct7 == 7'b0000000 {
@@ -351,14 +450,14 @@ module Decoder (
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
                         decode.word_op      = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     } else if funct7 == 7'b0100000 {
                         decode.alu_op       = 4'd8;
                         decode.use_rs1      = 1'b1;
                         decode.use_rs2      = 1'b1;
                         decode.write_enable = 1'b1;
                         decode.word_op      = 1'b1;
-                        decode.halt         = 1'b0;
+                        decode.illegal         = 1'b0;
                     }
                 }
             }

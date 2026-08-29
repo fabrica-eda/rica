@@ -39,7 +39,6 @@ module Core #(
     var fetch_base_q  : logic<32>;
     var fetch_offset_q: logic<32>;
     var fetch_pc_q    : logic<32>;
-    var halted_q      : logic    ;
     var debug_x31_q   : logic<64>;
 
     var fd_valid_q: logic    ;
@@ -69,7 +68,15 @@ module Core #(
     var rx_branch_op_q    : logic<3> ;
     var rx_is_jal_q       : logic    ;
     var rx_is_jalr_q      : logic    ;
-    var rx_halt_q         : logic    ;
+    var rx_is_csr_q       : logic    ;
+    var rx_csr_op_q       : logic<2> ;
+    var rx_csr_use_imm_q  : logic    ;
+    var rx_csr_write_q    : logic    ;
+    var rx_csr_index_q    : logic<4> ;
+    var rx_is_ecall_q     : logic    ;
+    var rx_is_ebreak_q    : logic    ;
+    var rx_is_mret_q      : logic    ;
+    var rx_illegal_q      : logic    ;
     var rx_stalled_q      : logic    ;
     var rx_stall_data_a_q : logic<64>;
     var rx_stall_data_b_q : logic<64>;
@@ -90,7 +97,15 @@ module Core #(
     var ex_is_branch_q         : logic    ;
     var ex_branch_op_q         : logic<3> ;
     var ex_link_q              : logic    ;
-    var ex_halt_q              : logic    ;
+    var ex_is_csr_q            : logic    ;
+    var ex_csr_op_q            : logic<2> ;
+    var ex_csr_use_imm_q       : logic    ;
+    var ex_csr_write_q         : logic    ;
+    var ex_csr_index_q         : logic<4> ;
+    var ex_is_ecall_q          : logic    ;
+    var ex_is_ebreak_q         : logic    ;
+    var ex_is_mret_q           : logic    ;
+    var ex_illegal_q           : logic    ;
     var ex_operand_a_q         : logic<64>;
     var ex_operand_b_q         : logic<64>;
     var ex_store_data_q        : logic<64>;
@@ -119,7 +134,6 @@ module Core #(
     var cm_branch_op_q       : logic<3> ;
     var cm_branch_equal_q    : logic<4> ;
     var cm_redirect_target_q : logic<32>;
-    var cm_halt_q            : logic    ;
     var cm_arithmetic_q      : logic<64>;
     var cm_shift_low_q       : logic<64>;
     var cm_shift_amount_q    : logic<3> ;
@@ -142,7 +156,6 @@ module Core #(
     var wb_instr_q       : logic<32>;
     var wb_rd_q          : logic<5> ;
     var wb_write_enable_q: logic    ;
-    var wb_halt_q        : logic    ;
     var wb_result_q      : logic<64>;
     var wb_mem_we_q      : logic    ;
     var wb_mem_addr_q    : logic<32>;
@@ -177,9 +190,16 @@ module Core #(
     var redirect_target_q    : logic<32>;
     var execution_hazard     : logic    ;
     var operand_match_ex     : logic    ;
-    var stop_frontend        : logic    ;
     var memory_wait          : logic    ;
     var cm_load_wait_q       : logic<2> ;
+    var csr_source           : logic<64>;
+    var csr_access_illegal   : logic    ;
+    var ex_exception         : logic    ;
+    var ex_exception_cause   : logic<64>;
+    var ex_exception_value   : logic<64>;
+    var ex_trap_event        : logic    ;
+    var ex_mret_event        : logic    ;
+    var ex_system_redirect   : logic    ;
 
     inst registers: RegisterFile (
         clk           : clk              ,
@@ -196,6 +216,13 @@ module Core #(
     inst decode_bus: DecodeBus;
     inst decoder: Decoder (
         decode: decode_bus,
+    );
+
+    inst csr_bus : CsrBus;
+    inst csr_file: CsrFile (
+        clk  : clk    ,
+        rst_n: rst_n  ,
+        csr  : csr_bus,
     );
 
     inst execute_bus : ExecuteBus;
@@ -302,6 +329,29 @@ module Core #(
         } else {
             execute_store_data = ex_store_data_q;
         }
+
+        csr_bus.index = ex_csr_index_q;
+        if ex_csr_use_imm_q {
+            csr_source = {59'd0, ex_instr_q[19:15]};
+        } else {
+            csr_source = alu_operand_a;
+        }
+        csr_access_illegal = ex_is_csr_q
+            && (!csr_bus.legal || (ex_csr_write_q && !csr_bus.writable));
+        ex_exception = ex_valid_q
+            && (ex_illegal_q || csr_access_illegal || ex_is_ecall_q || ex_is_ebreak_q);
+        if ex_is_ecall_q {
+            ex_exception_cause = 64'd11;
+        } else if ex_is_ebreak_q {
+            ex_exception_cause = 64'd3;
+        } else {
+            ex_exception_cause = 64'd2;
+        }
+        if ex_illegal_q || csr_access_illegal {
+            ex_exception_value = {32'h0000_0000, ex_instr_q};
+        } else {
+            ex_exception_value = 64'd0;
+        }
         cm_branch_equal = cm_branch_equal_q == 4'b1111;
         case cm_branch_op_q {
             3'b000 : cm_branch_taken = cm_branch_equal;
@@ -324,7 +374,25 @@ module Core #(
         // wrong-path work and must not enqueue another redirect.
         memory_wait    = SYNC_DATA_MEMORY && cm_valid_q
             && ((cm_is_load_q && (cm_load_wait_q != 2'd2)) || (cm_is_store_q && (cm_load_wait_q != 2'd1)));
-        redirect_valid = !memory_wait && !redirect_pending_q && (ex_redirect_valid || branch_redirect_valid);
+        // An older taken branch wins over every EX side effect. A pending
+        // redirect likewise proves that the current EX instruction is wrong
+        // path, so it may not touch CSR state or raise a trap.
+        ex_trap_event      = ex_exception && !memory_wait && !redirect_pending_q && !branch_redirect_valid;
+        ex_mret_event      = ex_valid_q && ex_is_mret_q && !memory_wait
+            && !redirect_pending_q && !branch_redirect_valid;
+        ex_system_redirect = ex_trap_event || ex_mret_event;
+        csr_bus.write_enable = ex_valid_q && ex_is_csr_q && ex_csr_write_q
+            && !csr_access_illegal && !memory_wait && !redirect_pending_q && !branch_redirect_valid;
+        csr_bus.write_op     = ex_csr_op_q;
+        csr_bus.write_source = csr_source;
+        csr_bus.trap_enter = ex_trap_event;
+        csr_bus.trap_pc    = ex_pc_q;
+        csr_bus.trap_cause = ex_exception_cause;
+        csr_bus.trap_value = ex_exception_value;
+        csr_bus.mret       = ex_mret_event;
+
+        redirect_valid = !memory_wait && !redirect_pending_q
+            && (ex_redirect_valid || ex_system_redirect || branch_redirect_valid);
         if ex_redirect_clear_lsb_q {
             ex_redirect_target = redirect_sum & 32'hffff_fffe;
         } else {
@@ -332,6 +400,10 @@ module Core #(
         }
         if branch_redirect_valid {
             redirect_target = cm_redirect_target_q;
+        } else if ex_trap_event {
+            redirect_target = csr_bus.trap_vector;
+        } else if ex_mret_event {
+            redirect_target = csr_bus.return_pc;
         } else {
             redirect_target = ex_redirect_target;
         }
@@ -339,14 +411,15 @@ module Core #(
             && ((rx_use_rs1_q && (rx_rs1_q == ex_rd_q)) || (rx_use_rs2_q && (rx_rs2_q == ex_rd_q)));
         execution_hazard = rx_valid_q
             && (ex_is_load_q || execute_bus.result_use_shift || execute_bus.result_use_compare) && operand_match_ex;
-        stop_frontend    = rx_valid_q && rx_halt_q;
 
         pc         = fetch_pc_q;
         data_addr  = cm_lsu_address_q;
         data_wdata = cm_lsu_wdata_q;
         data_wmask = completion_bus.store_mask;
         data_we    = cm_valid_q && cm_is_store_q && (!SYNC_DATA_MEMORY || (cm_load_wait_q == 2'd0));
-        halted     = halted_q;
+        // There is no architectural halt instruction. This output remains for
+        // the board debug ABI and will be used by a future debug halt request.
+        halted     = 1'b0;
         debug_x31  = debug_x31_q;
 
     }
@@ -356,7 +429,6 @@ module Core #(
             fetch_base_q        = 64'h0000_0000_0000_0000;
             fetch_offset_q      = 32'd4;
             fetch_pc_q          = 64'h0000_0000_0000_0000;
-            halted_q            = 1'b0;
             debug_x31_q         = 64'h0000_0000_0000_0000;
             redirect_pending_q  = 1'b0;
             redirect_flush_wb_q = 1'b0;
@@ -390,7 +462,15 @@ module Core #(
             rx_branch_op_q     = 3'b000;
             rx_is_jal_q        = 1'b0;
             rx_is_jalr_q       = 1'b0;
-            rx_halt_q          = 1'b0;
+            rx_is_csr_q        = 1'b0;
+            rx_csr_op_q        = 2'b00;
+            rx_csr_use_imm_q   = 1'b0;
+            rx_csr_write_q     = 1'b0;
+            rx_csr_index_q     = 4'd0;
+            rx_is_ecall_q      = 1'b0;
+            rx_is_ebreak_q     = 1'b0;
+            rx_is_mret_q       = 1'b0;
+            rx_illegal_q       = 1'b0;
             rx_stalled_q       = 1'b0;
             rx_stall_data_a_q  = 64'h0000_0000_0000_0000;
             rx_stall_data_b_q  = 64'h0000_0000_0000_0000;
@@ -411,7 +491,15 @@ module Core #(
             ex_is_branch_q          = 1'b0;
             ex_branch_op_q          = 3'b000;
             ex_link_q               = 1'b0;
-            ex_halt_q               = 1'b0;
+            ex_is_csr_q             = 1'b0;
+            ex_csr_op_q             = 2'b00;
+            ex_csr_use_imm_q        = 1'b0;
+            ex_csr_write_q          = 1'b0;
+            ex_csr_index_q          = 4'd0;
+            ex_is_ecall_q           = 1'b0;
+            ex_is_ebreak_q          = 1'b0;
+            ex_is_mret_q            = 1'b0;
+            ex_illegal_q            = 1'b0;
             ex_operand_a_q          = 64'h0000_0000_0000_0000;
             ex_operand_b_q          = 64'h0000_0000_0000_0000;
             ex_store_data_q         = 64'h0000_0000_0000_0000;
@@ -437,7 +525,6 @@ module Core #(
             cm_branch_op_q        = 3'b000;
             cm_branch_equal_q     = 4'b0000;
             cm_redirect_target_q  = 32'h0000_0000;
-            cm_halt_q             = 1'b0;
             cm_arithmetic_q       = 64'h0000_0000_0000_0000;
             cm_shift_low_q        = 64'h0000_0000_0000_0000;
             cm_shift_amount_q     = 3'b000;
@@ -460,7 +547,6 @@ module Core #(
             wb_instr_q        = 32'h0000_0013;
             wb_rd_q           = 5'd0;
             wb_write_enable_q = 1'b0;
-            wb_halt_q         = 1'b0;
             wb_result_q       = 64'h0000_0000_0000_0000;
             wb_mem_we_q       = 1'b0;
             wb_mem_addr_q     = 64'h0000_0000_0000_0000;
@@ -508,9 +594,6 @@ module Core #(
                 commit_mem_wmask = 8'd0;
             }
 
-            if wb_valid_q && wb_halt_q {
-                halted_q = 1'b1;
-            }
             if rf_write_enable && (wb_rd_q == 5'd31) {
                 debug_x31_q = wb_result_q;
             }
@@ -541,10 +624,11 @@ module Core #(
                 }
                 wb_rd_q           = cm_rd_q;
                 wb_write_enable_q = cm_write_enable_q;
-                wb_halt_q         = cm_halt_q;
                 wb_result_q       = completion_bus.result;
 
-                cm_valid_q           = ex_valid_q;
+                // Synchronous exceptions redirect but do not retire the
+                // faulting instruction. MRET is a normal retired instruction.
+                cm_valid_q           = ex_valid_q && !ex_exception;
                 cm_pc_q              = ex_pc_q;
                 cm_instr_q           = ex_instr_q;
                 cm_rd_q              = ex_rd_q;
@@ -558,8 +642,11 @@ module Core #(
                 cm_branch_op_q       = ex_branch_op_q;
                 cm_branch_equal_q    = execute_bus.compare_equal;
                 cm_redirect_target_q = ex_redirect_target;
-                cm_halt_q            = ex_halt_q;
-                cm_arithmetic_q      = execute_bus.arithmetic;
+                if ex_is_csr_q {
+                    cm_arithmetic_q = csr_bus.read_data;
+                } else {
+                    cm_arithmetic_q = execute_bus.arithmetic;
+                }
                 cm_shift_low_q       = execute_bus.shift_result;
                 if ex_word_op_q {
                     cm_shift_amount_q = {1'b0, alu_operand_b[4:3]};
@@ -568,7 +655,7 @@ module Core #(
                 }
                 cm_shift_arithmetic_q = ex_alu_op_q == 4'd8;
                 cm_logic_result_q     = execute_bus.logic_result;
-                cm_use_logic_q        = execute_bus.result_use_logic;
+                cm_use_logic_q        = execute_bus.result_use_logic && !ex_is_csr_q;
                 cm_use_shift_q        = execute_bus.result_use_shift;
                 cm_compare_less_q     = execute_bus.compare_less;
                 cm_compare_sign_a_q   = execute_bus.compare_sign_a;
@@ -606,7 +693,15 @@ module Core #(
                 ex_is_branch_q     = rx_is_branch_q;
                 ex_branch_op_q     = rx_branch_op_q;
                 ex_link_q          = rx_is_jal_q || rx_is_jalr_q;
-                ex_halt_q          = rx_halt_q;
+                ex_is_csr_q        = rx_is_csr_q;
+                ex_csr_op_q        = rx_csr_op_q;
+                ex_csr_use_imm_q   = rx_csr_use_imm_q;
+                ex_csr_write_q     = rx_csr_write_q;
+                ex_csr_index_q     = rx_csr_index_q;
+                ex_is_ecall_q      = rx_is_ecall_q;
+                ex_is_ebreak_q     = rx_is_ebreak_q;
+                ex_is_mret_q       = rx_is_mret_q;
+                ex_illegal_q       = rx_illegal_q;
                 if rx_is_jal_q || rx_is_jalr_q {
                     ex_operand_a_q = rx_pc_q;
                     ex_operand_b_q = 64'd4;
@@ -634,10 +729,6 @@ module Core #(
                     if redirect_flush_wb_q {
                         wb_valid_q = 1'b0;
                     }
-                    rx_stalled_q = 1'b0;
-                } else if stop_frontend || halted_q {
-                    fd_valid_q   = 1'b0;
-                    rx_valid_q   = 1'b0;
                     rx_stalled_q = 1'b0;
                 } else if execution_hazard {
                     ex_valid_q        = 1'b0;
@@ -669,7 +760,15 @@ module Core #(
                     rx_branch_op_q     = decode_bus.branch_op;
                     rx_is_jal_q        = decode_bus.is_jal;
                     rx_is_jalr_q       = decode_bus.is_jalr;
-                    rx_halt_q          = decode_bus.halt;
+                    rx_is_csr_q        = decode_bus.is_csr;
+                    rx_csr_op_q        = decode_bus.csr_op;
+                    rx_csr_use_imm_q   = decode_bus.csr_use_imm;
+                    rx_csr_write_q     = decode_bus.csr_write;
+                    rx_csr_index_q     = decode_bus.csr_index;
+                    rx_is_ecall_q      = decode_bus.is_ecall;
+                    rx_is_ebreak_q     = decode_bus.is_ebreak;
+                    rx_is_mret_q       = decode_bus.is_mret;
+                    rx_illegal_q       = decode_bus.illegal;
 
                     fd_valid_q     = 1'b1;
                     fd_pc_q        = fetch_pc_q;

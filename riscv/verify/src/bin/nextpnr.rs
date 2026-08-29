@@ -54,24 +54,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
-    let source = [
-        "PipelineInterfaces.veryl",
-        "RegisterFile.veryl",
-        "Decoder.veryl",
-        "ExecuteUnit.veryl",
-        "ShiftUnit.veryl",
-        "ShiftHighUnit.veryl",
-        "CompletionUnit.veryl",
+    let mut source = verify_riscv::core_source(project)?;
+    for file in [
         "AluTimingTop.veryl",
-        "Core.veryl",
         "Top.veryl",
         "HardwareMemory.veryl",
         "HardwareTestTop.veryl",
-    ]
-    .into_iter()
-    .map(|file| fs::read_to_string(project.join("src").join(file)))
-    .collect::<Result<Vec<_>, _>>()?;
-    let mut source = source.join("\n");
+    ] {
+        source.push('\n');
+        source.push_str(&fs::read_to_string(project.join("src").join(file))?);
+    }
     if top == "HardwareTestTop" {
         source = source.replace("rica_i2c::", "");
         source.push('\n');

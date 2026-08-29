@@ -1,0 +1,165 @@
+/// Minimal machine-mode CSR bank for precise synchronous traps.
+///
+/// Rica currently has one hart, no lower privilege modes, and no interrupts.
+/// The implemented state is nevertheless architectural: trap entry records
+/// MEPC/MCAUSE/MTVAL and updates MSTATUS, while MRET restores the interrupt
+/// enable stack and returns to the aligned MEPC value.
+module CsrFile (
+    clk  : input clock,
+    rst_n: input reset,
+    csr  : modport CsrBus::file,
+) {
+    // This core has a 32-bit physical address space and no interrupt sources.
+    // Keep only implemented WARL/WLRL fields in flops; CSR reads expand them
+    // to XLEN. This avoids routing 64-bit write muxes to mostly constant state.
+    // {MPP[1:0], MPIE, MIE}
+    var mstatus_q     : logic<4> ;
+    var mtvec_q       : logic<30>;
+    var mscratch_q    : logic<64>;
+    var mepc_q        : logic<30>;
+    var mcause_q      : logic<4> ;
+    var mtval_q       : logic<32>;
+
+    always_comb {
+        csr.read_data = 64'h0000_0000_0000_0000;
+        csr.legal     = 1'b1;
+        csr.writable  = 1'b1;
+        case csr.index {
+            4'd1: {
+                csr.read_data[3]     = mstatus_q[0];
+                csr.read_data[7]     = mstatus_q[1];
+                csr.read_data[12:11] = mstatus_q[3:2];
+            }
+            // RV64, base integer ISA. MISA is read-only in this implementation.
+            4'd2: {
+                csr.read_data = 64'h8000_0000_0000_0100;
+                csr.writable  = 1'b0;
+            }
+            4'd3: csr.read_data = {32'd0, mtvec_q, 2'b00};
+            4'd4: csr.read_data = mscratch_q;
+            4'd5: csr.read_data = {32'd0, mepc_q, 2'b00};
+            4'd6: csr.read_data = {60'd0, mcause_q};
+            4'd7: csr.read_data = {32'd0, mtval_q};
+            // Standard read-only machine identity CSRs for hart zero.
+            4'd8: {
+                csr.read_data = 64'd0;
+                csr.writable  = 1'b0;
+            }
+            4'd9: {
+                csr.read_data = 64'd0;
+                csr.writable  = 1'b0;
+            }
+            4'd10: {
+                csr.read_data = 64'd0;
+                csr.writable  = 1'b0;
+            }
+            4'd11: {
+                csr.read_data = 64'd0;
+                csr.writable  = 1'b0;
+            }
+            default: {
+                csr.legal    = 1'b0;
+                csr.writable = 1'b0;
+            }
+        }
+
+        // Only direct-mode synchronous traps exist today. IALIGN is 32 bits.
+        csr.trap_vector = {mtvec_q, 2'b00};
+        csr.return_pc   = {mepc_q, 2'b00};
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            // This M-only hart implements M as the sole WARL value of MPP.
+            mstatus_q = 4'b1100;
+        } else if csr.trap_enter {
+            // MPIE <- MIE, MIE <- 0, MPP <- M-mode.
+            mstatus_q[1]   = mstatus_q[0];
+            mstatus_q[0]   = 1'b0;
+            mstatus_q[3:2] = 2'b11;
+        } else if csr.mret {
+            // MIE <- MPIE, MPIE <- 1, MPP <- the least implemented mode (M).
+            mstatus_q[0]   = mstatus_q[1];
+            mstatus_q[1]   = 1'b1;
+            mstatus_q[3:2] = 2'b11;
+        } else if csr.write_enable && (csr.index == 4'd1) {
+            case csr.write_op {
+                2'd0   : mstatus_q = {2'b11, csr.write_source[7], csr.write_source[3]};
+                2'd1   : mstatus_q = mstatus_q | {2'b00, csr.write_source[7], csr.write_source[3]};
+                2'd2   : mstatus_q = mstatus_q & ~{2'b00, csr.write_source[7], csr.write_source[3]};
+                default: {}
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mtvec_q = 30'd0;
+        } else if csr.write_enable && (csr.index == 4'd3) {
+            case csr.write_op {
+                2'd0   : mtvec_q = csr.write_source[31:2];
+                2'd1   : mtvec_q = mtvec_q | csr.write_source[31:2];
+                2'd2   : mtvec_q = mtvec_q & ~csr.write_source[31:2];
+                default: {}
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mscratch_q = 64'd0;
+        } else if csr.write_enable && (csr.index == 4'd4) {
+            case csr.write_op {
+                2'd0   : mscratch_q = csr.write_source;
+                2'd1   : mscratch_q = mscratch_q | csr.write_source;
+                2'd2   : mscratch_q = mscratch_q & ~csr.write_source;
+                default: {}
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mepc_q = 30'd0;
+        } else if csr.trap_enter {
+            mepc_q = csr.trap_pc[31:2];
+        } else if csr.write_enable && (csr.index == 4'd5) {
+            case csr.write_op {
+                2'd0   : mepc_q = csr.write_source[31:2];
+                2'd1   : mepc_q = mepc_q | csr.write_source[31:2];
+                2'd2   : mepc_q = mepc_q & ~csr.write_source[31:2];
+                default: {}
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mcause_q = 4'd0;
+        } else if csr.trap_enter {
+            mcause_q = csr.trap_cause[3:0];
+        } else if csr.write_enable && (csr.index == 4'd6) {
+            case csr.write_op {
+                2'd0   : mcause_q = csr.write_source[3:0];
+                2'd1   : mcause_q = mcause_q | csr.write_source[3:0];
+                2'd2   : mcause_q = mcause_q & ~csr.write_source[3:0];
+                default: {}
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mtval_q = 32'd0;
+        } else if csr.trap_enter {
+            mtval_q = csr.trap_value[31:0];
+        } else if csr.write_enable && (csr.index == 4'd7) {
+            case csr.write_op {
+                2'd0   : mtval_q = csr.write_source[31:0];
+                2'd1   : mtval_q = mtval_q | csr.write_source[31:0];
+                2'd2   : mtval_q = mtval_q & ~csr.write_source[31:0];
+                default: {}
+            }
+        }
+    }
+}

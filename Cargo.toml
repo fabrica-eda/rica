@@ -10,14 +10,14 @@ rust-version = "1.98"
 [workspace.dependencies]
 serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
-celox = { git = "https://github.com/celox-sim/celox.git", rev = "330eb5797fbe53537125f5cfdbcde5d9cc723a6e" }
+celox = { git = "https://github.com/celox-sim/celox.git", rev = "7bb38a0ce4d66f349d499b270d27375d7c1a01bb" }
 celox03 = { package = "celox", version = "=0.3.1" }
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "e8c2a3f4c40148ac500c8b39c7e2b1f6e3ad1aee" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "cf23e3265ec1e33ef45c05c164b3010d1cef5bf5" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "cf23e3265ec1e33ef45c05c164b3010d1cef5bf5" }
+struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
+struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
+struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
+struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "5c36aaf41644ef3bfe1562bf0b5a254e31899d4b" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "5c36aaf41644ef3bfe1562bf0b5a254e31899d4b" }
 
 [profile.release]
 lto = "thin"

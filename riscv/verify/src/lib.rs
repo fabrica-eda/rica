@@ -3,13 +3,14 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use celox::{InterpBackend, Simulator, SimulatorBuilder};
+use celox::{NativeBackend, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 8] = [
+const CORE_SOURCES: [&str; 9] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "Decoder.veryl",
+    "CsrFile.veryl",
     "ExecuteUnit.veryl",
     "ShiftUnit.veryl",
     "ShiftHighUnit.veryl",
@@ -167,7 +168,7 @@ struct Commit {
     data: u64,
 }
 
-fn value(simulator: &mut Simulator<InterpBackend>, name: &str) -> u64 {
+fn value(simulator: &mut Simulator<NativeBackend>, name: &str) -> u64 {
     simulator
         .get(simulator.signal(name))
         .to_u64_digits()
@@ -186,7 +187,7 @@ pub fn run_elf(
     mut image: ElfImage,
     max_cycles: usize,
 ) -> Result<ElfRun, Box<dyn Error>> {
-    let mut simulator = SimulatorBuilder::new(core_source, "Core").build_interpreter()?;
+    let mut simulator = SimulatorBuilder::new(core_source, "Core").build_native()?;
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");

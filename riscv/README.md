@@ -6,7 +6,8 @@ building blocks:
 - `src/PipelineInterfaces.veryl`: typed decode and execute stage contracts
 - `src/Decoder.veryl`: RV64I-subset instruction decoder
 - `src/ExecuteUnit.veryl`: two-slice carry-select integer ALU
-- `src/Core.veryl`: pipeline state, hazard control, forwarding, and commit
+- `src/Core.veryl`: pipeline state, hazard control, forwarding, traps, and commit
+- `src/CsrFile.veryl`: machine-mode CSR and trap state
 - `src/RegisterFile.veryl`: synchronous two-read/one-write register-file
   candidate
 - `src/Top.veryl`: 124.8 MHz ECP5 EVN PLL/LED bring-up wrapper
@@ -48,10 +49,11 @@ divide-by-five `CLKOS` output to generate 124.8 MHz. Exact 125 MHz and the older
 phase detector below its data-sheet range, so neither is used. The board
 disables unused commit payload registers
 while retaining `commit_valid` for its heartbeat; the verification build keeps
-the full architectural commit trace. Struo estimates the core at 6.620 ns.
-nextpnr 0.6 seed 4 routes the complete hardware wrapper at 131.37 MHz and
-passes its derived 124.8 MHz clock constraint. The resulting bitstream passes
-all five bundled RV64 hardware tests in six consecutive suite runs (30/30).
+the full architectural commit trace. Struo estimates the core at 7.160 ns.
+nextpnr 0.6 seed 4 routes the complete hardware wrapper at 125.88 MHz and
+passes its derived 124.8 MHz clock constraint with 68 ps setup slack. The
+resulting bitstream passes all six bundled RV64 hardware tests, including the
+machine-mode CSR/trap regression.
 
 ## Verification
 
@@ -151,8 +153,7 @@ Use the same PLL binding for the Texo flow:
   --output riscv/build/riscv-hardware-test-125.texo.json
 ```
 
-Texo's nextpnr-compatible ECP5 QoR model closes this implementation with +9 ps
-setup and +290 ps hold slack. Generate its native bitstream with:
+Generate a native bitstream only after the Texo run reports timing closure:
 
 ```sh
 ../texo/target/release/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
@@ -160,11 +161,15 @@ setup and +290 ps hold slack. Generate its native bitstream with:
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
-pack; no local architecture override is needed.
+pack; no local architecture override is needed. The currently pinned Texo
+revision does not yet close this enlarged CSR/trap implementation: its timing
+optimizer reached negative setup slack and then restarted placement for a
+physical-synthesis candidate. nextpnr is therefore the current sign-off and
+hardware-tested flow; an unfinished Texo run must not be reported as closure.
 
 JTAG detection, SRAM programming, ELF upload, CPU execution, and mailbox
-readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz using both nextpnr
-and Texo-native bitstreams. For each bitstream, the complete `alu`, `compare`,
-`control`, `memory`, and `shift` hardware suite passes 30/30 across six full
-runs. Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
-bitstream with the wrong device ID and configuration semantics.
+readback are verified on the LFE5UM5G-85 EVN at 124.8 MHz. The complete `alu`,
+`compare`, `control`, `memory`, `shift`, and `system` hardware suite passes on
+the current nextpnr bitstream. Use `--um5g-85k`, not `--85k`: the latter targets
+LFE5U and produces a bitstream with the wrong device ID and configuration
+semantics.

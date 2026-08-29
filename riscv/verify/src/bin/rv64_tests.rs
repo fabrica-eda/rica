@@ -75,7 +75,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
         checked_command(
             Command::new(&assembler)
                 .arg("-triple=riscv64-unknown-none-elf")
-                .arg("-mattr=+i")
+                .arg("-mattr=+i,+zicsr,+zifencei")
                 .arg("-filetype=obj")
                 .arg("-I")
                 .arg(&tests)

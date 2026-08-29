@@ -42,15 +42,16 @@ cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-test
 The default command programs `build/riscv-hardware-test-125.bit` and then runs
 all bundled tests. `--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
-execution window. Positional ELF paths select individual or external tests.
+execution window. `--expect-tohost value` selects an exact diagnostic mailbox
+value. Positional ELF paths select individual or external tests.
 Each ELF must fit in the two 2 KiB physical windows
 `0x00000000..0x000007ff` and `0x80000000..0x800007ff`.
 
 The runner writes generated SVF files under `build/hardware-rv64`. A successful
 result covers the entire board path: JTAGG ER1, I2C register transport, BRAM
-loading, PLL/reset, RV64 execution, and `tohost` readback. All five bundled
-tests, including the directed `SW; LD; LD; BNE` memory regression, pass on the
-EVN at 124.8 MHz.
+loading, PLL/reset, RV64 execution, and `tohost` readback. All six bundled
+tests, including the directed `SW; LD; LD; BNE` memory regression and the
+machine-mode CSR/trap regression, pass on the EVN at 124.8 MHz.
 
 ## Architectural test integration
 
@@ -94,11 +95,14 @@ replacement for or fork of ACT4. They currently cover:
 - `ADDIW`, `ADDW`, `SUBW`
 - `SLL`, `SRL`, `SRA` and their immediate and W forms
 - `FENCE` for the current in-order, uncached memory interface
+- `FENCE.I` for the current uncached instruction interface
+- `ECALL`, `EBREAK`, `MRET`, illegal-instruction traps, and the implemented
+  machine-mode CSRs through the Zicsr register and immediate forms
 - dependent ALU forwarding and a load-use dependency
 
-Full ACT4 RV64I certification still requires architectural exception and trap
-behavior. The current bare-metal test convention writes `tohost` and then uses
-`ECALL` as a simulation halt; it is not an implementation of the mandated
-environment-call exception.
+Full ACT4 RV64I certification still requires the remaining ISA surface and a
+supported ACT4 execution environment. A bundled test reports through `tohost`
+and then enters a terminal loop; `ECALL` is handled architecturally as a
+machine-mode exception rather than as a simulation halt.
 
 [act4]: https://github.com/riscv/riscv-arch-test

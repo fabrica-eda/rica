@@ -80,7 +80,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
         checked_command(
             Command::new(&assembler)
                 .arg("-triple=riscv64-unknown-none-elf")
-                .arg("-mattr=+i")
+                .arg("-mattr=+i,+zicsr,+zifencei")
                 .arg("-filetype=obj")
                 .arg("-I")
                 .arg(&tests)
@@ -269,7 +269,11 @@ fn memory_image(image: &ElfImage) -> Result<HardwareMemoryImage, Box<dyn Error>>
     Ok((bytes, ranges))
 }
 
-fn test_svf(image: &ElfImage, run_tck: usize) -> Result<String, Box<dyn Error>> {
+fn test_svf(
+    image: &ElfImage,
+    run_tck: usize,
+    expected_tohost: u64,
+) -> Result<String, Box<dyn Error>> {
     let (memory, ranges) = memory_image(image)?;
     let mut bus = SvfI2c::new();
 
@@ -287,20 +291,14 @@ fn test_svf(image: &ElfImage, run_tck: usize) -> Result<String, Box<dyn Error>> 
 
     bus.write_registers(0x10, &[0x01]);
     writeln!(bus.text, "RUNTEST {run_tck} TCK;").unwrap();
-    bus.expect_registers(0x03, &[(0x1f, 0x1f)]);
-    bus.expect_registers(
-        0x18,
-        &[
-            (1, 0xff),
-            (0, 0xff),
-            (0, 0xff),
-            (0, 0xff),
-            (0, 0xff),
-            (0, 0xff),
-            (0, 0xff),
-            (0, 0xff),
-        ],
-    );
+    // A self-checking ELF reports through tohost before entering its terminal
+    // loop. Architectural ECALL/EBREAK now trap instead of asserting the legacy
+    // debug halt bit, so verify lock/run/result-valid/result without requiring
+    // a non-RISC-V halt side effect.
+    let expected_status = 0x0b | (u8::from(expected_tohost & 1 != 0) << 4);
+    bus.expect_registers(0x03, &[(expected_status, 0x1b)]);
+    let expected_result = expected_tohost.to_le_bytes().map(|byte| (byte, 0xff));
+    bus.expect_registers(0x18, &expected_result);
     bus.text.push_str("STATE IDLE;\n");
     Ok(bus.text)
 }
@@ -309,6 +307,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut arguments = env::args_os().skip(1);
     let mut run_tck = DEFAULT_RUN_TCK;
+    let mut expected_tohost = 1_u64;
     let mut program = true;
     let mut bitstream = project.join("build/riscv-hardware-test-125.bit");
     let mut requested_elfs = Vec::new();
@@ -320,6 +319,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .to_str()
                 .ok_or("--run-tck is not valid UTF-8")?
                 .parse()?;
+        } else if argument == "--expect-tohost" {
+            let value = arguments.next().ok_or("--expect-tohost requires a value")?;
+            let value = value.to_str().ok_or("--expect-tohost is not valid UTF-8")?;
+            expected_tohost = if let Some(hex) = value.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16)?
+            } else {
+                value.parse()?
+            };
         } else if argument == "--no-program" {
             program = false;
         } else if argument == "--bitstream" {
@@ -358,9 +365,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(OsStr::to_str)
             .ok_or("ELF has no valid filename")?;
         let svf = output_dir.join(format!("{name}.svf"));
-        fs::write(&svf, test_svf(&image, run_tck)?)?;
+        fs::write(&svf, test_svf(&image, run_tck, expected_tohost)?)?;
         checked_command(Command::new(&loader).args(["-b", "ecp5_evn"]).arg(&svf))?;
-        println!("PASS {name:<24} hardware tohost=1");
+        println!("PASS {name:<24} hardware tohost=0x{expected_tohost:016x}");
     }
     println!("RV64 hardware tests: {}/{} passed", elfs.len(), elfs.len());
     Ok(())

@@ -26,6 +26,8 @@ module HardwareTestTop (
     var target_scl    : 'cpu logic             ;
     var target_sda_low: 'cpu logic             ;
     var wired_sda     : 'cpu logic             ;
+    var debug_reset_async_n: 'cpu reset_async_low;
+    var debug_reset_sync_q : 'cpu logic           <2>;
     var debug_rst_n   : 'cpu reset_async_low   ;
 
     var debug_address       : 'cpu logic<8>;
@@ -142,8 +144,20 @@ module HardwareTestTop (
         }
     }
 
+    // PLL lock and TAP reset may assert reset without a running CPU clock.
+    // Release is synchronized so placement-dependent reset recovery cannot
+    // leave the I2C target's one-hot state in an invalid combination.
+    always_ff (clk_cpu, debug_reset_async_n) {
+        if_reset {
+            debug_reset_sync_q = 2'b00;
+        } else {
+            debug_reset_sync_q = {debug_reset_sync_q[0], 1'b1};
+        }
+    }
+
     unsafe (cdc) {
-        assign debug_rst_n = jtag_rst_n && pll_locked;
+        assign debug_reset_async_n = jtag_rst_n && pll_locked;
+        assign debug_rst_n         = debug_reset_sync_q[1];
         assign target_scl  = master_scl;
         assign wired_sda   = !(master_sda_low || target_sda_low);
         assign jtag_tdo1   = wired_sda;

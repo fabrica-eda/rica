@@ -21,7 +21,15 @@ interface DecodeBus {
     var branch_op    : logic<3> ;
     var is_jal       : logic    ;
     var is_jalr      : logic    ;
-    var halt         : logic    ;
+    var is_csr       : logic    ;
+    var csr_op       : logic<2> ;
+    var csr_use_imm  : logic    ;
+    var csr_write    : logic    ;
+    var csr_index    : logic<4> ;
+    var is_ecall     : logic    ;
+    var is_ebreak    : logic    ;
+    var is_mret      : logic    ;
+    var illegal      : logic    ;
 
     modport core {
         instr: output,
@@ -31,6 +39,62 @@ interface DecodeBus {
     modport decoder {
         instr: input,
         ..output
+    }
+}
+
+/// Machine-mode CSR storage and the precise trap/return control surface.
+///
+/// CSR instructions read combinationally in EX. Writes, trap entry, and MRET
+/// update architectural state only when Core proves that the EX instruction is
+/// not younger than an already-taken redirect.
+interface CsrBus {
+    var index       : logic<4> ;
+    var read_data   : logic<64>;
+    var legal       : logic    ;
+    var writable    : logic    ;
+    var write_enable: logic    ;
+    var write_op    : logic<2> ;
+    var write_source: logic<64>;
+    var trap_enter  : logic    ;
+    var trap_pc     : logic<32>;
+    var trap_cause  : logic<64>;
+    var trap_value  : logic<64>;
+    var mret        : logic    ;
+    var trap_vector : logic<32>;
+    var return_pc   : logic<32>;
+
+    modport core {
+        index       : output,
+        write_enable: output,
+        write_op    : output,
+        write_source: output,
+        trap_enter  : output,
+        trap_pc     : output,
+        trap_cause  : output,
+        trap_value  : output,
+        mret        : output,
+        read_data   : input ,
+        legal       : input ,
+        writable    : input ,
+        trap_vector : input ,
+        return_pc   : input ,
+    }
+
+    modport file {
+        index       : input ,
+        write_enable: input ,
+        write_op    : input ,
+        write_source: input ,
+        trap_enter  : input ,
+        trap_pc     : input ,
+        trap_cause  : input ,
+        trap_value  : input ,
+        mret        : input ,
+        read_data   : output,
+        legal       : output,
+        writable    : output,
+        trap_vector : output,
+        return_pc   : output,
     }
 }
 

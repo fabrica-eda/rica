@@ -5,7 +5,7 @@
     la t0, tohost
     li t1, \value
     sd t1, 0(t0)
-    ecall
+1:  j 1b
 .endm
 
 .macro PASS

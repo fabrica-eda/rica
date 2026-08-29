@@ -480,7 +480,7 @@ fn program() -> Vec<Expected> {
         },
         Expected {
             pc: 252,
-            instr: 0x0000_0073,
+            instr: j_type(0, 0),
             rd: 0,
             data: 0,
             mem_write: None,
@@ -630,7 +630,7 @@ fn $function(
         )
         .into());
     }
-    if $read_value(simulator, "halted") != 1 || $read_value(simulator, "debug_x31") != 0x55 {
+    if $read_value(simulator, "halted") != 0 || $read_value(simulator, "debug_x31") != 0x55 {
         return Err(format!("{label}: final architectural signature is invalid").into());
     }
     println!(
@@ -644,21 +644,14 @@ fn $function(
 }
 
 define_verifier!(
-    verify_interp,
-    value_interp,
-    celox::Simulator<celox::InterpBackend>
+    verify_native,
+    value_native,
+    celox::Simulator<celox::NativeBackend>
 );
 define_verifier!(verify_post_map, value_post_map, celox03::Simulator);
 
-fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
-    let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
-    let source = [
-        verify_riscv::core_source(project)?,
-        hardware_memory,
-        fs::read_to_string(project.join("src/HardwareCoreTestTop.veryl"))?,
-    ]
-    .join("\n");
-    let image = ElfImage::load(&project.join("build/rv64i-subset/memory.elf"))?;
+fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(), Box<dyn Error>> {
+    let image = ElfImage::load(elf)?;
     let mut bytes = [0_u8; 4096];
     let mut loaded = Vec::new();
     for (address, byte) in image.load_bytes() {
@@ -677,8 +670,7 @@ fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
     loaded.sort_unstable();
     loaded.dedup();
 
-    let mut simulator =
-        SimulatorBuilder::new(&source, "HardwareCoreTestTop").build_interpreter()?;
+    let mut simulator = SimulatorBuilder::new(source, "HardwareCoreTestTop").build_native()?;
     let clk = simulator.event("clk");
     let clk_n = simulator.event("clk_n");
     let rst_n = simulator.signal("rst_n");
@@ -710,23 +702,23 @@ fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
     let mut trace = std::collections::VecDeque::with_capacity(20);
     for cycle in 1..=4_000 {
         simulator.tick(clk_n)?;
-        let store = (value_interp(&mut simulator, "data_we") != 0).then(|| {
+        let store = (value_native(&mut simulator, "data_we") != 0).then(|| {
             (
-                value_interp(&mut simulator, "data_addr"),
-                value_interp(&mut simulator, "data_wdata"),
-                value_interp(&mut simulator, "data_wmask"),
+                value_native(&mut simulator, "data_addr"),
+                value_native(&mut simulator, "data_wdata"),
+                value_native(&mut simulator, "data_wmask"),
             )
         });
         simulator.tick(clk)?;
-        if value_interp(&mut simulator, "commit_valid") != 0 {
+        if value_native(&mut simulator, "commit_valid") != 0 {
             if trace.len() == trace.capacity() {
                 trace.pop_front();
             }
             trace.push_back((
-                value_interp(&mut simulator, "commit_pc"),
-                value_interp(&mut simulator, "commit_instr"),
-                value_interp(&mut simulator, "commit_rd"),
-                value_interp(&mut simulator, "commit_data"),
+                value_native(&mut simulator, "commit_pc"),
+                value_native(&mut simulator, "commit_instr"),
+                value_native(&mut simulator, "commit_rd"),
+                value_native(&mut simulator, "commit_data"),
             ));
         }
         if let Some((address, data, mask)) = store
@@ -742,12 +734,12 @@ fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(format!(
-                    "hardware-memory RTL failed: tohost={data} (test {}) at cycle {cycle}, mask={mask:#04x}\n{recent}",
+                    "hardware-memory RTL {label} failed: tohost={data} (test {}) at cycle {cycle}, mask={mask:#04x}\n{recent}",
                     data >> 1
                 )
                 .into());
             }
-            println!("Hardware-memory RTL: memory.elf PASS in {cycle} cycles");
+            println!("Hardware-memory RTL: {label:<12} PASS in {cycle} cycles");
             return Ok(());
         }
     }
@@ -758,7 +750,26 @@ fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Err(format!("hardware-memory RTL timed out\n{recent}").into())
+    Err(format!("hardware-memory RTL {label} timed out\n{recent}").into())
+}
+
+fn verify_hardware_memory_rtl(project: &Path) -> Result<(), Box<dyn Error>> {
+    let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
+    let source = [
+        verify_riscv::core_source(project)?,
+        hardware_memory,
+        fs::read_to_string(project.join("src/HardwareCoreTestTop.veryl"))?,
+    ]
+    .join("\n");
+    for name in ["alu", "compare", "control", "memory", "shift", "system"] {
+        let label = format!("{name}.elf");
+        verify_hardware_memory_elf(
+            &source,
+            &project.join("build/rv64i-subset").join(&label),
+            &label,
+        )?;
+    }
+    Ok(())
 }
 
 fn board_diagnostic_instruction(pc: u64) -> u32 {
@@ -776,7 +787,7 @@ fn board_diagnostic_instruction(pc: u64) -> u32 {
 }
 
 fn verify_board_diagnostic(
-    simulator: &mut celox::Simulator<celox::InterpBackend>,
+    simulator: &mut celox::Simulator<celox::NativeBackend>,
 ) -> Result<(), Box<dyn Error>> {
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
@@ -796,19 +807,19 @@ fn verify_board_diagnostic(
     let mut branch_commits = 0_u64;
     let mut elapsed_cycles = 0_usize;
     for cycle in 0..50_000 {
-        let fetch_pc = value_interp(simulator, "pc");
+        let fetch_pc = value_native(simulator, "pc");
         simulator.modify(|io| io.set(instruction, board_diagnostic_instruction(fetch_pc)))?;
         simulator.tick(clock)?;
         elapsed_cycles = cycle + 1;
 
-        if value_interp(simulator, "commit_valid") == 0 {
+        if value_native(simulator, "commit_valid") == 0 {
             continue;
         }
-        match value_interp(simulator, "commit_pc") {
+        match value_native(simulator, "commit_pc") {
             0x08 => {
                 delay_addi_commits += 1;
                 let expected = 4096 - delay_addi_commits;
-                let observed = value_interp(simulator, "commit_data");
+                let observed = value_native(simulator, "commit_data");
                 if observed != expected {
                     return Err(format!(
                         "board diagnostic: delay ADDI {delay_addi_commits} expected x1={expected}, got {observed}"
@@ -819,7 +830,7 @@ fn verify_board_diagnostic(
             0x0c => branch_commits += 1,
             _ => {}
         }
-        let commit_pc = value_interp(simulator, "commit_pc");
+        let commit_pc = value_native(simulator, "commit_pc");
         if commit_pc != 0 && commit_pc != 0x10 {
             continue;
         }
@@ -834,7 +845,7 @@ fn verify_board_diagnostic(
             ("commit_rd", 31),
             ("commit_data", x31_commits),
         ] {
-            let observed = value_interp(simulator, signal);
+            let observed = value_native(simulator, signal);
             if observed != expected {
                 return Err(format!(
                     "board diagnostic: {signal} mismatch on x31 update {x31_commits}: expected 0x{expected:016x}, got 0x{observed:016x}"
@@ -848,7 +859,7 @@ fn verify_board_diagnostic(
     }
 
     if x31_commits != 2
-        || value_interp(simulator, "debug_x31") != 2
+        || value_native(simulator, "debug_x31") != 2
         || delay_addi_commits != 4096
         || branch_commits != 4096
     {
@@ -1050,16 +1061,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let core_source = verify_riscv::core_source(project)?;
 
-    let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_interpreter()?;
-    verify_interp(&mut rtl, "Celox RTL interpreter")?;
-    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core").build_interpreter()?;
+    let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
+    verify_native(&mut rtl, "Celox RTL native")?;
+    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
     verify_board_diagnostic(&mut board_rtl)?;
     if rtl_only {
         return Ok(());
     }
 
+    let lower_started = Instant::now();
     let design = analyze_and_lower(&core_source, "rica_riscv", "Core")?;
+    println!("Struo lower completed in {:?}", lower_started.elapsed());
+    let synth_started = Instant::now();
     let synthesized = synthesize(&design)?;
+    println!("Struo synthesis completed in {:?}", synth_started.elapsed());
     let map_started = Instant::now();
     let mapped = map_to_ecp5_with_options(
         &synthesized.netlist,

@@ -112,12 +112,13 @@ an 8.000 ns period. Regressions must report at least:
 
 The current core commits the 58-instruction mixed trace in 102 clocks and
 keeps consecutive dependent one-cycle integer ALU operations at one per
-clock. With the 124.8 MHz PLL, the complete wrapper reaches 131.37 MHz in
-nextpnr 0.6 seed 4 and the resulting bitstream passes six complete hardware
-suites (30/30). Texo's nextpnr-compatible ECP5 QoR model closes the same
-wrapper with +9 ps setup and +290 ps hold slack; its native bitstream also
-passes six complete hardware suites (30/30). The much smaller Texo setup
-margin shows that placement QoR still differs even though the STA margin policy
-now matches. The retired 250 MHz design met timing while taking fifteen clocks
-per instruction; it remains in Texo as a physical-design regression precisely
-so this CPU is not optimized around that result.
+clock. With the 124.8 MHz PLL, the CSR/trap-capable wrapper reaches 125.88 MHz
+in nextpnr 0.6 seed 4 and its bitstream passes the complete six-test hardware
+suite. The currently pinned Texo revision does not close this enlarged design:
+one run improved to -561 ps setup slack, then restarted placement for a
+physical-synthesis candidate and regressed into the multi-nanosecond range.
+The same mapped netlist closing in nextpnr makes this a Texo placement/search
+issue rather than evidence that the RTL cannot run at 124.8 MHz. The retired
+250 MHz design met timing while taking fifteen clocks per instruction; it
+remains in Texo as a physical-design regression precisely so this CPU is not
+optimized around that result.
