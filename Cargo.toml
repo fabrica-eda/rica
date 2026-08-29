@@ -16,8 +16,8 @@ struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b
 struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
 struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
 struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "7a7769b9fc757ead82e0b797f496edf83f521126" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "5c36aaf41644ef3bfe1562bf0b5a254e31899d4b" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "5c36aaf41644ef3bfe1562bf0b5a254e31899d4b" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "5109281333a9f64f2e0660396ebe6d693e35dfdd" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "5109281333a9f64f2e0660396ebe6d693e35dfdd" }
 
 [profile.release]
 lto = "thin"
