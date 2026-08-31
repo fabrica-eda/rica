@@ -197,11 +197,11 @@ Generate a native bitstream only after the Texo run reports timing closure:
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
-`18b4932f54d263d912fe7da65d9edee0f36d566e`. On the current 256 KiB wrapper it
-loads the architecture in 3.60 s and completes the first negotiated route in
-6.36 s, roughly twice as fast as the previous revision in this run. Physical
-synthesis improves WNS from -0.607 ns to -0.313 ns, but 124.8 MHz still does
-not close, so do not generate a Texo bitstream from this checkpoint.
+`2530c917e6d41f26d2de6d77817d1868d9f32b4c` (PR #56). On the current 256 KiB
+wrapper, three complete benchmark runs take 29.68 s, 31.06 s, and 29.58 s.
+All three produce the same checkpoint and close 124.8 MHz at +0.006 ns WNS,
+zero setup TNS, and +0.290 ns hold WNS. The six-seed stock nextpnr comparison
+has a 32.12 s median and fails setup in every seed, with -0.415 ns median WNS.
 
 The nextpnr seed-6 bitstream is timing-qualified by the explicit related-clock
 validator. JTAG detection, SRAM programming, ELF upload, CPU execution, and

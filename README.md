@@ -26,8 +26,8 @@ at 62.4 MHz behind response-token handshakes and a two-line instruction buffer.
 The current nextpnr seed-6 route reaches 126.23 MHz in the CPU domain and also
 passes explicit 8.012 ns related-clock checks in both directions. The same
 bitstream passes all six bundled ELFs on the physical EVN, both over direct USB
-and through an openFPGALoader XVC server. Texo revision `18b4932` improves this
-design to -0.313 ns WNS at the same target, but does not yet close 125 MHz.
+and through an openFPGALoader XVC server. Texo revision `2530c91` closes this
+design at the same target with +0.006 ns WNS and zero setup violations.
 
 Run the I2C regressions with:
 
