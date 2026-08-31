@@ -679,22 +679,28 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
         }
         loaded.push((u32::try_from(address)?, byte));
     }
+    let loaded_bytes = loaded.len();
 
     let mut simulator = SimulatorBuilder::new(source, "HardwareCoreTestTop").build_native()?;
     let clk_cpu = simulator.event("clk_cpu");
     let clk_mem = simulator.event("clk_mem");
     let rst_n = simulator.signal("rst_n");
+    let run = simulator.signal("run");
     let debug_write = simulator.signal("debug_write");
     let debug_address = simulator.signal("debug_address");
     let debug_data = simulator.signal("debug_data");
     simulator.modify(|io| {
         io.set(rst_n, 0_u8);
+        io.set(run, 0_u8);
         io.set(debug_write, 0_u8);
         io.set(debug_address, 0_u32);
         io.set(debug_data, 0_u8);
     })?;
     simulator.tick(clk_cpu)?;
     simulator.tick(clk_mem)?;
+    // Match HardwareTestTop: debug/system reset is released while run_q keeps
+    // the CPU and instruction buffer reset during byte-wise BRAM loading.
+    simulator.modify(|io| io.set(rst_n, 1_u8))?;
     for (address, byte) in loaded {
         simulator.modify(|io| {
             io.set(debug_write, 1_u8);
@@ -705,7 +711,7 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
     }
     simulator.modify(|io| io.set(debug_write, 0_u8))?;
     simulator.tick(clk_mem)?;
-    simulator.modify(|io| io.set(rst_n, 1_u8))?;
+    simulator.modify(|io| io.set(run, 1_u8))?;
 
     let mut trace = std::collections::VecDeque::with_capacity(20);
     let mut mailbox_low = 0_u64;
@@ -796,7 +802,9 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
                 )
                 .into());
             }
-            println!("Hardware-memory RTL: {label:<12} PASS in {cycle} cycles");
+            println!(
+                "Hardware-memory RTL: {label:<12} PASS; {loaded_bytes} debug bytes loaded, {commits} commits in {cycle} cycles"
+            );
             return Ok(());
         }
     }

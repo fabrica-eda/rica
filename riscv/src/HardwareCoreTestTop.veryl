@@ -1,9 +1,12 @@
 /// Simulation wrapper for the CPU and the same synchronous BRAM organization
-/// used by HardwareTestTop without modeling JTAG or I2C.
+/// used by HardwareTestTop without modeling JTAG or I2C. `rst_n` is the
+/// debug/system reset while `run` independently releases the CPU, matching the
+/// board contract that keeps memory alive while a stopped CPU is being loaded.
 module HardwareCoreTestTop (
     clk_cpu         : input  'cpu    clock              ,
     clk_mem         : input  'memory clock              ,
     rst_n           : input  'cpu    reset_async_low    ,
+    run             : input  'cpu    logic              ,
     debug_write     : input  'cpu    logic              ,
     debug_address   : input  'cpu    logic          <32>,
     debug_data      : input  'cpu    logic          <8> ,
@@ -24,20 +27,23 @@ module HardwareCoreTestTop (
     commit_mem_wmask: output 'cpu    logic          <8> ,
     debug_x31       : output 'cpu    logic          <64>,
 ) {
-    var instruction                  : 'cpu    logic<32>;
-    var instruction_valid            : 'cpu    logic    ;
-    var data_rdata                   : 'cpu    logic<64>;
-    var data_memory_addr             : 'cpu    logic<64>;
-    var data_request_sequence        : 'cpu    logic    ;
-    var data_response_sequence       : 'cpu    logic    ;
-    var memory_instr_address         : 'memory logic<32>;
-    var memory_instr_line            : 'memory logic<64>;
-    var memory_instr_response_address: 'memory logic<32>;
-    var memory_instr_response_valid  : 'memory logic    ;
+    var cpu_rst_n                    : 'cpu    reset_async_low    ;
+    var instruction                  : 'cpu    logic          <32>;
+    var instruction_valid            : 'cpu    logic              ;
+    var data_rdata                   : 'cpu    logic          <64>;
+    var data_memory_addr             : 'cpu    logic          <64>;
+    var data_request_sequence        : 'cpu    logic              ;
+    var data_response_sequence       : 'cpu    logic              ;
+    var memory_instr_address         : 'memory logic          <32>;
+    var memory_instr_line            : 'memory logic          <64>;
+    var memory_instr_response_address: 'memory logic          <32>;
+    var memory_instr_response_valid  : 'memory logic              ;
+
+    assign cpu_rst_n = rst_n && run;
 
     inst instruction_buffer: InstructionBuffer (
         clk                    : clk_cpu                      ,
-        rst_n                  : rst_n                        ,
+        rst_n                  : cpu_rst_n                    ,
         pc                     : pc[31:0]                     ,
         instruction            : instruction                  ,
         instruction_valid      : instruction_valid            ,
@@ -75,7 +81,7 @@ module HardwareCoreTestTop (
         RELOCATE_LOW_DATA: 1,
     ) (
         clk                   : clk_cpu               ,
-        rst_n                 : rst_n                 ,
+        rst_n                 : cpu_rst_n             ,
         instr                 : instruction           ,
         instr_valid           : instruction_valid     ,
         data_rdata            : data_rdata            ,
