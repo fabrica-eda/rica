@@ -181,27 +181,30 @@ generic SW4 input is not required for autonomous bring-up.
 Use the same PLL binding for the Texo flow:
 
 ```sh
-../texo/target/release/texo pnr riscv --top HardwareTestTop --package CABGA381 --speed 8 \
+cargo install --git https://github.com/fabrica-eda/texo.git \
+  --rev f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d \
+  --root target/texo-git --locked texo-cli
+target/texo-git/bin/texo pnr riscv --top HardwareTestTop --package CABGA381 --speed 8 \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
   --pll-binding riscv/pll-12-to-124p8.json \
   --synthesis-goal-mhz 125 --jtagg-prefix jtag \
+  --register-enable-fanout ff_core.csr_file.*=4 \
   --output riscv/build/riscv-hardware-test-125.texo.json
 ```
 
 Generate a native bitstream only after the Texo run reports timing closure:
 
 ```sh
-../texo/target/release/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
+target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
   --bit riscv/build/riscv-hardware-test-125-texo.bit
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
-`2530c917e6d41f26d2de6d77817d1868d9f32b4c` (PR #56). On the current 256 KiB
-wrapper, three complete benchmark runs take 29.68 s, 31.06 s, and 29.58 s.
-All three produce the same checkpoint and close 124.8 MHz at +0.006 ns WNS,
-zero setup TNS, and +0.290 ns hold WNS. The six-seed stock nextpnr comparison
-has a 32.12 s median and fails setup in every seed, with -0.415 ns median WNS.
+`f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). On the current
+256 KiB wrapper, the refactored memory maps to 14,966 ECP5 cells. A complete
+placement and routing run takes 30.24 s and closes 124.8 MHz at +0.061 ns WNS,
+zero setup TNS, +0.290 ns hold WNS, and zero hold TNS.
 
 The nextpnr seed-6 bitstream is timing-qualified by the explicit related-clock
 validator. JTAG detection, SRAM programming, ELF upload, CPU execution, and

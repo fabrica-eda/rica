@@ -23,11 +23,12 @@ throughput, not Fmax alone: consecutive dependent ALU instructions sustain one
 instruction per clock through registered EX bypasses, while load-, shift-, and
 compare-use dependencies wait only for their producing stage. Board BRAM runs
 at 62.4 MHz behind response-token handshakes and a two-line instruction buffer.
-The current nextpnr seed-6 route reaches 126.23 MHz in the CPU domain and also
-passes explicit 8.012 ns related-clock checks in both directions. The same
-bitstream passes all six bundled ELFs on the physical EVN, both over direct USB
-and through an openFPGALoader XVC server. Texo revision `2530c91` closes this
-design at the same target with +0.006 ns WNS and zero setup violations.
+The current nextpnr seed-6 route reaches 124.92 MHz in the CPU domain, passes
+the 124.8 MHz board constraint, and also passes explicit 8.012 ns related-clock
+checks in both directions. A timing-qualified bitstream passes all six bundled
+ELFs on the physical EVN, both over direct USB and through an XVC server. Texo
+0.1.6 revision `f8c57e09` closes the refactored design at the same target with
++0.061 ns WNS and zero setup violations.
 
 Run the I2C regressions with:
 

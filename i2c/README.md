@@ -72,7 +72,7 @@ constraint.
 The initial monolithic FSM produced 963 Boolean nodes, 625 ECP5 cells, and a
 mapped estimate of 8.72 ns. The current one-hot implementation separates
 next-state logic, receive shifting, bit counting, SDA drive control, and the
-debug bus. With Struo `eea0fe44`, the standalone debug top reports 443 nodes,
+debug bus. With Struo `69e7ec13`, the standalone debug top reports 443 nodes,
 68 RTL registers and 244 mapped cells. Its 250 MHz mapping estimate improves
 the critical combinational path from 4.22 ns to 3.72 ns.
 
@@ -88,21 +88,22 @@ fabric clock. The 12 MHz pin is sampled as asynchronous data in that domain,
 so it is not promoted to a second global clock. A 65536-cycle window observes
 about 3146 reference rising edges and publishes the result at register `0x03`.
 
-The final Texo P&R run closes the 4.000 ns constraint at **+84 ps setup
-slack and +9 ps hold slack**. Native bitgen produces the final ECP5 bitstream
+The Texo 0.1.6 P&R run closes the 4.000 ns constraint at **+9 ps setup
+slack and +290 ps hold slack**, with zero setup and hold TNS. Native bitgen
+produces the final ECP5 bitstream
 through Texo's public Cargo API. The hardware SVF passed after SRAM programming:
 scratch write `0xa5`, ID `0x52`, protocol `0x02`, PLL lock, synchronized reset
 release, activity, ratio-window completion, and the measured 250/12 ratio.
 
 The workspace uses git-pinned Cargo dependencies because a release artifact is
-unavailable. Texo `bdfb4acb` includes Struo `eea0fe44`, the required PLL
+unavailable. Texo 0.1.6 `f8c57e09` includes Struo `69e7ec13`, the required PLL
 binding, the fix for releasing stale routes when hold ECO rebinds a packed FF
 physical pin, and the timing-driven placement portfolio.
 
 ```sh
 cargo run --locked --offline -p verify-i2c
 cargo install --git https://github.com/fabrica-eda/texo.git \
-  --rev bdfb4acb5aad08e91e3dea3a5fcbc84efd3c3ae7 \
+  --rev f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d \
   --root target/texo-git --locked texo-cli
 target/texo-git/bin/texo pnr i2c --package CABGA381 --speed 8 \
   --lpf i2c/lfe5um5g-85f-evn-250.lpf \
