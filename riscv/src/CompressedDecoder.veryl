@@ -1,0 +1,273 @@
+/// Combinational RV64C/Zca integer-instruction decompressor.
+///
+/// Every legal compressed instruction is expanded to the corresponding
+/// canonical RV64I instruction before it reaches the existing Decoder.  RVC
+/// HINT encodings remain legal and expand to their architecturally harmless
+/// integer operation.  Reserved encodings, floating-point compressed opcodes,
+/// and the non-compressed quadrant assert `illegal`.
+///
+/// The fetch pipeline must retain the original instruction length.  In
+/// particular, a canonicalized C.JALR still links to the compressed
+/// instruction's successor at PC + 2, rather than the canonical JALR's PC + 4.
+module CompressedDecoder (
+    compressed : input  logic<16>,
+    instruction: output logic<32>,
+    illegal    : output logic    ,
+) {
+    var quadrant    : logic<2> ;
+    var funct3      : logic<3> ;
+    var rd          : logic<5> ;
+    var rs2         : logic<5> ;
+    var rs1_prime   : logic<5> ;
+    var rs2_prime   : logic<5> ;
+    var ci_imm      : logic<12>;
+    var shift_imm   : logic<12>;
+    var addi4spn_imm: logic<12>;
+    var word_imm    : logic<12>;
+    var double_imm  : logic<12>;
+    var addi16sp_imm: logic<12>;
+    var lwsp_imm    : logic<12>;
+    var ldsp_imm    : logic<12>;
+    var swsp_imm    : logic<12>;
+    var sdsp_imm    : logic<12>;
+    var branch_imm  : logic<13>;
+    var jump_imm    : logic<21>;
+
+    always_comb {
+        quadrant  = compressed[1:0];
+        funct3    = compressed[15:13];
+        rd        = compressed[11:7];
+        rs2       = compressed[6:2];
+        rs1_prime = {2'b01, compressed[9:7]};
+        rs2_prime = {2'b01, compressed[4:2]};
+
+        // CI-format sign-extended immediate and RV64 six-bit shift amount.
+        ci_imm    = {compressed[12] repeat 7, compressed[6:2]};
+        shift_imm = {6'b000000, compressed[12], compressed[6:2]};
+
+        // Zero-extended scaled load/store and stack-adjust immediates.
+        addi4spn_imm = {2'b00, compressed[10:7], compressed[12:11], compressed[5], compressed[6], 2'b00};
+        word_imm     = {5'b00000, compressed[5], compressed[12:10], compressed[6], 2'b00};
+        double_imm   = {4'b0000, compressed[6:5], compressed[12:10], 3'b000};
+        addi16sp_imm = {compressed[12] repeat 3, compressed[4:3], compressed[5], compressed[2], compressed[6], 4'b0000};
+        lwsp_imm     = {4'b0000, compressed[3:2], compressed[12], compressed[6:4], 2'b00};
+        ldsp_imm     = {3'b000, compressed[4:2], compressed[12], compressed[6:5], 3'b000};
+        swsp_imm     = {4'b0000, compressed[8:7], compressed[12:9], 2'b00};
+        sdsp_imm     = {3'b000, compressed[9:7], compressed[12:10], 3'b000};
+
+        // Sign-extended control-flow displacements in their natural order.
+        branch_imm = {
+            compressed[12] repeat 5, compressed[6:5], compressed[2], compressed[11:10], compressed[4:3], 1'b0
+        };
+        jump_imm   = {
+            compressed[12] repeat 10, compressed[8], compressed[10:9], compressed[6], compressed[7], compressed[2],
+            compressed[11], compressed[5:3], 1'b0
+        };
+
+        // A deterministic NOP is supplied alongside illegal encodings.  The
+        // caller must use `illegal`; the instruction value is not a fallback.
+        instruction = 32'h0000_0013;
+        illegal     = 1'b1;
+
+        case quadrant {
+            2'b00: { // Quadrant 0: stack-relative immediate and compact LSU.
+                case funct3 {
+                    3'b000: { // C.ADDI4SPN -> ADDI rd', x2, nzuimm
+                        if compressed[12:5] != 8'b00000000 {
+                            instruction = {addi4spn_imm, 5'd2, 3'b000, rs2_prime, 7'b0010011};
+                            illegal     = 1'b0;
+                        }
+                    }
+                    3'b010: { // C.LW -> LW rd', offset(rs1')
+                        instruction = {word_imm, rs1_prime, 3'b010, rs2_prime, 7'b0000011};
+                        illegal     = 1'b0;
+                    }
+                    3'b011: { // C.LD -> LD rd', offset(rs1')
+                        instruction = {double_imm, rs1_prime, 3'b011, rs2_prime, 7'b0000011};
+                        illegal     = 1'b0;
+                    }
+                    3'b110: { // C.SW -> SW rs2', offset(rs1')
+                        instruction = {word_imm[11:5], rs2_prime, rs1_prime, 3'b010, word_imm[4:0], 7'b0100011};
+                        illegal     = 1'b0;
+                    }
+                    3'b111: { // C.SD -> SD rs2', offset(rs1')
+                        instruction = {double_imm[11:5], rs2_prime, rs1_prime, 3'b011, double_imm[4:0], 7'b0100011};
+                        illegal     = 1'b0;
+                    }
+                    // 001/101 are compressed floating-point operations and
+                    // 100 is reserved in the integer-only Zca subset.
+                    default: {}
+                }
+            }
+            2'b01: { // Quadrant 1: immediates, compact ALU, and PC-relative control.
+                case funct3 {
+                    3'b000: { // C.NOP/C.ADDI and their HINT encodings.
+                        instruction = {ci_imm, rd, 3'b000, rd, 7'b0010011};
+                        illegal     = 1'b0;
+                    }
+                    3'b001: { // C.ADDIW -> ADDIW rd, rd, imm (RV64 only)
+                        if rd != 5'd0 {
+                            instruction = {ci_imm, rd, 3'b000, rd, 7'b0011011};
+                            illegal     = 1'b0;
+                        }
+                    }
+                    3'b010: { // C.LI and its rd=x0 HINT encodings.
+                        instruction = {ci_imm, 5'd0, 3'b000, rd, 7'b0010011};
+                        illegal     = 1'b0;
+                    }
+                    3'b011: {
+                        if rd == 5'd2 { // C.ADDI16SP
+                            if {compressed[12], compressed[6:2]} != 6'b000000 {
+                                instruction = {addi16sp_imm, 5'd2, 3'b000, 5'd2, 7'b0010011};
+                                illegal     = 1'b0;
+                            }
+                        } else { // C.LUI, including the rd=x0 HINT space.
+                            if {compressed[12], compressed[6:2]} != 6'b000000 {
+                                instruction = {compressed[12] repeat 15, compressed[6:2], rd, 7'b0110111};
+                                illegal     = 1'b0;
+                            }
+                        }
+                    }
+                    3'b100: { // C.SRLI/C.SRAI/C.ANDI and compact register ALU.
+                        case compressed[11:10] {
+                            2'b00: { // C.SRLI, including shamt=0 HINT.
+                                instruction = {shift_imm, rs1_prime, 3'b101, rs1_prime, 7'b0010011};
+                                illegal     = 1'b0;
+                            }
+                            2'b01: { // C.SRAI, including shamt=0 HINT.
+                                instruction = {
+                                    6'b010000, compressed[12], compressed[6:2], rs1_prime, 3'b101, rs1_prime, 7'b0010011
+                                };
+                                illegal     = 1'b0;
+                            }
+                            2'b10: { // C.ANDI
+                                instruction = {ci_imm, rs1_prime, 3'b111, rs1_prime, 7'b0010011};
+                                illegal     = 1'b0;
+                            }
+                            2'b11: {
+                                if !compressed[12] {
+                                    case compressed[6:5] {
+                                        2'b00: { // C.SUB
+                                            instruction = {
+                                                7'b0100000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0110011
+                                            };
+                                        }
+                                        2'b01: { // C.XOR
+                                            instruction = {
+                                                7'b0000000, rs2_prime, rs1_prime, 3'b100, rs1_prime, 7'b0110011
+                                            };
+                                        }
+                                        2'b10: { // C.OR
+                                            instruction = {
+                                                7'b0000000, rs2_prime, rs1_prime, 3'b110, rs1_prime, 7'b0110011
+                                            };
+                                        }
+                                        2'b11: { // C.AND
+                                            instruction = {
+                                                7'b0000000, rs2_prime, rs1_prime, 3'b111, rs1_prime, 7'b0110011
+                                            };
+                                        }
+                                    }
+                                    illegal = 1'b0;
+                                } else {
+                                    case compressed[6:5] {
+                                        2'b00: { // C.SUBW (RV64 only)
+                                            instruction = {
+                                                7'b0100000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0111011
+                                            };
+                                            illegal     = 1'b0;
+                                        }
+                                        2'b01: { // C.ADDW (RV64 only)
+                                            instruction = {
+                                                7'b0000000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0111011
+                                            };
+                                            illegal     = 1'b0;
+                                        }
+                                        // 10/11 are reserved by RV64C/Zca.
+                                        default: {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    3'b101: { // C.J -> JAL x0, offset
+                        instruction = {jump_imm[20], jump_imm[10:1], jump_imm[11], jump_imm[19:12], 5'd0, 7'b1101111};
+                        illegal     = 1'b0;
+                    }
+                    3'b110: { // C.BEQZ -> BEQ rs1', x0, offset
+                        instruction = {
+                            branch_imm[12], branch_imm[10:5], 5'd0, rs1_prime, 3'b000, branch_imm[4:1], branch_imm[11],
+                            7'b1100011
+                        };
+                        illegal     = 1'b0;
+                    }
+                    3'b111: { // C.BNEZ -> BNE rs1', x0, offset
+                        instruction = {
+                            branch_imm[12], branch_imm[10:5], 5'd0, rs1_prime, 3'b001, branch_imm[4:1], branch_imm[11],
+                            7'b1100011
+                        };
+                        illegal     = 1'b0;
+                    }
+                }
+            }
+            2'b10: { // Quadrant 2: full-register shifts, stack LSU, and CR ALU.
+                case funct3 {
+                    3'b000: { // C.SLLI and its rd=x0/shamt=0 HINTs.
+                        instruction = {shift_imm, rd, 3'b001, rd, 7'b0010011};
+                        illegal     = 1'b0;
+                    }
+                    3'b010: { // C.LWSP -> LW rd, offset(x2)
+                        if rd != 5'd0 {
+                            instruction = {lwsp_imm, 5'd2, 3'b010, rd, 7'b0000011};
+                            illegal     = 1'b0;
+                        }
+                    }
+                    3'b011: { // C.LDSP -> LD rd, offset(x2)
+                        if rd != 5'd0 {
+                            instruction = {ldsp_imm, 5'd2, 3'b011, rd, 7'b0000011};
+                            illegal     = 1'b0;
+                        }
+                    }
+                    3'b100: {
+                        if !compressed[12] {
+                            if rs2 == 5'd0 { // C.JR -> JALR x0, 0(rs1)
+                                if rd != 5'd0 {
+                                    instruction = {12'd0, rd, 3'b000, 5'd0, 7'b1100111};
+                                    illegal     = 1'b0;
+                                }
+                            } else { // C.MV and its rd=x0 HINTs.
+                                instruction = {7'b0000000, rs2, 5'd0, 3'b000, rd, 7'b0110011};
+                                illegal     = 1'b0;
+                            }
+                        } else {
+                            if rs2 == 5'd0 {
+                                if rd == 5'd0 { // C.EBREAK
+                                    instruction = 32'h0010_0073;
+                                } else { // C.JALR -> JALR x1, 0(rs1)
+                                    instruction = {12'd0, rd, 3'b000, 5'd1, 7'b1100111};
+                                }
+                                illegal = 1'b0;
+                            } else { // C.ADD and its rd=x0 HINTs.
+                                instruction = {7'b0000000, rs2, rd, 3'b000, rd, 7'b0110011};
+                                illegal     = 1'b0;
+                            }
+                        }
+                    }
+                    3'b110: { // C.SWSP -> SW rs2, offset(x2)
+                        instruction = {swsp_imm[11:5], rs2, 5'd2, 3'b010, swsp_imm[4:0], 7'b0100011};
+                        illegal     = 1'b0;
+                    }
+                    3'b111: { // C.SDSP -> SD rs2, offset(x2)
+                        instruction = {sdsp_imm[11:5], rs2, 5'd2, 3'b011, sdsp_imm[4:0], 7'b0100011};
+                        illegal     = 1'b0;
+                    }
+                    // 001/101 are compressed floating-point operations.
+                    default: {}
+                }
+            }
+            // Quadrant 3 identifies instructions wider than 16 bits.  The
+            // fetch pipeline bypasses this decompressor for those instructions.
+            default: {}
+        }
+    }
+}

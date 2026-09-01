@@ -507,6 +507,7 @@ fn $function(
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
+    let instruction_compressed = simulator.signal("instr_is_compressed");
     let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
     let data_response_sequence = simulator.signal("data_response_sequence");
@@ -515,6 +516,7 @@ fn $function(
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
+        io.set(instruction_compressed, 0_u8);
         io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
         io.set(data_response_sequence, 0_u8);
@@ -546,6 +548,10 @@ fn $function(
         });
         simulator.modify(|io| {
             io.set(instruction, fetched_instruction);
+            io.set(
+                instruction_compressed,
+                u8::from(fetched_instruction & 0b11 != 0b11),
+            );
             io.set(data_rdata, memory_read_data);
         })?;
         simulator.tick(clock)?;
@@ -834,7 +840,15 @@ fn verify_hardware_memory_rtl(
     ]
     .join("\n");
     if requested_elfs.is_empty() {
-        for name in ["alu", "compare", "control", "memory", "shift", "system"] {
+        for name in [
+            "alu",
+            "compare",
+            "compressed",
+            "control",
+            "memory",
+            "shift",
+            "system",
+        ] {
             let label = format!("{name}.elf");
             verify_hardware_memory_elf(
                 &source,
@@ -1018,6 +1032,7 @@ fn verify_board_diagnostic(
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
+    let instruction_compressed = simulator.signal("instr_is_compressed");
     let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
     let data_response_sequence = simulator.signal("data_response_sequence");
@@ -1025,6 +1040,7 @@ fn verify_board_diagnostic(
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
+        io.set(instruction_compressed, 0_u8);
         io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
         io.set(data_response_sequence, 0_u8);
@@ -1038,7 +1054,10 @@ fn verify_board_diagnostic(
     let mut elapsed_cycles = 0_usize;
     for cycle in 0..50_000 {
         let fetch_pc = value_native(simulator, "pc");
-        simulator.modify(|io| io.set(instruction, board_diagnostic_instruction(fetch_pc)))?;
+        simulator.modify(|io| {
+            io.set(instruction, board_diagnostic_instruction(fetch_pc));
+            io.set(instruction_compressed, 0_u8);
+        })?;
         simulator.tick(clock)?;
         elapsed_cycles = cycle + 1;
 

@@ -1,4 +1,4 @@
-/// Overlapped in-order RV64I-subset core for the 125 MHz timing target.
+/// Overlapped in-order RV64IC-subset core for the 125 MHz timing target.
 ///
 /// Fetch/decode, synchronous register read, EX1, common completion/EX2, and
 /// writeback overlap. The LSU is one completion source rather than the owner of
@@ -6,13 +6,13 @@
 /// load-use plus two-stage shift/compare dependencies stall once.
 module Core #(
     param COMMIT_PAYLOAD   : bit = 1,
-    param SYNC_INSTR_MEMORY: bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
     param RELOCATE_LOW_DATA: bit = 0,
 ) (
     clk                   : input  clock    ,
     rst_n                 : input  reset    ,
     instr                 : input  logic<32>,
+    instr_is_compressed   : input  logic    ,
     instr_valid           : input  logic    ,
     data_rdata            : input  logic<64>,
     data_response_sequence: input  logic    ,
@@ -35,30 +35,43 @@ module Core #(
     commit_mem_wmask      : output logic<8> ,
     debug_x31             : output logic<64>,
 ) {
-    // Keep the redirect base, sequential offset, and instruction-memory address
-    // in separate registers. The next-PC addition therefore terminates before
-    // instruction decode while still presenting one fetch address per cycle.
-    // A taken branch updates the mostly-static base instead of feeding a wide
-    // redirect/hold/increment mux back into every PC bit.
     // This implementation exposes a 32-bit physical address space while the
     // architectural integer datapath and visible addresses remain XLEN-wide.
-    var fetch_base_q          : logic<32>;
-    var fetch_offset_q        : logic<32>;
-    var fetch_pc_q            : logic<32>;
-    var fetch_response_pc_q   : logic<32>;
-    var fetch_response_valid_q: logic    ;
-    var fetch_skid_pc_q       : logic<32>;
-    var fetch_skid_instr_q    : logic<32>;
-    var fetch_skid_valid_q    : logic    ;
-    var debug_x31_q           : logic<64>;
-
-    var fd_valid_q: logic    ;
-    var fd_pc_q   : logic<32>;
-    var fd_instr_q: logic<32>;
+    // FetchPacket is the registered boundary after instruction-line selection.
+    // DecodePacket keeps the original encoding beside its canonical RV64I form:
+    // the latter feeds the ordinary decoder while the former remains available
+    // for architectural traces and illegal-instruction trap values.
+    struct FetchPacket {
+        pc             : logic<32>,
+        raw_instruction: logic<32>,
+        is_compressed  : logic    ,
+        valid          : logic    ,
+    }
+    struct DecodePacket {
+        pc             : logic<32>,
+        instruction    : logic<32>,
+        raw_instruction: logic<32>,
+        is_compressed  : logic    ,
+        illegal        : logic    ,
+        valid          : logic    ,
+    }
+    var fetch_line_q      : logic       <29>;
+    var fetch_next_line_q : logic       <29>;
+    var fetch_parcel_q    : logic       <2> ;
+    var fetch_address     : logic       <32>;
+    var next_line_plus_one: logic       <29>;
+    var fetch_next_parcel : logic       <2> ;
+    var fetch_cross_line  : logic           ;
+    var debug_x31_q       : logic       <64>;
+    var fetch_packet      : FetchPacket     ;
+    var fetch_q           : FetchPacket     ;
+    var decode_packet     : DecodePacket    ;
+    var fd_q              : DecodePacket    ;
 
     var rx_valid_q        : logic    ;
     var rx_pc_q           : logic<32>;
-    var rx_instr_q        : logic<32>;
+    var rx_raw_instr_q    : logic<32>;
+    var rx_is_compressed_q: logic    ;
     var rx_rs1_q          : logic<5> ;
     var rx_rs2_q          : logic<5> ;
     var rx_rd_q           : logic<5> ;
@@ -94,7 +107,7 @@ module Core #(
 
     var ex_valid_q             : logic    ;
     var ex_pc_q                : logic<32>;
-    var ex_instr_q             : logic<32>;
+    var ex_raw_instr_q         : logic<32>;
     var ex_rd_q                : logic<5> ;
     var ex_alu_op_q            : logic<4> ;
     var ex_subtract_q          : logic    ;
@@ -112,6 +125,7 @@ module Core #(
     var ex_is_csr_q            : logic    ;
     var ex_csr_op_q            : logic<2> ;
     var ex_csr_use_imm_q       : logic    ;
+    var ex_csr_immediate_q     : logic<5> ;
     var ex_csr_write_q         : logic    ;
     var ex_csr_index_q         : logic<4> ;
     var ex_is_ecall_q          : logic    ;
@@ -134,7 +148,7 @@ module Core #(
 
     var cm_valid_q             : logic    ;
     var cm_pc_q                : logic<32>;
-    var cm_instr_q             : logic<32>;
+    var cm_raw_instr_q         : logic<32>;
     var cm_rd_q                : logic<5> ;
     var cm_write_enable_q      : logic    ;
     var cm_is_load_q           : logic    ;
@@ -175,7 +189,7 @@ module Core #(
 
     var wb_valid_q       : logic    ;
     var wb_pc_q          : logic<32>;
-    var wb_instr_q       : logic<32>;
+    var wb_raw_instr_q   : logic<32>;
     var wb_rd_q          : logic<5> ;
     var wb_write_enable_q: logic    ;
     var wb_result_q      : logic<64>;
@@ -188,56 +202,64 @@ module Core #(
     var rf_read_data_a : logic<64>;
     var rf_read_data_b : logic<64>;
 
-    var cm_forward_data        : logic<64>;
-    var forwarded_rs1          : logic<64>;
-    var forwarded_rs2          : logic<64>;
-    var rx_operand_a           : logic<64>;
-    var rx_operand_b           : logic<64>;
-    var alu_operand_a          : logic<64>;
-    var alu_operand_b          : logic<64>;
-    var lsu_address            : logic<32>;
-    var bypass_data            : logic<64>;
-    var execute_store_data     : logic<64>;
-    var ex_bypass_hit_rs1      : logic    ;
-    var ex_bypass_hit_rs2      : logic    ;
-    var redirect_sum           : logic<32>;
-    var cm_branch_equal        : logic    ;
-    var cm_branch_taken        : logic    ;
-    var ex_redirect_valid      : logic    ;
-    var branch_redirect_valid  : logic    ;
-    var redirect_valid         : logic    ;
-    var ex_redirect_target     : logic<32>;
-    var redirect_target        : logic<32>;
-    var redirect_pending_q     : logic    ;
-    var redirect_flush_wb_q    : logic    ;
-    var redirect_target_q      : logic<32>;
-    var execution_hazard       : logic    ;
-    var operand_match_ex       : logic    ;
-    var memory_wait            : logic    ;
-    var data_request_sequence_q: logic    ;
-    var csr_source             : logic<64>;
-    var ex_exception           : logic    ;
-    var ex_exception_cause     : logic<64>;
-    var ex_exception_value     : logic<64>;
-    var cm_trap_event          : logic    ;
-    var cm_mret_event          : logic    ;
-    var cm_system_redirect     : logic    ;
+    var cm_forward_data         : logic<64>;
+    var forwarded_rs1           : logic<64>;
+    var forwarded_rs2           : logic<64>;
+    var rx_operand_a            : logic<64>;
+    var rx_operand_b            : logic<64>;
+    var alu_operand_a           : logic<64>;
+    var alu_operand_b           : logic<64>;
+    var lsu_address             : logic<32>;
+    var bypass_data             : logic<64>;
+    var execute_store_data      : logic<64>;
+    var ex_bypass_hit_rs1       : logic    ;
+    var ex_bypass_hit_rs2       : logic    ;
+    var redirect_sum            : logic<32>;
+    var cm_branch_equal         : logic    ;
+    var cm_branch_taken         : logic    ;
+    var ex_redirect_valid       : logic    ;
+    var branch_redirect_valid   : logic    ;
+    var redirect_valid          : logic    ;
+    var ex_redirect_target      : logic<32>;
+    var redirect_target         : logic<32>;
+    var redirect_pending_q      : logic    ;
+    var redirect_flush_wb_q     : logic    ;
+    var redirect_target_q       : logic<32>;
+    var execution_hazard        : logic    ;
+    var operand_match_ex        : logic    ;
+    var memory_wait             : logic    ;
+    var data_request_sequence_q : logic    ;
+    var csr_source              : logic<64>;
+    var ex_exception            : logic    ;
+    var ex_exception_cause      : logic<64>;
+    var ex_exception_value      : logic<64>;
+    var cm_trap_event           : logic    ;
+    var cm_mret_event           : logic    ;
+    var cm_system_redirect      : logic    ;
+    var decompressed_instruction: logic<32>;
+    var compressed_illegal      : logic    ;
 
     inst registers: RegisterFile (
-        clk           : clk              ,
-        write_enable  : rf_write_enable  ,
-        write_address : wb_rd_q          ,
-        write_data    : wb_result_q      ,
-        read_enable   : !memory_wait     ,
-        read_address_a: fd_instr_q[19:15],
-        read_address_b: fd_instr_q[24:20],
-        read_data_a   : rf_read_data_a   ,
-        read_data_b   : rf_read_data_b   ,
+        clk           : clk                    ,
+        write_enable  : rf_write_enable        ,
+        write_address : wb_rd_q                ,
+        write_data    : wb_result_q            ,
+        read_enable   : !memory_wait           ,
+        read_address_a: fd_q.instruction[19:15],
+        read_address_b: fd_q.instruction[24:20],
+        read_data_a   : rf_read_data_a         ,
+        read_data_b   : rf_read_data_b         ,
     );
 
     inst decode_bus: DecodeBus;
     inst decoder: Decoder (
         decode: decode_bus,
+    );
+
+    inst compressed_decoder: CompressedDecoder (
+        compressed : fetch_q.raw_instruction[15:0],
+        instruction: decompressed_instruction     ,
+        illegal    : compressed_illegal           ,
     );
 
     inst csr_bus : CsrBus;
@@ -259,7 +281,33 @@ module Core #(
 
     always_comb {
         rf_write_enable  = wb_valid_q && wb_write_enable_q && (wb_rd_q != 5'd0);
-        decode_bus.instr = fd_instr_q;
+        decode_bus.instr = fd_q.instruction;
+
+        fetch_address                = {fetch_line_q, fetch_parcel_q, 1'b0};
+        next_line_plus_one           = fetch_next_line_q + 29'd1;
+        fetch_packet.pc              = fetch_address;
+        fetch_packet.raw_instruction = instr;
+        fetch_packet.is_compressed   = instr_is_compressed;
+        fetch_packet.valid           = instr_valid;
+        if fetch_packet.is_compressed {
+            fetch_next_parcel = fetch_parcel_q + 2'd1;
+            fetch_cross_line  = fetch_parcel_q == 2'd3;
+        } else {
+            fetch_next_parcel = fetch_parcel_q + 2'd2;
+            fetch_cross_line  = fetch_parcel_q[1];
+        }
+
+        decode_packet.pc              = fetch_q.pc;
+        decode_packet.instruction     = fetch_q.raw_instruction;
+        decode_packet.raw_instruction = fetch_q.raw_instruction;
+        decode_packet.is_compressed   = fetch_q.is_compressed;
+        decode_packet.illegal         = 1'b0;
+        decode_packet.valid           = fetch_q.valid;
+        if fetch_q.is_compressed {
+            decode_packet.instruction     = decompressed_instruction;
+            decode_packet.raw_instruction = {16'd0, fetch_q.raw_instruction[15:0]};
+            decode_packet.illegal         = compressed_illegal;
+        }
 
         // The preceding EX result is already registered in the common
         // completion stage. Reuse that copy for the fast EX bypass instead of
@@ -356,7 +404,7 @@ module Core #(
 
         csr_bus.index = ex_csr_index_q;
         if ex_csr_use_imm_q {
-            csr_source = {59'd0, ex_instr_q[19:15]};
+            csr_source = {59'd0, ex_csr_immediate_q};
         } else {
             csr_source = alu_operand_a;
         }
@@ -369,7 +417,7 @@ module Core #(
             ex_exception_cause = 64'd2;
         }
         if ex_illegal_q {
-            ex_exception_value = {32'h0000_0000, ex_instr_q};
+            ex_exception_value = {32'h0000_0000, ex_raw_instr_q};
         } else {
             ex_exception_value = 64'd0;
         }
@@ -442,7 +490,7 @@ module Core #(
             execution_hazard = 1'b1;
         }
 
-        pc = fetch_pc_q;
+        pc = fetch_address;
         // The optional board-memory relocation is registered together with
         // the architectural LSU address. It therefore does not put an
         // address-space mux between a pipeline register and every BRAM bank.
@@ -464,27 +512,31 @@ module Core #(
 
     always_ff (clk, rst_n) {
         if_reset {
-            fetch_base_q            = 64'h0000_0000_0000_0000;
-            fetch_offset_q          = 32'd4;
-            fetch_pc_q              = 64'h0000_0000_0000_0000;
-            fetch_response_pc_q     = 64'h0000_0000_0000_0000;
-            fetch_response_valid_q  = 1'b0;
-            fetch_skid_pc_q         = 64'h0000_0000_0000_0000;
-            fetch_skid_instr_q      = 32'h0000_0013;
-            fetch_skid_valid_q      = 1'b0;
+            fetch_line_q            = 29'd0;
+            fetch_next_line_q       = 29'd1;
+            fetch_parcel_q          = 2'd0;
             debug_x31_q             = 64'h0000_0000_0000_0000;
             redirect_pending_q      = 1'b0;
             redirect_flush_wb_q     = 1'b0;
             redirect_target_q       = 64'h0000_0000_0000_0000;
             data_request_sequence_q = 1'b0;
 
-            fd_valid_q = 1'b0;
-            fd_pc_q    = 64'h0000_0000_0000_0000;
-            fd_instr_q = 32'h0000_0013;
+            fetch_q.pc              = 32'h0000_0000;
+            fetch_q.raw_instruction = 32'h0000_0013;
+            fetch_q.is_compressed   = 1'b0;
+            fetch_q.valid           = 1'b0;
+
+            fd_q.pc              = 32'h0000_0000;
+            fd_q.instruction     = 32'h0000_0013;
+            fd_q.raw_instruction = 32'h0000_0013;
+            fd_q.is_compressed   = 1'b0;
+            fd_q.illegal         = 1'b0;
+            fd_q.valid           = 1'b0;
 
             rx_valid_q         = 1'b0;
             rx_pc_q            = 64'h0000_0000_0000_0000;
-            rx_instr_q         = 32'h0000_0013;
+            rx_raw_instr_q     = 32'h0000_0013;
+            rx_is_compressed_q = 1'b0;
             rx_rs1_q           = 5'd0;
             rx_rs2_q           = 5'd0;
             rx_rd_q            = 5'd0;
@@ -520,7 +572,7 @@ module Core #(
 
             ex_valid_q              = 1'b0;
             ex_pc_q                 = 64'h0000_0000_0000_0000;
-            ex_instr_q              = 32'h0000_0013;
+            ex_raw_instr_q          = 32'h0000_0013;
             ex_rd_q                 = 5'd0;
             ex_alu_op_q             = 4'd0;
             ex_subtract_q           = 1'b0;
@@ -538,6 +590,7 @@ module Core #(
             ex_is_csr_q             = 1'b0;
             ex_csr_op_q             = 2'b00;
             ex_csr_use_imm_q        = 1'b0;
+            ex_csr_immediate_q      = 5'd0;
             ex_csr_write_q          = 1'b0;
             ex_csr_index_q          = 4'd0;
             ex_is_ecall_q           = 1'b0;
@@ -557,7 +610,7 @@ module Core #(
 
             cm_valid_q              = 1'b0;
             cm_pc_q                 = 64'h0000_0000_0000_0000;
-            cm_instr_q              = 32'h0000_0013;
+            cm_raw_instr_q          = 32'h0000_0013;
             cm_rd_q                 = 5'd0;
             cm_write_enable_q       = 1'b0;
             cm_is_load_q            = 1'b0;
@@ -598,7 +651,7 @@ module Core #(
 
             wb_valid_q        = 1'b0;
             wb_pc_q           = 64'h0000_0000_0000_0000;
-            wb_instr_q        = 32'h0000_0013;
+            wb_raw_instr_q    = 32'h0000_0013;
             wb_rd_q           = 5'd0;
             wb_write_enable_q = 1'b0;
             wb_result_q       = 64'h0000_0000_0000_0000;
@@ -617,15 +670,6 @@ module Core #(
             commit_mem_wdata = 64'h0000_0000_0000_0000;
             commit_mem_wmask = 8'h00;
         } else {
-            // A rising-edge synchronous instruction memory returns the
-            // request sampled on the preceding edge. Retain that request PC
-            // beside the response. The BRAM runs every cycle; a stall saves
-            // the one unconsumed response in a skid register while the held PC
-            // makes subsequent BRAM reads repeat the next instruction.
-            if SYNC_INSTR_MEMORY {
-                fetch_response_pc_q    = fetch_pc_q;
-                fetch_response_valid_q = 1'b1;
-            }
             redirect_pending_q  = redirect_valid;
             redirect_flush_wb_q = branch_redirect_valid;
             if redirect_valid {
@@ -635,7 +679,7 @@ module Core #(
             commit_valid = wb_valid_q;
             if COMMIT_PAYLOAD {
                 commit_pc    = wb_pc_q;
-                commit_instr = wb_instr_q;
+                commit_instr = wb_raw_instr_q;
                 commit_rd    = 5'd0;
                 commit_data  = 64'h0000_0000_0000_0000;
                 if wb_write_enable_q && (wb_rd_q != 5'd0) {
@@ -672,23 +716,18 @@ module Core #(
                 rx_stalled_q      = 1'b1;
                 rx_stall_data_a_q = forwarded_rs1;
                 rx_stall_data_b_q = forwarded_rs2;
-                if SYNC_INSTR_MEMORY && fetch_response_valid_q && !fetch_skid_valid_q {
-                    fetch_skid_pc_q    = fetch_response_pc_q;
-                    fetch_skid_instr_q = instr;
-                    fetch_skid_valid_q = 1'b1;
-                }
             } else {
                 wb_valid_q = cm_valid_q && !cm_exception_q;
                 if COMMIT_PAYLOAD {
                     wb_pc_q        = cm_pc_q;
-                    wb_instr_q     = cm_instr_q;
+                    wb_raw_instr_q = cm_raw_instr_q;
                     wb_mem_we_q    = cm_is_store_q;
                     wb_mem_addr_q  = cm_lsu_address_q;
                     wb_mem_wdata_q = cm_lsu_wdata_q;
                     wb_mem_wmask_q = completion_bus.store_mask;
                 } else {
                     wb_pc_q        = 32'd0;
-                    wb_instr_q     = 32'd0;
+                    wb_raw_instr_q = 32'd0;
                     wb_mem_we_q    = 1'b0;
                     wb_mem_addr_q  = 32'd0;
                     wb_mem_wdata_q = 64'd0;
@@ -703,7 +742,7 @@ module Core #(
                 // MRET remains a normally retired instruction.
                 cm_valid_q         = ex_valid_q;
                 cm_pc_q            = ex_pc_q;
-                cm_instr_q         = ex_instr_q;
+                cm_raw_instr_q     = ex_raw_instr_q;
                 cm_rd_q            = ex_rd_q;
                 cm_write_enable_q  = ex_write_enable_q;
                 cm_is_load_q       = ex_is_load_q;
@@ -764,11 +803,11 @@ module Core #(
                 ex_bypass_q.store_data = !execution_hazard && ex_bypass_hit_rs2 && rx_is_store_q;
                 ex_bypass_q.redirect   = !execution_hazard && ex_bypass_hit_rs1 && rx_is_jalr_q;
 
-                ex_valid_q  = rx_valid_q;
-                ex_pc_q     = rx_pc_q;
-                ex_instr_q  = rx_instr_q;
-                ex_rd_q     = rx_rd_q;
-                ex_alu_op_q = rx_alu_op_q;
+                ex_valid_q     = rx_valid_q;
+                ex_pc_q        = rx_pc_q;
+                ex_raw_instr_q = rx_raw_instr_q;
+                ex_rd_q        = rx_rd_q;
+                ex_alu_op_q    = rx_alu_op_q;
                 // Decode subtraction before EX so the carry-chain input does
                 // not start behind a four-bit opcode equality comparator.
                 ex_subtract_q      = rx_alu_op_q == 4'd1;
@@ -788,6 +827,7 @@ module Core #(
                 ex_is_csr_q        = rx_is_csr_q;
                 ex_csr_op_q        = rx_csr_op_q;
                 ex_csr_use_imm_q   = rx_csr_use_imm_q;
+                ex_csr_immediate_q = rx_rs1_q;
                 ex_csr_write_q     = rx_csr_write_q;
                 ex_csr_index_q     = rx_csr_index_q;
                 ex_is_ecall_q      = rx_is_ecall_q;
@@ -796,7 +836,11 @@ module Core #(
                 ex_illegal_q       = rx_illegal_q;
                 if rx_is_jal_q || rx_is_jalr_q {
                     ex_operand_a_q = rx_pc_q;
-                    ex_operand_b_q = 64'd4;
+                    if rx_is_compressed_q {
+                        ex_operand_b_q = 64'd2;
+                    } else {
+                        ex_operand_b_q = 64'd4;
+                    }
                 } else {
                     ex_operand_a_q = rx_operand_a;
                     ex_operand_b_q = rx_operand_b;
@@ -811,15 +855,14 @@ module Core #(
                 ex_redirect_clear_lsb_q = rx_is_jalr_q;
 
                 if redirect_pending_q {
-                    fetch_base_q           = redirect_target_q;
-                    fetch_offset_q         = 32'd4;
-                    fetch_pc_q             = redirect_target_q;
-                    fd_valid_q             = 1'b0;
-                    fetch_response_valid_q = 1'b0;
-                    fetch_skid_valid_q     = 1'b0;
-                    rx_valid_q             = 1'b0;
-                    ex_valid_q             = 1'b0;
-                    cm_valid_q             = 1'b0;
+                    fetch_line_q      = redirect_target_q[31:3];
+                    fetch_next_line_q = redirect_target_q[31:3] + 29'd1;
+                    fetch_parcel_q    = redirect_target_q[2:1];
+                    fetch_q.valid     = 1'b0;
+                    fd_q.valid        = 1'b0;
+                    rx_valid_q        = 1'b0;
+                    ex_valid_q        = 1'b0;
+                    cm_valid_q        = 1'b0;
                     if redirect_flush_wb_q {
                         wb_valid_q = 1'b0;
                     }
@@ -829,27 +872,22 @@ module Core #(
                     // cycle. Kill younger work here so that delaying the CSR
                     // side effect does not let an instruction past the
                     // exception or MRET change architectural state.
-                    fd_valid_q             = 1'b0;
-                    fetch_response_valid_q = 1'b0;
-                    fetch_skid_valid_q     = 1'b0;
-                    rx_valid_q             = 1'b0;
-                    ex_valid_q             = 1'b0;
-                    rx_stalled_q           = 1'b0;
+                    fetch_q.valid = 1'b0;
+                    fd_q.valid    = 1'b0;
+                    rx_valid_q    = 1'b0;
+                    ex_valid_q    = 1'b0;
+                    rx_stalled_q  = 1'b0;
                 } else if execution_hazard {
                     ex_valid_q        = 1'b0;
                     rx_stalled_q      = 1'b1;
                     rx_stall_data_a_q = forwarded_rs1;
                     rx_stall_data_b_q = forwarded_rs2;
-                    if SYNC_INSTR_MEMORY && fetch_response_valid_q && !fetch_skid_valid_q {
-                        fetch_skid_pc_q    = fetch_response_pc_q;
-                        fetch_skid_instr_q = instr;
-                        fetch_skid_valid_q = 1'b1;
-                    }
                 } else {
                     rx_stalled_q       = 1'b0;
-                    rx_valid_q         = fd_valid_q;
-                    rx_pc_q            = fd_pc_q;
-                    rx_instr_q         = fd_instr_q;
+                    rx_valid_q         = fd_q.valid;
+                    rx_pc_q            = fd_q.pc;
+                    rx_raw_instr_q     = fd_q.raw_instruction;
+                    rx_is_compressed_q = fd_q.is_compressed;
                     rx_rs1_q           = decode_bus.rs1;
                     rx_rs2_q           = decode_bus.rs2;
                     rx_rd_q            = decode_bus.rd;
@@ -878,25 +916,16 @@ module Core #(
                     rx_is_ecall_q      = decode_bus.is_ecall;
                     rx_is_ebreak_q     = decode_bus.is_ebreak;
                     rx_is_mret_q       = decode_bus.is_mret;
-                    rx_illegal_q       = decode_bus.illegal;
+                    rx_illegal_q       = decode_bus.illegal || fd_q.illegal;
 
-                    if SYNC_INSTR_MEMORY && fetch_skid_valid_q {
-                        fd_valid_q         = 1'b1;
-                        fd_pc_q            = fetch_skid_pc_q;
-                        fd_instr_q         = fetch_skid_instr_q;
-                        fetch_skid_valid_q = 1'b0;
-                    } else if SYNC_INSTR_MEMORY {
-                        fd_valid_q = fetch_response_valid_q;
-                        fd_pc_q    = fetch_response_pc_q;
-                        fd_instr_q = instr;
-                    } else {
-                        fd_valid_q = instr_valid;
-                        fd_pc_q    = fetch_pc_q;
-                        fd_instr_q = instr;
-                    }
-                    if SYNC_INSTR_MEMORY || instr_valid {
-                        fetch_pc_q     = fetch_base_q + fetch_offset_q;
-                        fetch_offset_q = fetch_offset_q + 32'd4;
+                    fd_q    = decode_packet;
+                    fetch_q = fetch_packet;
+                    if fetch_packet.valid {
+                        if fetch_cross_line {
+                            fetch_line_q      = fetch_next_line_q;
+                            fetch_next_line_q = next_line_plus_one;
+                        }
+                        fetch_parcel_q = fetch_next_parcel;
                     }
                 }
             }

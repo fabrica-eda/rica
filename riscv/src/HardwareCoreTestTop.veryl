@@ -29,6 +29,7 @@ module HardwareCoreTestTop (
 ) {
     var cpu_rst_n                    : 'cpu    reset_async_low    ;
     var instruction                  : 'cpu    logic          <32>;
+    var instruction_compressed       : 'cpu    logic              ;
     var instruction_valid            : 'cpu    logic              ;
     var data_rdata                   : 'cpu    logic          <64>;
     var data_memory_addr             : 'cpu    logic          <64>;
@@ -46,6 +47,7 @@ module HardwareCoreTestTop (
         rst_n                  : cpu_rst_n                    ,
         pc                     : pc[31:0]                     ,
         instruction            : instruction                  ,
+        instruction_compressed : instruction_compressed       ,
         instruction_valid      : instruction_valid            ,
         memory_request_address : memory_instr_address         ,
         memory_response_address: memory_instr_response_address,
@@ -76,13 +78,13 @@ module HardwareCoreTestTop (
 
     inst core: Core #(
         COMMIT_PAYLOAD   : 1,
-        SYNC_INSTR_MEMORY: 0,
         SYNC_DATA_MEMORY : 1,
         RELOCATE_LOW_DATA: 1,
     ) (
         clk                   : clk_cpu               ,
         rst_n                 : cpu_rst_n             ,
         instr                 : instruction           ,
+        instr_is_compressed   : instruction_compressed,
         instr_valid           : instruction_valid     ,
         data_rdata            : data_rdata            ,
         data_response_sequence: data_response_sequence,

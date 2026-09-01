@@ -10,6 +10,36 @@ use verify_riscv::{ElfImage, core_source, run_elf};
 
 const DEFAULT_MAX_CYCLES: usize = 20_000;
 
+#[derive(Clone, Copy)]
+enum Act4Suite {
+    I,
+    Zca,
+}
+
+impl Act4Suite {
+    fn parse(value: &str) -> Result<Self, Box<dyn Error>> {
+        match value.to_ascii_lowercase().as_str() {
+            "i" => Ok(Self::I),
+            "zca" => Ok(Self::Zca),
+            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I or Zca").into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::I => "I",
+            Self::Zca => "Zca",
+        }
+    }
+
+    fn enabled_file(self) -> &'static str {
+        match self {
+            Self::I => "act4-rv64-enabled.txt",
+            Self::Zca => "act4-rv64-zca-enabled.txt",
+        }
+    }
+}
+
 fn checked_command(command: &mut Command) -> Result<(), Box<dyn Error>> {
     let printable = format!("{command:?}");
     let output = command.output()?;
@@ -75,7 +105,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
         checked_command(
             Command::new(&assembler)
                 .arg("-triple=riscv64-unknown-none-elf")
-                .arg("-mattr=+i,+zicsr,+zifencei")
+                .arg("-mattr=+i,+c,+zicsr,+zifencei")
                 .arg("-filetype=obj")
                 .arg("-I")
                 .arg(&tests)
@@ -97,19 +127,21 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(elfs)
 }
 
-fn read_enabled_tests(path: &Path) -> Result<BTreeSet<String>, Box<dyn Error>> {
+fn read_enabled_tests(path: &Path, suite: Act4Suite) -> Result<BTreeSet<String>, Box<dyn Error>> {
     let contents = fs::read_to_string(path)?;
     let mut enabled = BTreeSet::new();
+    let prefix = format!("{}-", suite.name());
     for (index, line) in contents.lines().enumerate() {
         let name = line.split('#').next().unwrap_or_default().trim();
         if name.is_empty() {
             continue;
         }
-        if !name.starts_with("I-") || !name.ends_with("-00") {
+        if !name.starts_with(&prefix) || !name.ends_with("-00") {
             return Err(format!(
-                "{}:{}: expected an ACT4 RV64I test stem such as I-add-00",
+                "{}:{}: expected an ACT4 RV64{} test stem beginning with {prefix}",
                 path.display(),
-                index + 1
+                index + 1,
+                suite.name(),
             )
             .into());
         }
@@ -120,7 +152,10 @@ fn read_enabled_tests(path: &Path) -> Result<BTreeSet<String>, Box<dyn Error>> {
     Ok(enabled)
 }
 
-fn act4_catalog(source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, Box<dyn Error>> {
+fn act4_catalog(
+    source_dir: &Path,
+    suite: Act4Suite,
+) -> Result<BTreeMap<String, PathBuf>, Box<dyn Error>> {
     if !source_dir.is_dir() {
         return Err(format!(
             "ACT4 source catalog {} is missing; run `git submodule update --init`",
@@ -129,6 +164,7 @@ fn act4_catalog(source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, Box<dyn 
         .into());
     }
     let mut catalog = BTreeMap::new();
+    let prefix = format!("{}-", suite.name());
     for entry in fs::read_dir(source_dir)? {
         let path = entry?.path();
         if path.extension() != Some(OsStr::new("S")) {
@@ -138,12 +174,17 @@ fn act4_catalog(source_dir: &Path) -> Result<BTreeMap<String, PathBuf>, Box<dyn 
             .file_stem()
             .and_then(OsStr::to_str)
             .ok_or_else(|| format!("invalid ACT4 test filename: {}", path.display()))?;
-        if stem.starts_with("I-") && stem.ends_with("-00") {
+        if stem.starts_with(&prefix) && stem.ends_with("-00") {
             catalog.insert(stem.to_owned(), path);
         }
     }
     if catalog.is_empty() {
-        return Err(format!("no ACT4 RV64I tests found in {}", source_dir.display()).into());
+        return Err(format!(
+            "no ACT4 RV64{} tests found in {}",
+            suite.name(),
+            source_dir.display()
+        )
+        .into());
     }
     Ok(catalog)
 }
@@ -181,12 +222,15 @@ fn run_act4(
     project: &Path,
     elf_dir: &Path,
     enabled_file: &Path,
+    suite: Act4Suite,
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let repository = project.parent().ok_or("riscv directory has no parent")?;
-    let source_dir = repository.join("third_party/riscv-arch-test/tests/rv64i/I");
-    let catalog = act4_catalog(&source_dir)?;
-    let enabled = read_enabled_tests(enabled_file)?;
+    let source_dir = repository
+        .join("third_party/riscv-arch-test/tests/rv64i")
+        .join(suite.name());
+    let catalog = act4_catalog(&source_dir, suite)?;
+    let enabled = read_enabled_tests(enabled_file, suite)?;
     let available = catalog.keys().cloned().collect::<BTreeSet<_>>();
     let unknown = enabled.difference(&available).cloned().collect::<Vec<_>>();
     if !unknown.is_empty() {
@@ -244,7 +288,8 @@ fn run_act4(
     }
 
     println!(
-        "ACT4 RV64I: {passed} passed, {ignored} ignored, {} failed ({} total)",
+        "ACT4 RV64{}: {passed} passed, {ignored} ignored, {} failed ({} total)",
+        suite.name(),
         failures.len(),
         catalog.len()
     );
@@ -260,11 +305,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
     let mut max_cycles = DEFAULT_MAX_CYCLES;
     let mut act4 = false;
+    let mut act4_suite = Act4Suite::I;
     let mut act4_elf_dir = project
         .parent()
         .unwrap()
         .join("third_party/riscv-arch-test/work/rica-rv64i/elfs");
-    let mut act4_enabled = project.join("tests/act4-rv64-enabled.txt");
+    let mut act4_enabled = None::<PathBuf>;
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--max-cycles" {
@@ -275,16 +321,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .parse()?;
         } else if argument == "--act4" {
             act4 = true;
+        } else if argument == "--act4-suite" {
+            let value = arguments.next().ok_or("--act4-suite requires I or Zca")?;
+            act4_suite =
+                Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
+            act4 = true;
         } else if argument == "--act4-elf-dir" {
             act4_elf_dir = arguments
                 .next()
                 .ok_or("--act4-elf-dir requires a value")?
                 .into();
         } else if argument == "--act4-enabled" {
-            act4_enabled = arguments
-                .next()
-                .ok_or("--act4-enabled requires a value")?
-                .into();
+            act4_enabled = Some(
+                arguments
+                    .next()
+                    .ok_or("--act4-enabled requires a value")?
+                    .into(),
+            );
         } else {
             requested_elfs.push(PathBuf::from(argument));
         }
@@ -293,7 +346,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         if !requested_elfs.is_empty() {
             return Err("positional ELF paths cannot be combined with --act4".into());
         }
-        return run_act4(project, &act4_elf_dir, &act4_enabled, max_cycles);
+        let act4_enabled =
+            act4_enabled.unwrap_or_else(|| project.join("tests").join(act4_suite.enabled_file()));
+        return run_act4(
+            project,
+            &act4_elf_dir,
+            &act4_enabled,
+            act4_suite,
+            max_cycles,
+        );
     }
     let elfs = if requested_elfs.is_empty() {
         bundled_elfs(project)?

@@ -1,4 +1,4 @@
-# Rica RV64I ACT4 self-checking ELF build configuration.
+# Rica RV64I plus Zca ACT4 self-checking ELF build configuration.
 name: rica-rv64i
 compiler_exe: clang-20
 objdump_exe: /usr/lib/llvm-20/bin/llvm-objdump

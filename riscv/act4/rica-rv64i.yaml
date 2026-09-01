@@ -4,14 +4,17 @@ $schema: config_schema.json#
 kind: architecture configuration
 type: fully configured
 name: rica-rv64i
-description: Rica RV64I machine-mode configuration used for ACT4
+description: Rica RV64I plus Zca machine-mode configuration used for ACT4
 implemented_extensions:
+  - { name: C, version: "= 2.0" }
   - { name: I, version: "= 2.1" }
+  - { name: Zca, version: "= 1.0.0" }
   - { name: Zicsr, version: "= 2.0" }
   - { name: Zifencei, version: "= 2.0.0" }
   - { name: Sm, version: "= 1.12.0" }
 
 params:
+  MUTABLE_MISA_C: false
   MXLEN: 64
   PRECISE_SYNCHRONOUS_EXCEPTIONS: true
   TRAP_ON_ECALL_FROM_M: true

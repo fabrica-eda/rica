@@ -34,6 +34,7 @@ module Top (
         clk                   : clk_cpu                     ,
         rst_n                 : core_rst_n                  ,
         instr                 : instruction                 ,
+        instr_is_compressed   : instruction[1:0] != 2'b11,
         instr_valid           : 1'b1                        ,
         data_rdata            : 64'h0000_0000_0000_0000     ,
         data_response_sequence: 1'b0                        ,

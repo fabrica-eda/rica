@@ -4,14 +4,19 @@ This directory contains only the CPU being developed and its reusable
 building blocks:
 
 - `src/PipelineInterfaces.veryl`: typed decode and execute stage contracts
-- `src/Decoder.veryl`: RV64I-subset instruction decoder
+- `src/CompressedDecoder.veryl`: RV64C/Zca integer decompressor to canonical
+  32-bit RV64I instructions
+- `src/Decoder.veryl`: canonical RV64I-subset instruction decoder
 - `src/ExecuteUnit.veryl`: two-slice carry-select integer ALU
-- `src/Core.veryl`: pipeline state, hazard control, forwarding, traps, and commit
+- `src/Core.veryl`: scalar one-wide pipeline state, hazard control, forwarding,
+  traps, and commit
 - `src/CsrFile.veryl`: machine-mode CSR and trap state
 - `src/RegisterFile.veryl`: synchronous two-read/one-write register-file
   candidate
 - `src/InstructionBuffer.veryl`: two-line CPU-side instruction buffer and
-  memory-response capture stage
+  halfword-addressable 32-bit instruction window
+- `src/CompressedDecoderTimingTop.veryl`: registered out-of-context timing
+  fixture for the decompressor alone
 - `src/HardwareMemory.veryl`: 256 KiB unified board BRAM running at half the
   CPU frequency
 - `src/Top.veryl`: 124.8 MHz ECP5 EVN PLL/LED bring-up wrapper
@@ -28,6 +33,11 @@ The nominal CPU timing target is 125 MHz (8.000 ns). The board clock is
 124.8 MHz (8.013 ns). Fmax is not accepted as a performance result by itself.
 The current overlapped implementation has:
 
+- a scalar, one-wide frontend: it accepts at most one 16- or 32-bit
+  instruction per clock and contains no dual-issue or superscalar logic
+- registered raw-fetch and decompression stages, with the PC advancing by two
+  or four bytes and 32-bit instructions supported across an eight-byte line
+  boundary
 - CPI 1 through consecutive dependent ALU instructions using registered EX
   bypasses
 - one localized wait for load-use, shift-use, and compare-use dependencies;
@@ -42,11 +52,12 @@ The current overlapped implementation has:
 - 64-bit architectural registers and data with a 32-bit physical address
   space
 
-The architectural regression currently commits 58 instructions in 102 clocks
-(1.759 CPI), including RV64 word operations, load-use and shift-use
+The architectural regression currently commits 58 instructions in 110 clocks
+(1.897 CPI), including RV64 word operations, load-use and shift-use
 dependencies, and taken BEQ, JAL, and JALR redirects. The independent RV64
-comparison regression completes 16 commits in 46 clocks; four immediately
-dependent SLT-to-branch pairs each pay the intended single wait.
+comparison ELF completes 16 commits in 51 clocks. The bundled ELF suite now
+contains seven programs; all seven pass the ordinary simulator, including the
+143-commit compressed test in 227 clocks.
 
 The EVN has a 12 MHz reference and an integer ECP5 PLL. The board configuration
 uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, and a 624 MHz VCO.
@@ -93,6 +104,12 @@ git submodule update --init
 cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --act4
 ```
 
+The same runner selects the 32-test Zca catalog and its independent enable
+list with `--act4-suite Zca`. Existing `--act4` invocations continue to select
+the RV64I catalog. This is runner/configuration plumbing only: official ACT4
+Zca ELFs have not yet been generated or executed locally because the required
+ACT4 generator toolchain is not available in the current environment.
+
 It also accepts externally generated self-checking ELFs. See
 `tests/README.md` for the `tohost` contract, ACT4 ELF directory option, and the
 exact implemented ISA subset.
@@ -120,14 +137,27 @@ cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- Top
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- HardwareTestTop
 ```
 
+To measure only the registered compressed-decode cone at 126 MHz, run the
+dedicated fixture. This is a decompressor check, not proof that the complete
+CPU meets the same frequency:
+
+```sh
+target/texo-git/bin/texo pnr riscv --top CompressedDecoderTimingTop \
+  --package CABGA381 --speed 8 --lpf riscv/core-126.lpf \
+  --allow-unconstrained-io --synthesis-goal-mhz 126 \
+  --output riscv/build/compressed-decoder-126.texo.json
+```
+
+The current fixture closes at +0.607 ns setup WNS and +0.323 ns hold WNS.
+
 `HardwareTestTop` adds 256 KiB of direct-JTAG-loadable unified true-dual-port BRAM,
 CPU run/reset control, and a `tohost` result mailbox. The first physical port
 serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
-the CPU-side instruction buffer consumes two 32-bit instructions from each
-line. After timing closure, routing, and packing
-`riscv/build/riscv-hardware-test-125-texo.bit`, program it and run the bundled RV64
-ELFs on the EVN with:
+the CPU-side instruction buffer exposes a halfword-aligned window spanning up
+to two adjacent lines. After timing closure, routing, and packing
+`riscv/build/riscv-hardware-test-125-texo.bit`, program it and run the seven
+bundled RV64 ELFs on the EVN with:
 
 ```sh
 cargo run --locked --offline --release -p verify-riscv \
@@ -152,9 +182,11 @@ cargo run --locked --offline --release -p verify-riscv \
   --bin hardware-riscv-tests -- --xvc HOST:PORT
 ```
 
-`--act4` selects all 51 pinned ACT4 RV64I ELFs. ER1 carries fixed 128-bit
-commands (8-byte masked memory writes, control, and response selection), while
-JTDO1 returns one stable selected response bit throughout each scan. ECP5's
+`--act4` selects all 51 pinned ACT4 RV64I ELFs;
+`--act4 --act4-suite Zca` selects previously generated Zca ELFs. ER1 carries
+fixed 128-bit commands (8-byte masked memory writes, control, and response
+selection), while JTDO1 returns one stable selected response bit throughout
+each scan. ECP5's
 registered JTDI/JSHIFT timing requires exactly 128 physical bits here; adding
 the dummy bit used by the former two-bit bridge misaligns this full frame.
 
@@ -182,7 +214,7 @@ target/texo-git/bin/texo pnr riscv --top HardwareTestTop --package CABGA381 --sp
   --lpf riscv/lfe5um5g-85f-evn.lpf \
   --pll-binding riscv/pll-12-to-124p8.json \
   --synthesis-goal-mhz 125 --jtagg-prefix jtag \
-  --placement-weight-exponent 2 \
+  --placement-weight-exponent 4 \
   --register-enable-fanout ff_core.csr_file.*=4 \
   --output riscv/build/riscv-hardware-test-125.texo.json
 ```
@@ -197,14 +229,15 @@ target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
 `f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). On the current
-256 KiB direct-JTAG wrapper maps to 16,461 ECP5 cells (13,545 implemented
-cells, including 136 DP16KD and one JTAGG). Placement weight exponent 2 closes
-124.8 MHz at +0.014 ns setup WNS, zero setup TNS, +0.290 ns hold WNS, and zero
-hold TNS with Texo 0.1.6.
+RV64C-capable 256 KiB direct-JTAG wrapper, placement weight exponent 4 closes
+the 125 MHz-targeted flow (124.8 MHz PLL clock) at +31 ps setup WNS, zero setup
+TNS, +290 ps hold WNS (WHS), and zero hold TNS. A clean repeat produced the
+same timing report and a byte-identical checkpoint.
 
-The Texo bitstream passes JTAG detection, SRAM programming, direct ER1 ELF
-upload, CPU execution, and 64-bit mailbox readback for all six bundled RV64
-ELFs and all 51 enabled ACT4 RV64I ELFs on the current 256 KiB wrapper at
-124.8 MHz through the Windows D2XX XVC transport.
+The previous physical EVN result covers the six legacy bundled RV64I ELFs and
+all 51 enabled ACT4 RV64I ELFs at 124.8 MHz through the Windows D2XX XVC
+transport. The newly added seventh `compressed.elf` passes simulation and the
+synchronous HardwareMemory RTL model, but has not yet been run on the physical
+EVN; no physical RV64C pass is claimed here.
 Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
 bitstream with the wrong device ID and configuration semantics.

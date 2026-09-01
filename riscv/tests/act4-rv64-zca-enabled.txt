@@ -1,0 +1,34 @@
+# Complete ACT4 RV64 Zca catalog at the pinned riscv-arch-test revision.
+# The runner fails if an enabled ELF is missing or does not self-check.
+Zca-c.add-00
+Zca-c.addi-00
+Zca-c.addi16sp-00
+Zca-c.addi4spn-00
+Zca-c.addiw-00
+Zca-c.addw-00
+Zca-c.and-00
+Zca-c.andi-00
+Zca-c.beqz-00
+Zca-c.bnez-00
+Zca-c.j-00
+Zca-c.jalr-00
+Zca-c.jr-00
+Zca-c.ld-00
+Zca-c.ldsp-00
+Zca-c.li-00
+Zca-c.lui-00
+Zca-c.lw-00
+Zca-c.lwsp-00
+Zca-c.mv-00
+Zca-c.nop-00
+Zca-c.or-00
+Zca-c.sd-00
+Zca-c.sdsp-00
+Zca-c.slli-00
+Zca-c.srai-00
+Zca-c.srli-00
+Zca-c.sub-00
+Zca-c.subw-00
+Zca-c.sw-00
+Zca-c.swsp-00
+Zca-c.xor-00

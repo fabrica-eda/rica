@@ -16,7 +16,7 @@ module CsrFile (
     var mstatus_q : logic<4> ;
     var mtvec_q   : logic<30>;
     var mscratch_q: logic<64>;
-    var mepc_q    : logic<30>;
+    var mepc_q    : logic<31>;
     var mcause_q  : logic<4> ;
     var mtval_q   : logic<32>;
 
@@ -30,14 +30,15 @@ module CsrFile (
                 csr.read_data[7]     = mstatus_q[1];
                 csr.read_data[12:11] = mstatus_q[3:2];
             }
-            // RV64, base integer ISA. MISA is read-only in this implementation.
+            // RV64 with the base integer and compressed ISAs. MISA is
+            // read-only because both extensions are fixed in this core.
             4'd2: {
-                csr.read_data = 64'h8000_0000_0000_0100;
+                csr.read_data = 64'h8000_0000_0000_0104;
                 csr.writable  = 1'b0;
             }
             4'd3: csr.read_data = {32'd0, mtvec_q, 2'b00};
             4'd4: csr.read_data = mscratch_q;
-            4'd5: csr.read_data = {32'd0, mepc_q, 2'b00};
+            4'd5: csr.read_data = {32'd0, mepc_q, 1'b0};
             4'd6: csr.read_data = {60'd0, mcause_q};
             4'd7: csr.read_data = {32'd0, mtval_q};
             // Standard read-only machine identity CSRs for hart zero.
@@ -69,9 +70,11 @@ module CsrFile (
         csr.legal    = csr.index != 4'd0;
         csr.writable = (csr.index == 4'd1) || ((csr.index >= 4'd3) && (csr.index <= 4'd7));
 
-        // Only direct-mode synchronous traps exist today. IALIGN is 32 bits.
+        // Only direct-mode synchronous traps exist today. C makes IALIGN 16
+        // bits, while mtvec retains its independently required 4-byte base
+        // alignment in direct mode.
         csr.trap_vector = {mtvec_q, 2'b00};
-        csr.return_pc   = {mepc_q, 2'b00};
+        csr.return_pc   = {mepc_q, 1'b0};
     }
 
     always_ff (clk, rst_n) {
@@ -133,16 +136,16 @@ module CsrFile (
 
     always_ff (clk, rst_n) {
         if_reset {
-            mepc_q = 30'd0;
+            mepc_q = 31'd0;
         } else if csr.trap_enter || (csr.write_enable && (csr.write_index == 4'd5) && (csr.write_op != 2'd3)) {
             if csr.trap_enter {
-                mepc_q = csr.trap_pc[31:2];
+                mepc_q = csr.trap_pc[31:1];
             } else if csr.write_op == 2'd0 {
-                mepc_q = csr.write_source[31:2];
+                mepc_q = csr.write_source[31:1];
             } else if csr.write_op == 2'd1 {
-                mepc_q = mepc_q | csr.write_source[31:2];
+                mepc_q = mepc_q | csr.write_source[31:1];
             } else {
-                mepc_q = mepc_q & ~csr.write_source[31:2];
+                mepc_q = mepc_q & ~csr.write_source[31:1];
             }
         }
     }

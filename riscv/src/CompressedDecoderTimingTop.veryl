@@ -1,0 +1,32 @@
+/// Registered out-of-context timing fixture for the RV64C decompressor.
+///
+/// A feedback LFSR keeps every compressed input bit active. The canonical
+/// instruction and legality flag terminate at registers, isolating exactly the
+/// combinational decompression cone from instruction memory and the ordinary
+/// RV64I decoder.
+module CompressedDecoderTimingTop (
+    clk   : input  clock    ,
+    result: output logic<32>,
+) {
+    var compressed_q : logic<16>;
+    var instruction  : logic<32>;
+    var illegal      : logic    ;
+    var instruction_q: logic<32>;
+    var illegal_q    : logic    ;
+
+    inst decoder: CompressedDecoder (
+        compressed : compressed_q,
+        instruction: instruction ,
+        illegal    : illegal     ,
+    );
+
+    always_comb {
+        result = instruction_q ^ {31'd0, illegal_q};
+    }
+
+    always_ff (clk) {
+        compressed_q  = {compressed_q[14:0], compressed_q[15] ^ compressed_q[13] ^ compressed_q[12] ^ compressed_q[10]};
+        instruction_q = instruction;
+        illegal_q     = illegal;
+    }
+}

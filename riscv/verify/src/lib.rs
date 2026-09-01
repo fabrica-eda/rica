@@ -6,9 +6,10 @@ use std::path::Path;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 9] = [
+const CORE_SOURCES: [&str; 10] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
+    "CompressedDecoder.veryl",
     "Decoder.veryl",
     "CsrFile.veryl",
     "ExecuteUnit.veryl",
@@ -88,9 +89,9 @@ impl ElfImage {
             }
         }
         let entry = elf.entry();
-        if entry & 3 != 0 {
+        if entry & 1 != 0 {
             return Err(format!(
-                "{} has entry 0x{entry:016x}, which is not word-aligned",
+                "{} has entry 0x{entry:016x}, which is not halfword-aligned",
                 path.display()
             )
             .into());
@@ -191,12 +192,14 @@ pub fn run_elf(
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");
+    let instruction_compressed = simulator.signal("instr_is_compressed");
     let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
     let data_response_sequence = simulator.signal("data_response_sequence");
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
+        io.set(instruction_compressed, 0_u8);
         io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
         io.set(data_response_sequence, 0_u8);
@@ -220,6 +223,10 @@ pub fn run_elf(
         let memory_read_data = image.read_doubleword(data_address);
         simulator.modify(|io| {
             io.set(instruction, fetched_instruction);
+            io.set(
+                instruction_compressed,
+                u8::from(fetched_instruction & 0b11 != 0b11),
+            );
             io.set(data_rdata, memory_read_data);
         })?;
         simulator.tick(clock)?;

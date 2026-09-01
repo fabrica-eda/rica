@@ -21,6 +21,36 @@ const FRAME_VERSION: u8 = 1;
 type MemoryRange = (u32, usize, usize);
 type HardwareMemoryImage = (Vec<u8>, Vec<MemoryRange>);
 
+#[derive(Clone, Copy)]
+enum Act4Suite {
+    I,
+    Zca,
+}
+
+impl Act4Suite {
+    fn parse(value: &str) -> Result<Self, Box<dyn Error>> {
+        match value.to_ascii_lowercase().as_str() {
+            "i" => Ok(Self::I),
+            "zca" => Ok(Self::Zca),
+            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I or Zca").into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::I => "I",
+            Self::Zca => "Zca",
+        }
+    }
+
+    fn enabled_file(self) -> &'static str {
+        match self {
+            Self::I => "act4-rv64-enabled.txt",
+            Self::Zca => "act4-rv64-zca-enabled.txt",
+        }
+    }
+}
+
 fn checked_command(command: &mut Command) -> Result<(), Box<dyn Error>> {
     let printable = format!("{command:?}");
     let output = command.output()?;
@@ -86,7 +116,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
         checked_command(
             Command::new(&assembler)
                 .arg("-triple=riscv64-unknown-none-elf")
-                .arg("-mattr=+i,+zicsr,+zifencei")
+                .arg("-mattr=+i,+c,+zicsr,+zifencei")
                 .arg("-filetype=obj")
                 .arg("-I")
                 .arg(&tests)
@@ -108,12 +138,13 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(elfs)
 }
 
-fn act4_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let enabled_path = project.join("tests/act4-rv64-enabled.txt");
+fn act4_elfs(project: &Path, suite: Act4Suite) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let enabled_path = project.join("tests").join(suite.enabled_file());
     let elf_dir = project
         .parent()
         .ok_or("riscv directory has no parent")?
-        .join("third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i/I");
+        .join("third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i")
+        .join(suite.name());
     let mut elfs = Vec::new();
     for line in fs::read_to_string(&enabled_path)?.lines() {
         let name = line.trim();
@@ -553,6 +584,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut expected_tohost = 1_u64;
     let mut program = true;
     let mut act4 = false;
+    let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
     let mut bitstream = project.join("build/riscv-hardware-test-125-texo.bit");
     let mut requested_elfs = Vec::new();
@@ -575,6 +607,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if argument == "--no-program" {
             program = false;
         } else if argument == "--act4" {
+            act4 = true;
+        } else if argument == "--act4-suite" {
+            let value = arguments.next().ok_or("--act4-suite requires I or Zca")?;
+            act4_suite =
+                Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
             act4 = true;
         } else if argument == "--xvc" {
             xvc_address = Some(
@@ -617,7 +654,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("positional ELF paths cannot be combined with --act4".into());
     }
     let elfs = if act4 {
-        act4_elfs(project)?
+        act4_elfs(project, act4_suite)?
     } else if requested_elfs.is_empty() {
         bundled_elfs(project)?
     } else {
