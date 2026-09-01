@@ -182,6 +182,22 @@ cargo run --locked --offline --release -p verify-riscv \
   --bin hardware-riscv-tests -- --xvc HOST:PORT
 ```
 
+`tools/windows_d2xx_xvc.py` provides that bridge without replacing the
+FT2232H's Windows D2XX driver. It uses only Python's standard library and
+`ftd2xx.dll`, validates that the selected device is interface A of an
+FT2232H, and defaults to loopback-only listening. For WSL, obtain the Windows
+gateway address with `ip route show default`, then start the script from
+Windows PowerShell with that address explicitly:
+
+```powershell
+python.exe \\wsl.localhost\DISTRO\path\to\rica\riscv\tools\windows_d2xx_xvc.py `
+  --listen WSL_GATEWAY --port 3721
+```
+
+Use the same `WSL_GATEWAY:3721` with `--xvc`. Do not bind the bridge to
+`0.0.0.0`; JTAG access must remain limited to the WSL virtual network or
+loopback.
+
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;
 `--act4 --act4-suite Zca` selects previously generated Zca ELFs. ER1 carries
 fixed 128-bit commands (8-byte masked memory writes, control, and response
@@ -210,12 +226,13 @@ Use the same PLL binding for the Texo flow:
 cargo install --git https://github.com/fabrica-eda/texo.git \
   --rev f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d \
   --root target/texo-git --locked texo-cli
-target/texo-git/bin/texo pnr riscv --top HardwareTestTop --package CABGA381 --speed 8 \
+target/texo-git/bin/texo pnr riscv --top HardwareTestTop \
+  --device LFE5UM5G-85F --package CABGA381 --speed 8 \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
   --pll-binding riscv/pll-12-to-124p8.json \
   --synthesis-goal-mhz 125 --jtagg-prefix jtag \
-  --placement-weight-exponent 4 \
-  --register-enable-fanout ff_core.csr_file.*=4 \
+  --placement-weight-exponent 5 \
+  --register-enable-fanout 'ff_core.csr_file.*=4' \
   --output riscv/build/riscv-hardware-test-125.texo.json
 ```
 
@@ -229,15 +246,21 @@ target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
 `f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). On the current
-RV64C-capable 256 KiB direct-JTAG wrapper, placement weight exponent 4 closes
-the 125 MHz-targeted flow (124.8 MHz PLL clock) at +31 ps setup WNS, zero setup
-TNS, +290 ps hold WNS (WHS), and zero hold TNS. A clean repeat produced the
-same timing report and a byte-identical checkpoint.
+RV64C-capable 256 KiB direct-JTAG wrapper, placement weight exponent 5 closes
+the 125 MHz-targeted flow (124.8 MHz PLL clock) at +205 ps setup WNS, zero
+setup TNS, +290 ps hold WNS (WHS), and zero hold TNS. The implemented design
+contains 14,465 cells, 15,827 nets, and 196,690 routed PIPs.
+STA checks 9,627 of 10,147 endpoints; the 520 unchecked endpoints belong to
+the separate JTCK/JTAG shift domain, while the CPU, memory, and related-clock
+boundaries are checked. This nextpnr-correlated model adds no separate PLL
+jitter or clock uncertainty, so +205 ps is timing-model closure rather than an
+independent silicon guardband.
 
-The previous physical EVN result covers the six legacy bundled RV64I ELFs and
-all 51 enabled ACT4 RV64I ELFs at 124.8 MHz through the Windows D2XX XVC
-transport. The newly added seventh `compressed.elf` passes simulation and the
-synchronous HardwareMemory RTL model, but has not yet been run on the physical
-EVN; no physical RV64C pass is claimed here.
-Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
-bitstream with the wrong device ID and configuration semantics.
+That timing-closed bitstream physically passes all seven bundled ELFs,
+including `compressed.elf`, and all 51 enabled ACT4 RV64I ELFs at 124.8 MHz
+through the Windows D2XX XVC transport. Official ACT4 Zca ELFs have not yet
+been generated locally, so the bundled compressed test is the current
+physical RV64C coverage; no ACT4 Zca pass is claimed.
+The diagnostic nextpnr exporter must use `--um5g-85k`, not `--85k`: the latter
+targets LFE5U and produces a bitstream with the wrong device ID and
+configuration semantics.

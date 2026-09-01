@@ -326,6 +326,165 @@ struct XvcClient {
     max_bits: usize,
 }
 
+#[derive(Clone, Copy)]
+struct XvcResponseObservation {
+    value: bool,
+    one_count: usize,
+}
+
+impl XvcResponseObservation {
+    fn from_bits(bits: &[bool]) -> Self {
+        let one_count = bits.iter().filter(|&&bit| bit).count();
+        // A selector response is held for the whole 128-bit scan.  Majority
+        // voting keeps the decoded fields useful if a transport/timing glitch
+        // affects only a few samples; the non-uniform response is still
+        // reported separately and still fails the test.
+        let value = if one_count * 2 == bits.len() {
+            bits.first().copied().unwrap_or(false)
+        } else {
+            one_count * 2 > bits.len()
+        };
+        Self { value, one_count }
+    }
+
+    fn is_uniform(self) -> bool {
+        self.one_count == 0 || self.one_count == PHYSICAL_SCAN_BITS
+    }
+}
+
+fn response_value(responses: &[XvcResponseObservation], first: usize, width: usize) -> u64 {
+    responses[first..first + width]
+        .iter()
+        .enumerate()
+        .fold(0_u64, |value, (bit, response)| {
+            value | (u64::from(response.value) << bit)
+        })
+}
+
+fn response_name(group: usize, load_response_count: usize) -> String {
+    if group < load_response_count {
+        format!("load[{group}]")
+    } else {
+        format!("result[{}]", group - load_response_count)
+    }
+}
+
+fn xvc_mismatch_report(checks: &[(usize, bool)], actual: &[bool]) -> Option<String> {
+    if checks.len() != actual.len() {
+        return Some(format!(
+            "internal XVC result length mismatch: collected {} of {} checked bits",
+            actual.len(),
+            checks.len()
+        ));
+    }
+
+    let mismatch_indices = checks
+        .iter()
+        .zip(actual)
+        .enumerate()
+        .filter_map(|(index, ((_, expected), actual))| (expected != actual).then_some(index))
+        .collect::<Vec<_>>();
+    let &first_mismatch = mismatch_indices.first()?;
+    let response_count = checks.len().div_ceil(PHYSICAL_SCAN_BITS);
+    let responses = actual
+        .chunks(PHYSICAL_SCAN_BITS)
+        .map(XvcResponseObservation::from_bits)
+        .collect::<Vec<_>>();
+    let mut mismatched_responses = vec![false; response_count];
+    for &index in &mismatch_indices {
+        mismatched_responses[index / PHYSICAL_SCAN_BITS] = true;
+    }
+    let mismatched_response_count = mismatched_responses
+        .iter()
+        .filter(|&&mismatch| mismatch)
+        .count();
+    let (scan_bit, expected) = checks[first_mismatch];
+    let mut report = format!(
+        "XVC TDO mismatch: {}/{} checked bits across {}/{} selector-response groups; first at scan bit {scan_bit} (check {first_mismatch}/{}): expected {}, got {}",
+        mismatch_indices.len(),
+        checks.len(),
+        mismatched_response_count,
+        response_count,
+        checks.len(),
+        u8::from(expected),
+        u8::from(actual[first_mismatch]),
+    );
+
+    const LOAD_RESPONSE_COUNT: usize = 10;
+    const RESULT_RESPONSE_COUNT: usize = 94;
+    if checks.len() == (LOAD_RESPONSE_COUNT + RESULT_RESPONSE_COUNT) * PHYSICAL_SCAN_BITS {
+        let load = &responses[..LOAD_RESPONSE_COUNT];
+        let result = &responses[LOAD_RESPONSE_COUNT..];
+        let load_sequence = response_value(load, 2, 8);
+        let magic = response_value(result, 0, 8);
+        let version = response_value(result, 8, 8);
+        let flags = response_value(result, 16, 6);
+        let run_sequence = response_value(result, 22, 8);
+        // emit_test appends the 64 tohost response bits after 30 preceding
+        // result selectors, so result[30..=93] is the final actual tohost.
+        let actual_tohost = response_value(result, 30, 64);
+        write!(
+            report,
+            "\ndecoded actual responses: load(write_busy={}, rejected={}, sequence=0x{load_sequence:02x}) result(magic=0x{magic:02x}, version=0x{version:02x}, flags=0x{flags:02x}, sequence=0x{run_sequence:02x}, tohost=0x{actual_tohost:016x})",
+            u8::from(load[0].value),
+            u8::from(load[1].value),
+        )
+        .unwrap();
+
+        let mismatched = mismatched_responses
+            .iter()
+            .enumerate()
+            .filter_map(|(group, &mismatch)| mismatch.then_some(group))
+            .collect::<Vec<_>>();
+        report.push_str("\nmismatched responses: ");
+        for (position, &group) in mismatched.iter().take(8).enumerate() {
+            if position != 0 {
+                report.push_str(", ");
+            }
+            let expected = checks[group * PHYSICAL_SCAN_BITS].1;
+            let observation = responses[group];
+            write!(
+                report,
+                "{}={} (expected {})",
+                response_name(group, LOAD_RESPONSE_COUNT),
+                u8::from(observation.value),
+                u8::from(expected),
+            )
+            .unwrap();
+        }
+        if mismatched.len() > 8 {
+            write!(report, ", ... (+{} more)", mismatched.len() - 8).unwrap();
+        }
+
+        let nonuniform = responses
+            .iter()
+            .enumerate()
+            .filter(|(_, observation)| !observation.is_uniform())
+            .collect::<Vec<_>>();
+        if !nonuniform.is_empty() {
+            report.push_str("\nnon-uniform responses (decoded by majority): ");
+            for (position, &(group, observation)) in nonuniform.iter().take(8).enumerate() {
+                if position != 0 {
+                    report.push_str(", ");
+                }
+                write!(
+                    report,
+                    "{}={}/{} ones",
+                    response_name(group, LOAD_RESPONSE_COUNT),
+                    observation.one_count,
+                    PHYSICAL_SCAN_BITS,
+                )
+                .unwrap();
+            }
+            if nonuniform.len() > 8 {
+                write!(report, ", ... (+{} more)", nonuniform.len() - 8).unwrap();
+            }
+        }
+    }
+
+    Some(report)
+}
+
 impl XvcClient {
     fn connect(address: &str) -> Result<Self, Box<dyn Error>> {
         let mut stream = TcpStream::connect(address)?;
@@ -351,7 +510,10 @@ impl XvcClient {
             return Err("XVC server reported a zero-bit shift limit".into());
         }
 
-        let requested_period_ns = 167_u32;
+        // Request the integer period immediately below 6 MHz. The XVC server
+        // chooses a clock no faster than requested and reports the FT2232H's
+        // actual 167 ns period, without cascading down to 5 MHz.
+        let requested_period_ns = 166_u32;
         let mut command = Vec::with_capacity(11);
         command.extend_from_slice(b"settck:");
         command.extend_from_slice(&requested_period_ns.to_le_bytes());
@@ -378,6 +540,7 @@ impl XvcClient {
             return Err("internal XVC TMS/TDI length mismatch".into());
         }
         let mut check = 0_usize;
+        let mut actual_checks = Vec::with_capacity(bus.checks.len());
         for start in (0..bus.tms.len()).step_by(self.max_bits) {
             let end = bus.tms.len().min(start + self.max_bits);
             let bit_count = end - start;
@@ -392,26 +555,21 @@ impl XvcClient {
             let mut tdo = vec![0_u8; bit_count.div_ceil(8)];
             self.stream.read_exact(&mut tdo)?;
 
-            while let Some(&(bit, expected)) = bus.checks.get(check) {
+            while let Some(&(bit, _expected)) = bus.checks.get(check) {
                 if bit >= end {
                     break;
                 }
                 let local = bit - start;
                 let actual = tdo[local / 8] & (1 << (local % 8)) != 0;
-                if actual != expected {
-                    return Err(format!(
-                        "XVC TDO mismatch at scan bit {bit} (check {check}/{}, local bit {local}): expected {}, got {}",
-                        bus.checks.len(),
-                        u8::from(expected),
-                        u8::from(actual)
-                    )
-                    .into());
-                }
+                actual_checks.push(actual);
                 check += 1;
             }
         }
         if check != bus.checks.len() {
             return Err("internal XVC check position exceeds generated shifts".into());
+        }
+        if let Some(report) = xvc_mismatch_report(&bus.checks, &actual_checks) {
+            return Err(report.into());
         }
         Ok(())
     }
@@ -682,4 +840,72 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("RV64 hardware tests: {}/{} passed", elfs.len(), elfs.len());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOAD_RESPONSES: usize = 10;
+    const RESULT_RESPONSES: usize = 94;
+
+    fn set_value(responses: &mut [bool], first: usize, width: usize, value: u64) {
+        for bit in 0..width {
+            responses[first + bit] = value & (1_u64 << bit) != 0;
+        }
+    }
+
+    fn standard_responses(tohost: u64) -> Vec<bool> {
+        let mut responses = vec![false; LOAD_RESPONSES + RESULT_RESPONSES];
+        set_value(&mut responses, 2, 8, 0xa5);
+        let result = &mut responses[LOAD_RESPONSES..];
+        set_value(result, 0, 8, 0x52);
+        set_value(result, 8, 8, 0x04);
+        set_value(result, 16, 6, 0x07);
+        set_value(result, 22, 8, 0x5a);
+        set_value(result, 30, 64, tohost);
+        responses
+    }
+
+    fn expand_responses(responses: &[bool]) -> Vec<bool> {
+        responses
+            .iter()
+            .flat_map(|&value| std::iter::repeat_n(value, PHYSICAL_SCAN_BITS))
+            .collect()
+    }
+
+    #[test]
+    fn matching_xvc_responses_produce_no_report() {
+        let actual = expand_responses(&standard_responses(1));
+        let checks = actual.iter().copied().enumerate().collect::<Vec<_>>();
+        assert!(xvc_mismatch_report(&checks, &actual).is_none());
+    }
+
+    #[test]
+    fn standard_xvc_report_decodes_actual_tohost() {
+        let expected = expand_responses(&standard_responses(1));
+        let actual = expand_responses(&standard_responses(3));
+        let checks = expected.iter().copied().enumerate().collect::<Vec<_>>();
+        let report = xvc_mismatch_report(&checks, &actual).unwrap();
+
+        assert!(report.contains("128/13312 checked bits across 1/104"));
+        assert!(report.contains("load(write_busy=0, rejected=0, sequence=0xa5)"));
+        assert!(report.contains("magic=0x52, version=0x04, flags=0x07, sequence=0x5a"));
+        assert!(report.contains("tohost=0x0000000000000003"));
+        assert!(report.contains("result[31]=1 (expected 0)"));
+    }
+
+    #[test]
+    fn nonuniform_xvc_response_is_reported_and_still_fails() {
+        let expected = expand_responses(&standard_responses(1));
+        let mut actual = expected.clone();
+        let result_bit_one_group = LOAD_RESPONSES + 31;
+        actual[result_bit_one_group * PHYSICAL_SCAN_BITS] = true;
+        let checks = expected.iter().copied().enumerate().collect::<Vec<_>>();
+        let report = xvc_mismatch_report(&checks, &actual).unwrap();
+
+        assert!(report.contains("non-uniform responses (decoded by majority)"));
+        assert!(report.contains("result[31]=1/128 ones"));
+        assert!(report.contains("tohost=0x0000000000000001"));
+    }
 }

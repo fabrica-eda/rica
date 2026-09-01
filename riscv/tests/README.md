@@ -50,11 +50,12 @@ Each ELF must fit in the 4 KiB reset-trampoline window
 
 The runner writes generated SVF files under `build/hardware-rv64`. A successful
 result covers the entire board path: JTAGG ER1, 128-bit command transport,
-BRAM loading, PLL/reset, RV64 execution, and `tohost` readback. The timing-
-closed 256 KiB wrapper has physically passed the six legacy bundled RV64I
-smoke tests and all 51 enabled ACT4 RV64I tests on the EVN at 124.8 MHz. The
-seventh test, `compressed.elf`, passes the ordinary simulator and synchronous
-HardwareMemory RTL model but has not yet been run on the physical EVN.
+BRAM loading, PLL/reset, RV64 execution, and `tohost` readback. The
+timing-closed 256 KiB wrapper has physically passed all seven bundled
+RV64I/RV64C smoke tests and all 51 enabled ACT4 RV64I tests on the EVN at
+124.8 MHz. This includes the redirect-to-load/load-use regression in
+`control.elf`. Official ACT4 Zca ELFs have not yet been generated locally, so
+the bundled `compressed.elf` is the current physical compressed-ISA coverage.
 
 ## Architectural test integration
 
@@ -120,7 +121,8 @@ silently alter their instruction streams. They currently cover:
 - `FENCE.I` for the current uncached instruction interface
 - `ECALL`, `EBREAK`, `MRET`, illegal-instruction traps, and the implemented
   machine-mode CSRs through the Zicsr register and immediate forms
-- dependent ALU forwarding and a load-use dependency
+- dependent ALU forwarding, a load-use dependency, and a taken redirect whose
+  target load immediately feeds a dependent branch
 - explicit RV64C integer arithmetic, shifts, loads/stores, branches, jumps,
   `C.EBREAK`, stack-pointer forms, and mixed 16/32-bit fetches
 - a 32-bit instruction beginning at `PC[1] = 1`, including one that crosses an
