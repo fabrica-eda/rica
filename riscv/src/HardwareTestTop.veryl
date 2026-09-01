@@ -30,6 +30,7 @@ module HardwareTestTop (
     var command_frame_low  : 'cpu logic<64>;
     var command_frame_high : 'cpu logic<64>;
     var response_selector_q: 'cpu logic<8> ;
+    var counter_selector_q : 'cpu logic<3> ;
     var response_bank      : 'cpu logic<32>;
     var response_mux_16    : 'cpu logic<16>;
     var response_mux_8     : 'cpu logic<8> ;
@@ -74,6 +75,7 @@ module HardwareTestTop (
     var halted                       : 'cpu    logic    ;
     var commit_valid                 : 'cpu    logic    ;
     var debug_x31                    : 'cpu    logic<64>;
+    var debug_counter_data           : 'cpu    logic<64>;
     var unused_commit_pc             : 'cpu    logic<64>;
     var unused_commit_instr          : 'cpu    logic<32>;
     var unused_commit_rd             : 'cpu    logic<5> ;
@@ -153,6 +155,9 @@ module HardwareTestTop (
         instr_valid           : instruction_valid      ,
         data_rdata            : data_rdata             ,
         data_response_sequence: data_response_sequence ,
+        counter_freeze        : result_valid_q         ,
+        debug_counter_index   : counter_selector_q     ,
+        debug_counter_data    : debug_counter_data     ,
         pc                    : cpu_pc                 ,
         data_addr             : data_addr              ,
         data_memory_addr      : data_memory_addr       ,
@@ -195,12 +200,14 @@ module HardwareTestTop (
         case response_selector_q[7:5] {
             3'd0   : response_bank = {
                 last_sequence_q, 2'b00, command_error_q, write_busy_q || (memory_debug_write_q != 2'd0), halted,
-                result_valid_q, run_q, pll_locked, 8'h04, 8'h52
+                result_valid_q, run_q, pll_locked, 8'h05, 8'h52
             };
             3'd1   : response_bank = result_q[31:0];
             3'd2   : response_bank = result_q[63:32];
             3'd3   : response_bank = debug_x31[31:0];
             3'd4   : response_bank = debug_x31[63:32];
+            3'd5   : response_bank = debug_counter_data[31:0];
+            3'd6   : response_bank = debug_counter_data[63:32];
             default: {}
         }
         // A static five-level tree avoids the unsupported dynamic packed
@@ -257,6 +264,7 @@ module HardwareTestTop (
             command_error_q      = 1'b0;
             last_sequence_q      = 8'h00;
             response_selector_q  = 8'd0;
+            counter_selector_q   = 3'd0;
             activity_q           = 24'h000000;
             memory_debug_write_q = 2'd0;
             memory_debug_addr_q  = 32'h0000_0000;
@@ -344,13 +352,21 @@ module HardwareTestTop (
                         }
                         // SELECT changes the stable ER1 response bit without
                         // disturbing the completed transaction sequence.
-                        4'd4   : response_selector_q = command_frame_low[31:24];
-                        default: command_error_q     = 1'b1;
+                        4'd4: {
+                            response_selector_q = command_frame_low[31:24];
+                            counter_selector_q  = command_frame_low[34:32];
+                        }
+                        default: command_error_q = 1'b1;
                     }
                 }
             }
 
-            if run_q && data_we && (data_addr[31:0] == tohost_address_q) {
+            // Capture only after the synchronous memory acknowledges the
+            // terminal store. The same edge is its CM retirement event, so
+            // the old result_valid still lets minstret include that store and
+            // memory-wait include every preceding wait cycle before freezing.
+            if run_q && data_we && (data_addr[31:0] == tohost_address_q)
+                && (data_response_sequence == data_request_sequence) {
                 result_q       = data_wdata;
                 result_valid_q = data_wdata != 64'h0000_0000_0000_0000;
             }

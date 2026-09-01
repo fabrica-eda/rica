@@ -11,6 +11,9 @@ building blocks:
 - `src/Core.veryl`: scalar one-wide pipeline state, hazard control, forwarding,
   traps, and commit
 - `src/CsrFile.veryl`: machine-mode CSR and trap state
+- `src/PerformanceCounter64.veryl`: exact split-carry 64-bit event counter
+- `src/PerformanceEventCounters4.veryl`: four 64-bit pipeline-event counters
+  sharing one selected-word incrementer
 - `src/RegisterFile.veryl`: synchronous two-read/one-write register-file
   candidate
 - `src/InstructionBuffer.veryl`: two-line CPU-side instruction buffer and
@@ -20,8 +23,7 @@ building blocks:
 - `src/HardwareMemory.veryl`: 256 KiB unified board BRAM running at half the
   CPU frequency
 - `src/Top.veryl`: 124.8 MHz ECP5 EVN PLL/LED bring-up wrapper
-- `verify/`: architectural, synthesis, mapping-equivalence, and optional
-  post-map regressions
+- `verify/`: architectural, synthesis, and mapping-equivalence regressions
 
 The frozen non-overlapped `Core250` timing stress design has moved to Texo's
 `examples/core250-qor`; it is no longer the CPU architecture or QoR fixture
@@ -42,6 +44,8 @@ The current overlapped implementation has:
   bypasses
 - one localized wait for load-use, shift-use, and compare-use dependencies;
   independent shifts and comparisons still enter every clock
+- one empty EX predecessor for each CSR instruction, keeping architectural
+  CSR ordering and counter carry logic out of the ordinary ALU path
 - response-token-driven data-memory waits; no fixed load/store cycle count
 - a 124.8 MHz CPU domain and 62.4 MHz BRAM domain with registered bundled-data
   crossings
@@ -56,8 +60,24 @@ The architectural regression currently commits 58 instructions in 110 clocks
 (1.897 CPI), including RV64 word operations, load-use and shift-use
 dependencies, and taken BEQ, JAL, and JALR redirects. The independent RV64
 comparison ELF completes 16 commits in 51 clocks. The bundled ELF suite now
-contains seven programs; all seven pass the ordinary simulator, including the
-143-commit compressed test in 227 clocks.
+contains eight programs; all eight pass both the ordinary simulator and both
+coincident-edge serializations of the dual-clock HardwareMemory model. This
+includes the 143-commit compressed test in 234 ordinary-Core clocks and a
+dedicated counter/readback test.
+
+The RV64 `mcycle` and `minstret` counters are writable at 0xB00/0xB02; the
+standard 0xC00 `cycle` and 0xC02 `instret` addresses are read-only aliases.
+Two custom machine CSRs expose implementation event counts without widening
+the four-bit internal CSR index: 0x7C0 selects a counter and 0x7C1 reads or
+writes its 64-bit value. Selector 0 is a dependency bubble, 1 is a data-memory
+wait, 2 is redirect generation/application, and 3 is a front-end bubble.
+These are control events rather than a decomposition of CPI: a front-end
+bubble can coexist with an older retirement. At most one class advances per
+clock using the controller's priority order: memory, redirect, dependency,
+then front end. `PerformanceCounter64` uses parallel 32-bit low/high increments
+for the architectural counters. `PerformanceEventCounters4` stores four words
+but selects only the active word before a shared incrementer. The event inputs
+are registered for timing; a delayed freeze preserves the final pending event.
 
 The EVN has a 12 MHz reference and an integer ECP5 PLL. The board configuration
 uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, and a 624 MHz VCO.
@@ -68,17 +88,14 @@ data-sheet range, so neither is used. The board disables unused commit payload
 registers while retaining `commit_valid` for its heartbeat; the verification
 build keeps the full architectural commit trace.
 
-nextpnr does not enforce timing between different divided outputs of the same
-ECP5 PLL. The report validator therefore checks both ordinary per-domain Fmax
-and the two related-clock boundaries. Although memory runs at half the CPU
-frequency, the phase-aligned clocks can have an intervening CPU edge, so both
-directions must meet the 8.012 ns CPU period. In the current seed-6 route, the
-CPU is 126.23/124.81 MHz, memory is 111.47/62.40 MHz, CPU-to-memory is
-6.410/8.012 ns, and memory-to-CPU is 5.982/8.012 ns. The instruction payload
-is captured first in the CPU domain; the wider data selection cone is first
-registered in the memory domain. The response toggle changes only with that
-registered data, so load/store completion follows the actual response rather
-than an assumed pipeline length.
+The production timing flow checks ordinary per-domain paths and both
+related-clock boundaries. Although memory runs at half the CPU frequency, the
+phase-aligned clocks can have an intervening CPU edge, so both directions must
+meet the 8.012 ns CPU period. The instruction payload is captured first in the
+CPU domain; the wider data selection cone is first registered in the memory
+domain. The response toggle changes only with that registered data, so
+load/store completion follows the actual response rather than an assumed
+pipeline length.
 
 ## Verification
 
@@ -95,46 +112,38 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests
 ```
 
 The official ACT4 tests are pinned as the `third_party/riscv-arch-test`
-submodule. All 51 tests in the pinned RV64I catalog are enabled by
-`tests/act4-rv64-enabled.txt` and pass both the ordinary Core simulator and the
-synchronous hardware-memory RTL model:
+submodule at `f7ba06c3d1a01428b172fe851ab56931a0624fee`. All 51 tests in the
+pinned RV64I catalog are enabled by `tests/act4-rv64-enabled.txt` and pass the
+ordinary Core simulator and the synchronous hardware-memory RTL model:
 
 ```sh
 git submodule update --init
 cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --act4
 ```
 
-The same runner selects the 32-test Zca catalog and its independent enable
-list with `--act4-suite Zca`. Existing `--act4` invocations continue to select
-the RV64I catalog. This is runner/configuration plumbing only: official ACT4
-Zca ELFs have not yet been generated or executed locally because the required
-ACT4 generator toolchain is not available in the current environment.
+The same runner selects the complete 32-test Zca catalog and its independent
+enable list with `--act4-suite Zca`. At the pinned submodule revision, all 32
+official self-checking Zca ELFs pass both the ordinary Core simulator and the
+dual-clock synchronous HardwareMemory model. The Zca ELF set digest is
+`8938083a2a0e5cd9ae7b74c6b1f6be9c8afec0da593b07478c8385a421e2a12e`.
+Existing `--act4` invocations continue to select the RV64I catalog.
+
+The dual-clock harness deliberately runs every supplied ELF twice, serializing
+coincident edges as both `mem->cpu` and `cpu->mem`. This prevents either a
+same-edge request or response shortcut from hiding a handshake bug:
+
+```sh
+cargo run --locked --offline -p verify-riscv -- --hardware-memory-rtl
+```
 
 It also accepts externally generated self-checking ELFs. See
 `tests/README.md` for the `tohost` contract, ACT4 ELF directory option, and the
 exact implemented ISA subset.
 
-Compiling the post-map simulation model can take several minutes. Run that
-regression explicitly when needed:
-
-```sh
-cargo run --locked --offline -p verify-riscv -- --post-map
-```
-
 Test only the reusable synchronous register file:
 
 ```sh
 cargo run --locked --offline -p verify-riscv -- --regfile-only
-```
-
-Export either the current core or the complete board wrapper's 125 MHz-targeted
-ECP5 mapping for netlist diagnostics. This does not run the system's old
-nextpnr 0.6 binary; production placement, STA, and bitgen use Texo below.
-
-```sh
-cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv
-cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- Top
-cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- HardwareTestTop
 ```
 
 To measure only the registered compressed-decode cone at 126 MHz, run the
@@ -156,7 +165,7 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction buffer exposes a halfword-aligned window spanning up
 to two adjacent lines. After timing closure, routing, and packing
-`riscv/build/riscv-hardware-test-125-texo.bit`, program it and run the seven
+`riscv/build/riscv-hardware-test-125-texo.bit`, program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -205,6 +214,23 @@ selection), while JTDO1 returns one stable selected response bit throughout
 each scan. ECP5's
 registered JTDI/JSHIFT timing requires exactly 128 physical bits here; adding
 the dummy bit used by the former two-bit bridge misaligns this full frame.
+Only a terminal `tohost` store acknowledged by the synchronous memory response
+token is captured. On that edge the store still retires; the following frozen
+snapshot therefore includes its `minstret` increment and every preceding
+memory-wait event. Response banks 5/6 expose `mcycle`, `minstret`, and the four
+pipeline-event counters. The XVC runner reads and validates all six 64-bit
+values, then prints a `METRIC` line including CPI for every ELF. Protocol
+version 0x05 identifies this ACK-gated response layout.
+
+After programming once, run the two physical ACT4 catalogs with:
+
+```sh
+cargo run --locked --offline --release -p verify-riscv \
+  --bin hardware-riscv-tests -- --no-program --xvc HOST:PORT --act4
+cargo run --locked --offline --release -p verify-riscv \
+  --bin hardware-riscv-tests -- \
+  --no-program --xvc HOST:PORT --act4 --act4-suite Zca
+```
 
 The board wrapper binds the EVN's 12 MHz reference to a 124.8 MHz EHXPLLL. Its
 ROM increments x31 immediately after reset and then enters a delay/branch loop
@@ -231,36 +257,48 @@ target/texo-git/bin/texo pnr riscv --top HardwareTestTop \
   --lpf riscv/lfe5um5g-85f-evn.lpf \
   --pll-binding riscv/pll-12-to-124p8.json \
   --synthesis-goal-mhz 125 --jtagg-prefix jtag \
-  --placement-weight-exponent 5 \
-  --register-enable-fanout 'ff_core.csr_file.*=4' \
-  --output riscv/build/riscv-hardware-test-125.texo.json
+  --placement-weight-exponent 4 \
+  --register-enable-fanout 'ff_core.csr_file.mcause_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.mepc_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.mscratch_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.mstatus_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.mtval_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.mtvec_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.stall_selector_q[*]=4' \
+  --register-enable-fanout 'ff_core.csr_file.mcycle_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.mcycle_counter.high_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.minstret_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.minstret_counter.high_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.event_counters.low_q[*][*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.event_counters.high_q[*][*]=8' \
+  --output riscv/build/riscv-hardware-test-125-ce8.texo.json
 ```
 
 Generate a native bitstream only after the Texo run reports timing closure:
 
 ```sh
-target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
+target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125-ce8.texo.json \
   --bit riscv/build/riscv-hardware-test-125-texo.bit
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
-`f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). On the current
-RV64C-capable 256 KiB direct-JTAG wrapper, placement weight exponent 5 closes
-the 125 MHz-targeted flow (124.8 MHz PLL clock) at +205 ps setup WNS, zero
-setup TNS, +290 ps hold WNS (WHS), and zero hold TNS. The implemented design
-contains 14,465 cells, 15,827 nets, and 196,690 routed PIPs.
-STA checks 9,627 of 10,147 endpoints; the 520 unchecked endpoints belong to
-the separate JTCK/JTAG shift domain, while the CPU, memory, and related-clock
-boundaries are checked. This nextpnr-correlated model adds no separate PLL
-jitter or clock uncertainty, so +205 ps is timing-model closure rather than an
-independent silicon guardband.
+`f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). The final
+`riscv-hardware-test-125-ce8.texo.json` checkpoint closes the 125 MHz-targeted
+flow (124.8 MHz PLL clock) at +11 ps setup WNS with zero setup TNS and +290 ps
+hold WNS with zero hold TNS. It contains 20,588 Struo-mapped cells, 16,771
+implemented cells, 18,497 nets, and 228,641 routed PIPs. STA checks 10,406 of
+10,926 endpoints; the 520 unchecked endpoints belong to the separate
+JTCK/JTAG shift domain, while the CPU, memory, and related-clock boundaries are
+checked. This timing model adds no separate PLL jitter or clock uncertainty,
+so +11 ps is model closure rather than an independent silicon guardband.
 
-That timing-closed bitstream physically passes all seven bundled ELFs,
-including `compressed.elf`, and all 51 enabled ACT4 RV64I ELFs at 124.8 MHz
-through the Windows D2XX XVC transport. Official ACT4 Zca ELFs have not yet
-been generated locally, so the bundled compressed test is the current
-physical RV64C coverage; no ACT4 Zca pass is claimed.
-The diagnostic nextpnr exporter must use `--um5g-85k`, not `--85k`: the latter
-targets LFE5U and produces a bitstream with the wrong device ID and
-configuration semantics.
+The generated `riscv-hardware-test-125-texo.bit` has SHA-256
+`e53d19fd33bf89d365fb7d4b3c2b790b163fe13296906f7dc90bbb600b2a9320`.
+On the EVN at 124.8 MHz this exact counter-enabled bitstream passes the bundled
+suite 8/8, the pinned ACT4 RV64I catalog 51/51, and the pinned ACT4 RV64Zca
+catalog 32/32. Every run also passes the host's six-counter consistency checks.
+The dedicated `performance.elf` readback reports high halves
+`[16, 8, 1, 2, 3, 4]` for mcycle, minstret, dependency, memory wait, redirect,
+and front-end empty respectively, exercising every selector and both 32-bit
+response banks in hardware.

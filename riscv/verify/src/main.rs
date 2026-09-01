@@ -511,6 +511,8 @@ fn $function(
     let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
     let data_response_sequence = simulator.signal("data_response_sequence");
+    let counter_freeze = simulator.signal("counter_freeze");
+    let debug_counter_index = simulator.signal("debug_counter_index");
     let expected = program();
 
     simulator.modify(|io| {
@@ -520,6 +522,8 @@ fn $function(
         io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
         io.set(data_response_sequence, 0_u8);
+        io.set(counter_freeze, 0_u8);
+        io.set(debug_counter_index, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;
@@ -644,10 +648,32 @@ fn $function(
     if $read_value(simulator, "halted") != 0 || $read_value(simulator, "debug_x31") != 0x55 {
         return Err(format!("{label}: final architectural signature is invalid").into());
     }
+    let mut counters = [0_u64; 6];
+    for (index, counter) in counters.iter_mut().enumerate() {
+        simulator.modify(|io| io.set(debug_counter_index, index as u8))?;
+        *counter = $read_value(simulator, "debug_counter_data");
+    }
+    let classified_cycles = counters[2..].iter().sum::<u64>();
+    if counters[0] == 0
+        || counters[1] < expected.len() as u64
+        || counters[1] > counters[0]
+        || counters[2] == 0
+        || counters[3] != 0
+        || counters[4] == 0
+        || counters[5] == 0
+        || classified_cycles > counters[0]
+    {
+        return Err(format!(
+            "{label}: invalid performance counters: mcycle={} minstret={} dependency={} memory={} redirect={} frontend={}",
+            counters[0], counters[1], counters[2], counters[3], counters[4], counters[5]
+        )
+        .into());
+    }
     println!(
-        "{label}: {} instructions in {elapsed_cycles} clocks ({:.3} CPI); two-stage shifts and comparisons sustain one completion per clock and dependent consumers wait once; signature x31=0x0000000000000055",
+        "{label}: {} instructions in {elapsed_cycles} clocks ({:.3} CPI); two-stage shifts and comparisons sustain one completion per clock and dependent consumers wait once; counters={:?}; signature x31=0x0000000000000055",
         expected.len(),
         elapsed_cycles as f64 / expected.len() as f64,
+        counters,
     );
     Ok(())
 }
@@ -661,7 +687,27 @@ define_verifier!(
 );
 define_verifier!(verify_post_map, value_post_map, celox03::Simulator);
 
-fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(), Box<dyn Error>> {
+#[derive(Clone, Copy)]
+enum CoincidentEdgeOrder {
+    MemoryThenCpu,
+    CpuThenMemory,
+}
+
+impl CoincidentEdgeOrder {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MemoryThenCpu => "mem->cpu",
+            Self::CpuThenMemory => "cpu->mem",
+        }
+    }
+}
+
+fn verify_hardware_memory_elf(
+    source: &str,
+    elf: &Path,
+    label: &str,
+    coincident_order: CoincidentEdgeOrder,
+) -> Result<(), Box<dyn Error>> {
     let image = ElfImage::load(elf)?;
     let elf_bytes = fs::read(elf)?;
     let object = object::File::parse(elf_bytes.as_slice())?;
@@ -724,22 +770,31 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
     let mut commits = 0_usize;
     let mut reset_entries = 0_usize;
     for cycle in 1..=100_000 {
-        let store = (value_native(&mut simulator, "data_we") != 0).then(|| {
+        // Celox exposes one event per tick, so it cannot apply both related
+        // clock edges atomically. Run every image in both serializations: one
+        // prevents a same-edge request shortcut, the other prevents a
+        // same-edge response shortcut. The protocol must pass either model.
+        if cycle % 2 == 0 && matches!(coincident_order, CoincidentEdgeOrder::MemoryThenCpu) {
+            simulator.tick(clk_mem)?;
+        }
+        // A request is architecturally complete only when HardwareMemory has
+        // returned the matching toggle. Sample immediately before the CPU edge
+        // that consumes it: a preceding memory edge can produce the ACK and
+        // the CPU edge can drop data_we again in the same serialized cycle.
+        let store_acknowledged = value_native(&mut simulator, "data_we") != 0
+            && value_native(&mut simulator, "data_response_sequence")
+                == value_native(&mut simulator, "data_request_sequence");
+        let store = store_acknowledged.then(|| {
             (
                 value_native(&mut simulator, "data_addr"),
                 value_native(&mut simulator, "data_wdata"),
                 value_native(&mut simulator, "data_wmask"),
             )
         });
-        // On a coincident physical edge, each clock domain samples the
-        // other domain's old register values. Tick the memory domain first
-        // so it cannot observe a CPU request token from this same CPU edge.
-        // This is the conservative ordering for the request-toggle CDC; the
-        // related-clock STA separately checks both physical directions.
-        if cycle % 2 == 0 {
+        simulator.tick(clk_cpu)?;
+        if cycle % 2 == 0 && matches!(coincident_order, CoincidentEdgeOrder::CpuThenMemory) {
             simulator.tick(clk_mem)?;
         }
-        simulator.tick(clk_cpu)?;
         if value_native(&mut simulator, "commit_valid") != 0 {
             commits += 1;
             let commit_pc = value_native(&mut simulator, "commit_pc");
@@ -814,7 +869,8 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
                 .into());
             }
             println!(
-                "Hardware-memory RTL: {label:<12} PASS; {loaded_bytes} debug bytes loaded, {commits} commits in {cycle} cycles"
+                "Hardware-memory RTL: {label:<12} [{}] PASS; {loaded_bytes} debug bytes loaded, {commits} commits in {cycle} cycles",
+                coincident_order.label(),
             );
             return Ok(());
         }
@@ -851,20 +907,32 @@ fn verify_hardware_memory_rtl(
             "compressed",
             "control",
             "memory",
+            "performance",
             "shift",
             "system",
         ] {
             let label = format!("{name}.elf");
-            verify_hardware_memory_elf(
-                &source,
-                &project.join("build/rv64i-subset").join(&label),
-                &label,
-            )?;
+            for order in [
+                CoincidentEdgeOrder::MemoryThenCpu,
+                CoincidentEdgeOrder::CpuThenMemory,
+            ] {
+                verify_hardware_memory_elf(
+                    &source,
+                    &project.join("build/rv64i-subset").join(&label),
+                    &label,
+                    order,
+                )?;
+            }
         }
     } else {
         for elf in requested_elfs {
             let label = elf.file_name().unwrap_or_default().to_string_lossy();
-            verify_hardware_memory_elf(&source, elf, &label)?;
+            for order in [
+                CoincidentEdgeOrder::MemoryThenCpu,
+                CoincidentEdgeOrder::CpuThenMemory,
+            ] {
+                verify_hardware_memory_elf(&source, elf, &label, order)?;
+            }
         }
     }
     Ok(())
@@ -1041,6 +1109,8 @@ fn verify_board_diagnostic(
     let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
     let data_response_sequence = simulator.signal("data_response_sequence");
+    let counter_freeze = simulator.signal("counter_freeze");
+    let debug_counter_index = simulator.signal("debug_counter_index");
 
     simulator.modify(|io| {
         io.set(reset, 0_u8);
@@ -1049,6 +1119,8 @@ fn verify_board_diagnostic(
         io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
         io.set(data_response_sequence, 0_u8);
+        io.set(counter_freeze, 0_u8);
+        io.set(debug_counter_index, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;

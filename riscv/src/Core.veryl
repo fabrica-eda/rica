@@ -33,6 +33,9 @@ module Core #(
     commit_mem_addr       : output logic<64>,
     commit_mem_wdata      : output logic<64>,
     commit_mem_wmask      : output logic<8> ,
+    counter_freeze        : input  logic    ,
+    debug_counter_index   : input  logic<3> ,
+    debug_counter_data    : output logic<64>,
     debug_x31             : output logic<64>,
 ) {
     // This implementation exposes a 32-bit physical address space while the
@@ -230,12 +233,14 @@ module Core #(
     var memory_wait             : logic    ;
     var data_request_sequence_q : logic    ;
     var csr_source              : logic<64>;
+    var csr_write_value         : logic<64>;
     var ex_exception            : logic    ;
     var ex_exception_cause      : logic<64>;
     var ex_exception_value      : logic<64>;
     var cm_trap_event           : logic    ;
     var cm_mret_event           : logic    ;
     var cm_system_redirect      : logic    ;
+    var cm_retire_event         : logic    ;
     var decompressed_instruction: logic<32>;
     var compressed_illegal      : logic    ;
 
@@ -449,14 +454,29 @@ module Core #(
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
         // younger instruction without a compare-result-to-CSR timing path.
-        cm_trap_event        = cm_valid_q && cm_exception_q && !memory_wait && !redirect_pending_q;
-        cm_mret_event        = cm_valid_q && cm_is_mret_q && !memory_wait && !redirect_pending_q;
-        cm_system_redirect   = cm_trap_event || cm_mret_event;
+        cm_trap_event      = cm_valid_q && cm_exception_q && !memory_wait && !redirect_pending_q;
+        cm_mret_event      = cm_valid_q && cm_is_mret_q && !memory_wait && !redirect_pending_q;
+        cm_system_redirect = cm_trap_event || cm_mret_event;
+        // This is the architectural retirement boundary: a successful CM
+        // instruction transfers to WB here. A pending taken branch explicitly
+        // discards its wrong-path CM follower; JAL itself remains retireable.
+        cm_retire_event      = cm_valid_q && !cm_exception_q && !memory_wait
+            && !(redirect_pending_q && redirect_flush_wb_q);
         csr_bus.write_index  = cm_csr_index_q;
         csr_bus.write_enable = cm_valid_q && cm_is_csr_q && cm_csr_write_q && !cm_exception_q && !memory_wait
             && !redirect_pending_q;
-        csr_bus.write_op     = cm_csr_op_q;
-        csr_bus.write_source = cm_csr_source_q;
+        // CSR read/modify/write operates on the value captured for this
+        // instruction in EX, not on a free-running counter's newer CM value.
+        // Present the resulting atomic value to CsrFile as a replace write.
+        if cm_csr_op_q == 2'd1 {
+            csr_write_value = cm_arithmetic_q | cm_csr_source_q;
+        } else if cm_csr_op_q == 2'd2 {
+            csr_write_value = cm_arithmetic_q & ~cm_csr_source_q;
+        } else {
+            csr_write_value = cm_csr_source_q;
+        }
+        csr_bus.write_op     = 2'd0;
+        csr_bus.write_source = csr_write_value;
         csr_bus.trap_enter   = cm_trap_event;
         csr_bus.trap_pc      = cm_pc_q;
         csr_bus.trap_cause   = cm_exception_cause_q;
@@ -483,12 +503,36 @@ module Core #(
             && ((rx_use_rs1_q && (rx_rs1_q == ex_rd_q)) || (rx_use_rs2_q && (rx_rs2_q == ex_rd_q)));
         execution_hazard = rx_valid_q
             && ((ex_is_load_q || execute_bus.result_use_shift || execute_bus.result_use_compare) && operand_match_ex);
-        // CSR instructions are rare; conservatively separate every writer
-        // from the following CSR. This avoids putting a CSR-index comparator
-        // on the global pipeline-hold/skid-buffer control cone.
-        if rx_valid_q && rx_is_csr_q && ex_valid_q && ex_is_csr_q && ex_csr_write_q {
+        // CSR instructions are rare, so give each one an empty EX predecessor.
+        // The preceding CM side effect is then in the CSR bank before the EX
+        // read, preserving program order without a counter incrementer in the
+        // CSR read path or an index comparator on global hold control.
+        if rx_valid_q && rx_is_csr_q && ex_valid_q {
             execution_hazard = 1'b1;
         }
+
+        // Performance events follow the same priority as the sequential
+        // pipeline controller, so exactly one event class can advance in a
+        // cycle. These are control events, not a CPI decomposition: a redirect
+        // event can coincide with retirement. Redirect includes applying a registered control-flow target
+        // and the immediate younger-pipeline flush for an exception or MRET.
+        csr_bus.retire               = cm_retire_event;
+        csr_bus.stall_dependency     = 1'b0;
+        csr_bus.stall_memory_wait    = 1'b0;
+        csr_bus.stall_redirect       = 1'b0;
+        csr_bus.stall_frontend_empty = 1'b0;
+        if memory_wait {
+            csr_bus.stall_memory_wait = 1'b1;
+        } else if redirect_valid || redirect_pending_q || ex_exception || (ex_valid_q && ex_is_mret_q) {
+            csr_bus.stall_redirect = 1'b1;
+        } else if execution_hazard {
+            csr_bus.stall_dependency = 1'b1;
+        } else if !fd_q.valid {
+            csr_bus.stall_frontend_empty = 1'b1;
+        }
+        csr_bus.counter_freeze      = counter_freeze;
+        csr_bus.debug_counter_index = debug_counter_index;
+        debug_counter_data          = csr_bus.debug_counter_data;
 
         pc = fetch_address;
         // The optional board-memory relocation is registered together with
@@ -754,8 +798,7 @@ module Core #(
                 // toggle the cross-domain request token: the refetched target
                 // can otherwise toggle it a second time before the slower
                 // memory clock observes either edge.
-                if ex_valid_q && (ex_is_load_q || ex_is_store_q)
-                    && !redirect_valid && !redirect_pending_q {
+                if ex_valid_q && (ex_is_load_q || ex_is_store_q) && !redirect_valid && !redirect_pending_q {
                     data_request_sequence_q = !data_request_sequence_q;
                 }
                 cm_store_size_q      = ex_store_size_q;

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -8,8 +9,8 @@ use serde_json::Value;
 use struo_frontend_veryl::analyze_and_lower;
 use struo_synth::synthesize;
 use struo_target_ecp5::{
-    JtaggBinding, MappingOptions, PhysicalFeedback, PllBinding, RegisterEnableFanoutConstraint,
-    map_to_ecp5_with_options,
+    Bit, Ecp5Cell, JtaggBinding, MappingOptions, PhysicalFeedback, PllBinding,
+    RegisterEnableFanoutConstraint, map_to_ecp5_with_options,
 };
 
 fn validated_pll(path: &Path) -> Result<PllBinding, Box<dyn Error>> {
@@ -181,9 +182,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         mapped = mapped.apply_physical_feedback(&feedback);
     }
     if top == "HardwareTestTop" {
-        let report = mapped.apply_register_enable_fanout_constraints(&[
-            RegisterEnableFanoutConstraint::new("ff_core.csr_file.*", 4),
-        ])?;
+        // Mapping may legitimately absorb a self-hold into D on individual
+        // bits. Constrain only FFs that actually retain a routed CE pin;
+        // selecting a broad source-level vector would reject mixed-CE groups.
+        let mut groups = BTreeMap::<String, (usize, usize)>::new();
+        let constraints = mapped
+            .cells()
+            .iter()
+            .filter_map(|cell| {
+                let Ecp5Cell::FlipFlop { name, enable, .. } = cell else {
+                    return None;
+                };
+                if !name.starts_with("ff_core.csr_file.") {
+                    return None;
+                }
+                let group = name.split_once('[').map_or(name.as_str(), |entry| entry.0);
+                let counts = groups.entry(group.to_owned()).or_default();
+                counts.1 += 1;
+                if matches!(enable, Some(enable) if matches!(enable.signal, Bit::Wire(_))) {
+                    counts.0 += 1;
+                    Some(RegisterEnableFanoutConstraint::new(name, 4))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        println!("CSR mapped CE groups (eligible/total): {groups:?}");
+        let report = mapped.apply_register_enable_fanout_constraints(&constraints)?;
         println!(
             "CSR clock-enable fanout: {} FFs, {} branches",
             report.rewired_registers, report.inserted_branches

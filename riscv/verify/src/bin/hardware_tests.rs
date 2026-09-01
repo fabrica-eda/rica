@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::ffi::OsStr;
@@ -138,20 +139,91 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(elfs)
 }
 
+fn act4_elf_path(directory: &Path, name: &str) -> PathBuf {
+    // ACT4 test stems contain an instruction-name dot (for example,
+    // `Zca-c.add-00`). `Path::with_extension` would replace `.add-00`
+    // and silently look for `Zca-c.elf`; append the ELF suffix instead.
+    directory.join(format!("{name}.elf"))
+}
+
 fn act4_elfs(project: &Path, suite: Act4Suite) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let enabled_path = project.join("tests").join(suite.enabled_file());
+    let repository = project.parent().ok_or("riscv directory has no parent")?;
+    let source_dir = repository
+        .join("third_party/riscv-arch-test/tests/rv64i")
+        .join(suite.name());
     let elf_dir = project
         .parent()
         .ok_or("riscv directory has no parent")?
         .join("third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i")
         .join(suite.name());
-    let mut elfs = Vec::new();
-    for line in fs::read_to_string(&enabled_path)?.lines() {
-        let name = line.trim();
-        if name.is_empty() || name.starts_with('#') {
+    if !source_dir.is_dir() {
+        return Err(format!(
+            "ACT4 source catalog {} is missing; run `git submodule update --init`",
+            source_dir.display()
+        )
+        .into());
+    }
+
+    let prefix = format!("{}-", suite.name());
+    let catalog = fs::read_dir(&source_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension() == Some(OsStr::new("S")))
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_str()?;
+            (stem.starts_with(&prefix) && stem.ends_with("-00")).then(|| stem.to_owned())
+        })
+        .collect::<BTreeSet<_>>();
+    if catalog.is_empty() {
+        return Err(format!(
+            "no ACT4 RV64{} tests found in {}",
+            suite.name(),
+            source_dir.display()
+        )
+        .into());
+    }
+
+    let mut enabled = BTreeSet::new();
+    for (index, line) in fs::read_to_string(&enabled_path)?.lines().enumerate() {
+        let name = line.split('#').next().unwrap_or_default().trim();
+        if name.is_empty() {
             continue;
         }
-        let elf = elf_dir.join(name).with_extension("elf");
+        if !name.starts_with(&prefix) || !name.ends_with("-00") {
+            return Err(format!(
+                "{}:{}: expected an ACT4 RV64{} test stem beginning with {prefix}",
+                enabled_path.display(),
+                index + 1,
+                suite.name(),
+            )
+            .into());
+        }
+        if !enabled.insert(name.to_owned()) {
+            return Err(format!(
+                "{}:{}: duplicate test {name}",
+                enabled_path.display(),
+                index + 1
+            )
+            .into());
+        }
+    }
+    let unknown = enabled.difference(&catalog).cloned().collect::<Vec<_>>();
+    let missing = catalog.difference(&enabled).cloned().collect::<Vec<_>>();
+    if !unknown.is_empty() || !missing.is_empty() {
+        return Err(format!(
+            "{} does not exactly match the pinned ACT4 RV64{} catalog: unknown=[{}], missing=[{}]",
+            enabled_path.display(),
+            suite.name(),
+            unknown.join(", "),
+            missing.join(", "),
+        )
+        .into());
+    }
+
+    let mut elfs = Vec::new();
+    for name in enabled {
+        let elf = act4_elf_path(&elf_dir, &name);
         if !elf.is_file() {
             return Err(format!(
                 "{} enables {name}, but {} does not exist",
@@ -193,6 +265,9 @@ trait DirectJtag {
     /// Scan one physical 128-bit protocol frame, least-significant bit first.
     /// `expected_tdo` checks the response selected by the preceding frame.
     fn scan_frame(&mut self, frame: &[u8; FRAME_BYTES], expected_tdo: Option<bool>);
+    /// Scan a frame and retain the stable response bit without comparing it.
+    /// Backends such as SVF that cannot return TDO may simply emit the scan.
+    fn observe_frame(&mut self, frame: &[u8; FRAME_BYTES]);
     fn run_test(&mut self, clocks: usize);
 }
 
@@ -245,6 +320,10 @@ impl DirectJtag for SvfDirect {
         }
     }
 
+    fn observe_frame(&mut self, frame: &[u8; FRAME_BYTES]) {
+        self.scan_frame(frame, None);
+    }
+
     fn run_test(&mut self, clocks: usize) {
         writeln!(self.text, "RUNTEST {clocks} TCK;").unwrap();
     }
@@ -254,6 +333,7 @@ struct XvcDirect {
     tms: Vec<bool>,
     tdi: Vec<bool>,
     checks: Vec<(usize, bool)>,
+    observations: Vec<(usize, usize)>,
 }
 
 impl XvcDirect {
@@ -262,6 +342,7 @@ impl XvcDirect {
             tms: Vec::new(),
             tdi: Vec::new(),
             checks: Vec::new(),
+            observations: Vec::new(),
         };
         // Enter Test-Logic-Reset, return to Run-Test/Idle, and select ER1.
         for _ in 0..5 {
@@ -315,6 +396,16 @@ impl DirectJtag for XvcDirect {
         self.end_scan_dr();
     }
 
+    fn observe_frame(&mut self, frame: &[u8; FRAME_BYTES]) {
+        let start = self.begin_scan_dr();
+        for bit in 0..PHYSICAL_SCAN_BITS {
+            let value = bit < FRAME_BITS && frame[bit / 8] & (1 << (bit % 8)) != 0;
+            self.push(bit + 1 == PHYSICAL_SCAN_BITS, value);
+        }
+        self.observations.push((start, start + PHYSICAL_SCAN_BITS));
+        self.end_scan_dr();
+    }
+
     fn run_test(&mut self, clocks: usize) {
         self.tms.resize(self.tms.len() + clocks, false);
         self.tdi.resize(self.tdi.len() + clocks, false);
@@ -359,6 +450,76 @@ fn response_value(responses: &[XvcResponseObservation], first: usize, width: usi
         .fold(0_u64, |value, (bit, response)| {
             value | (u64::from(response.value) << bit)
         })
+}
+
+const METRIC_NAMES: [&str; 6] = [
+    "mcycle",
+    "minstret",
+    "dependency",
+    "memory",
+    "redirect",
+    "frontend",
+];
+
+fn metric_values(observations: &[XvcResponseObservation]) -> Result<[u64; 6], Box<dyn Error>> {
+    if observations.len() != METRIC_NAMES.len() * 64 {
+        return Err(format!(
+            "internal XVC metric response count is {}, expected {}",
+            observations.len(),
+            METRIC_NAMES.len() * 64
+        )
+        .into());
+    }
+    Ok(std::array::from_fn(|counter| {
+        response_value(observations, counter * 64, 64)
+    }))
+}
+
+fn format_metrics(values: [u64; 6]) -> String {
+    let mut output = METRIC_NAMES
+        .into_iter()
+        .zip(values)
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if values[1] != 0 {
+        write!(output, " CPI={:.3}", values[0] as f64 / values[1] as f64).unwrap();
+    }
+    output
+}
+
+fn validate_metrics(name: &str, values: [u64; 6]) -> Result<(), Box<dyn Error>> {
+    if values[0] == 0 || values[1] == 0 || values[0] <= values[1] {
+        return Err(format!(
+            "{name}: invalid architectural counters: mcycle={} minstret={}",
+            values[0], values[1]
+        )
+        .into());
+    }
+    if values[2..].iter().any(|&event| event > values[0])
+        || values[2..]
+            .iter()
+            .map(|&event| u128::from(event))
+            .sum::<u128>()
+            > u128::from(values[0])
+    {
+        return Err(format!(
+            "{name}: implementation event counters are inconsistent with mcycle: {}",
+            format_metrics(values)
+        )
+        .into());
+    }
+    if name == "performance" {
+        let high_halves = values.map(|value| value >> 32);
+        let expected = [16, 8, 1, 2, 3, 4];
+        if high_halves != expected {
+            return Err(format!(
+                "{name}: selector/high-bank readback mismatch: high halves {high_halves:?}, expected {expected:?}"
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn response_name(group: usize, load_response_count: usize) -> String {
@@ -535,12 +696,13 @@ impl XvcClient {
         packed
     }
 
-    fn shift(&mut self, bus: &XvcDirect) -> Result<(), Box<dyn Error>> {
+    fn shift(&mut self, bus: &XvcDirect) -> Result<Vec<XvcResponseObservation>, Box<dyn Error>> {
         if bus.tms.len() != bus.tdi.len() {
             return Err("internal XVC TMS/TDI length mismatch".into());
         }
         let mut check = 0_usize;
         let mut actual_checks = Vec::with_capacity(bus.checks.len());
+        let mut actual_observations = vec![Vec::new(); bus.observations.len()];
         for start in (0..bus.tms.len()).step_by(self.max_bits) {
             let end = bus.tms.len().min(start + self.max_bits);
             let bit_count = end - start;
@@ -564,6 +726,16 @@ impl XvcClient {
                 actual_checks.push(actual);
                 check += 1;
             }
+            for (observation, &(observation_start, observation_end)) in
+                bus.observations.iter().enumerate()
+            {
+                let overlap_start = start.max(observation_start);
+                let overlap_end = end.min(observation_end);
+                for bit in overlap_start..overlap_end {
+                    let local = bit - start;
+                    actual_observations[observation].push(tdo[local / 8] & (1 << (local % 8)) != 0);
+                }
+            }
         }
         if check != bus.checks.len() {
             return Err("internal XVC check position exceeds generated shifts".into());
@@ -571,7 +743,28 @@ impl XvcClient {
         if let Some(report) = xvc_mismatch_report(&bus.checks, &actual_checks) {
             return Err(report.into());
         }
-        Ok(())
+        actual_observations
+            .iter()
+            .enumerate()
+            .map(|(index, bits)| {
+                if bits.len() != PHYSICAL_SCAN_BITS {
+                    return Err(format!(
+                        "internal XVC observation {index} collected {} of {PHYSICAL_SCAN_BITS} bits",
+                        bits.len()
+                    )
+                    .into());
+                }
+                let observation = XvcResponseObservation::from_bits(bits);
+                if !observation.is_uniform() {
+                    return Err(format!(
+                        "non-uniform XVC metric response {index}: {}/{} samples were one",
+                        observation.one_count, PHYSICAL_SCAN_BITS
+                    )
+                    .into());
+                }
+                Ok(observation)
+            })
+            .collect()
     }
 }
 
@@ -650,6 +843,28 @@ impl<'a, B: DirectJtag> DirectSession<'a, B> {
         let nop = frame(Opcode::Nop, sequence, 0, 0, 0);
         self.bus.scan_frame(&nop, pending);
     }
+
+    fn observe_selected_bits(&mut self, selectors: &[u32]) {
+        let mut response_pending = false;
+        for &selector in selectors {
+            let sequence = self.next_sequence;
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+            let select = frame(Opcode::Select, sequence, selector, 0, 0);
+            if response_pending {
+                self.bus.observe_frame(&select);
+            } else {
+                self.bus.scan_frame(&select, None);
+                response_pending = true;
+            }
+        }
+
+        if response_pending {
+            let sequence = self.next_sequence;
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+            let nop = frame(Opcode::Nop, sequence, 0, 0, 0);
+            self.bus.observe_frame(&nop);
+        }
+    }
 }
 
 fn push_value_bits(expected: &mut Vec<(u32, bool)>, first: u32, value: u64, width: u32) {
@@ -661,6 +876,7 @@ fn emit_test(
     image: &ElfImage,
     run_tck: usize,
     expected_tohost: u64,
+    observe_metrics: bool,
 ) -> Result<(), Box<dyn Error>> {
     let (memory, ranges) = memory_image(image)?;
     let mut session = DirectSession::new(bus);
@@ -699,7 +915,7 @@ fn emit_test(
     // selectors and check the previous selection on every bit of the next scan.
     let mut expected = Vec::with_capacity(94);
     push_value_bits(&mut expected, 0, 0x52, 8);
-    push_value_bits(&mut expected, 8, 0x04, 8);
+    push_value_bits(&mut expected, 8, 0x05, 8);
     expected.extend([
         (16, true),  // PLL locked
         (17, true),  // run remains enabled
@@ -711,6 +927,17 @@ fn emit_test(
     push_value_bits(&mut expected, 24, u64::from(run_sequence), 8);
     push_value_bits(&mut expected, 32, expected_tohost, 64);
     session.expect_selected_bits(&expected);
+    if observe_metrics {
+        // SELECT address[10:8] chooses one frozen Core counter while the low
+        // byte retains the existing response-bank/bit selector. Banks five
+        // and six expose the low and high halves, respectively.
+        let mut selectors = Vec::with_capacity(6 * 64);
+        for counter in 0_u32..6 {
+            selectors.extend((0_u32..32).map(|bit| (counter << 8) | (5 << 5) | bit));
+            selectors.extend((0_u32..32).map(|bit| (counter << 8) | (6 << 5) | bit));
+        }
+        session.observe_selected_bits(&selectors);
+    }
     Ok(())
 }
 
@@ -720,7 +947,7 @@ fn test_svf(
     expected_tohost: u64,
 ) -> Result<String, Box<dyn Error>> {
     let mut bus = SvfDirect::new();
-    emit_test(&mut bus, image, run_tck, expected_tohost)?;
+    emit_test(&mut bus, image, run_tck, expected_tohost, false)?;
     bus.text.push_str("STATE IDLE;\n");
     Ok(bus.text)
 }
@@ -829,8 +1056,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("ELF has no valid filename")?;
         if let Some(xvc) = &mut xvc {
             let mut bus = XvcDirect::new();
-            emit_test(&mut bus, &image, run_tck, expected_tohost)?;
-            xvc.shift(&bus)?;
+            emit_test(&mut bus, &image, run_tck, expected_tohost, true)?;
+            let metrics = metric_values(&xvc.shift(&bus)?)?;
+            validate_metrics(name, metrics)?;
+            println!("METRIC {name:<22} {}", format_metrics(metrics));
         } else {
             let svf = output_dir.join(format!("{name}.svf"));
             fs::write(&svf, test_svf(&image, run_tck, expected_tohost)?)?;
@@ -860,7 +1089,7 @@ mod tests {
         set_value(&mut responses, 2, 8, 0xa5);
         let result = &mut responses[LOAD_RESPONSES..];
         set_value(result, 0, 8, 0x52);
-        set_value(result, 8, 8, 0x04);
+        set_value(result, 8, 8, 0x05);
         set_value(result, 16, 6, 0x07);
         set_value(result, 22, 8, 0x5a);
         set_value(result, 30, 64, tohost);
@@ -872,6 +1101,14 @@ mod tests {
             .iter()
             .flat_map(|&value| std::iter::repeat_n(value, PHYSICAL_SCAN_BITS))
             .collect()
+    }
+
+    #[test]
+    fn act4_dotted_stem_keeps_the_instruction_name() {
+        assert_eq!(
+            act4_elf_path(Path::new("elfs/Zca"), "Zca-c.add-00"),
+            PathBuf::from("elfs/Zca/Zca-c.add-00.elf")
+        );
     }
 
     #[test]
@@ -890,7 +1127,7 @@ mod tests {
 
         assert!(report.contains("128/13312 checked bits across 1/104"));
         assert!(report.contains("load(write_busy=0, rejected=0, sequence=0xa5)"));
-        assert!(report.contains("magic=0x52, version=0x04, flags=0x07, sequence=0x5a"));
+        assert!(report.contains("magic=0x52, version=0x05, flags=0x07, sequence=0x5a"));
         assert!(report.contains("tohost=0x0000000000000003"));
         assert!(report.contains("result[31]=1 (expected 0)"));
     }
@@ -907,5 +1144,42 @@ mod tests {
         assert!(report.contains("non-uniform responses (decoded by majority)"));
         assert!(report.contains("result[31]=1/128 ones"));
         assert!(report.contains("tohost=0x0000000000000001"));
+    }
+
+    #[test]
+    fn metric_responses_decode_six_little_endian_counters() {
+        let expected = [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 3, 5, 8, 13];
+        let mut responses = Vec::new();
+        for value in expected {
+            responses.extend((0..64).map(|bit| {
+                let value = value & (1_u64 << bit) != 0;
+                XvcResponseObservation {
+                    value,
+                    one_count: if value { PHYSICAL_SCAN_BITS } else { 0 },
+                }
+            }));
+        }
+        assert_eq!(metric_values(&responses).unwrap(), expected);
+        assert!(format_metrics(expected).contains("CPI="));
+    }
+
+    #[test]
+    fn physical_metric_validation_checks_selectors_and_high_bank() {
+        let seeded = [
+            0x0000_0010_0000_0080,
+            0x0000_0008_0000_0068,
+            0x0000_0001_0000_0011,
+            0x0000_0002_0000_0022,
+            0x0000_0003_0000_0033,
+            0x0000_0004_0000_0044,
+        ];
+        assert!(validate_metrics("performance", seeded).is_ok());
+
+        let mut broken_high_bank = seeded;
+        broken_high_bank[5] &= 0xffff_ffff;
+        assert!(validate_metrics("performance", broken_high_bank).is_err());
+
+        let aliased = [100, 50, 10, 10, 10, 100];
+        assert!(validate_metrics("other", aliased).is_err());
     }
 }

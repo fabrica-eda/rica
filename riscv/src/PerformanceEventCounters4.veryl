@@ -1,0 +1,83 @@
+/// Four exact 64-bit event counters sharing one split incrementer.
+///
+/// The pipeline presents at most one event class per cycle. Keeping four
+/// independent storage words but selecting one word before the adder removes
+/// three redundant incrementers. A CSR write may update a different word in
+/// the same cycle; only a write targeting the incremented word takes priority.
+module PerformanceEventCounters4 (
+    clk            : input  clock        ,
+    rst_n          : input  reset        ,
+    write_enable   : input  logic        ,
+    write_index    : input  logic<2>     ,
+    write_value    : input  logic<64>    ,
+    increment_valid: input  logic        ,
+    increment_index: input  logic<2>     ,
+    freeze         : input  logic        ,
+    value          : output logic<64> [4],
+) {
+    var low_q        : logic<32> [4];
+    var high_q       : logic<32> [4];
+    var low_next     : logic<32> [4];
+    var high_next    : logic<32> [4];
+    var low_update   : logic     [4];
+    var high_update  : logic     [4];
+    var selected_low : logic<32>    ;
+    var selected_high: logic<32>    ;
+    var low_plus_one : logic<33>    ;
+    var high_plus_one: logic<32>    ;
+
+    always_comb {
+        case increment_index {
+            2'd0: {
+                selected_low  = low_q[0];
+                selected_high = high_q[0];
+            }
+            2'd1: {
+                selected_low  = low_q[1];
+                selected_high = high_q[1];
+            }
+            2'd2: {
+                selected_low  = low_q[2];
+                selected_high = high_q[2];
+            }
+            default: {
+                selected_low  = low_q[3];
+                selected_high = high_q[3];
+            }
+        }
+        low_plus_one  = {1'b0, selected_low} + 33'd1;
+        high_plus_one = selected_high + 32'd1;
+
+        for index in 0..4 {
+            low_update[index]  = (write_enable && (write_index == index))
+                || (!freeze && increment_valid && (increment_index == index));
+            high_update[index] = (write_enable && (write_index == index))
+                || (!freeze && increment_valid && (increment_index == index) && low_plus_one[32]);
+            low_next[index]    = low_plus_one[31:0];
+            high_next[index]   = high_plus_one;
+            if write_enable && (write_index == index) {
+                low_next[index]  = write_value[31:0];
+                high_next[index] = write_value[63:32];
+            }
+            value[index] = {high_q[index], low_q[index]};
+        }
+    }
+
+    for index in 0..4 :g_counter {
+        always_ff (clk, rst_n) {
+            if_reset {
+                low_q[index] = 32'd0;
+            } else if low_update[index] {
+                low_q[index] = low_next[index];
+            }
+        }
+
+        always_ff (clk, rst_n) {
+            if_reset {
+                high_q[index] = 32'd0;
+            } else if high_update[index] {
+                high_q[index] = high_next[index];
+            }
+        }
+    }
+}

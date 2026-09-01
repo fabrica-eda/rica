@@ -6,11 +6,13 @@ use std::path::Path;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 10] = [
+const CORE_SOURCES: [&str; 12] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
     "Decoder.veryl",
+    "PerformanceCounter64.veryl",
+    "PerformanceEventCounters4.veryl",
     "CsrFile.veryl",
     "ExecuteUnit.veryl",
     "ShiftUnit.veryl",
@@ -196,6 +198,8 @@ pub fn run_elf(
     let instruction_valid = simulator.signal("instr_valid");
     let data_rdata = simulator.signal("data_rdata");
     let data_response_sequence = simulator.signal("data_response_sequence");
+    let counter_freeze = simulator.signal("counter_freeze");
+    let debug_counter_index = simulator.signal("debug_counter_index");
     simulator.modify(|io| {
         io.set(reset, 0_u8);
         io.set(instruction, 0x0000_0013_u32);
@@ -203,6 +207,8 @@ pub fn run_elf(
         io.set(instruction_valid, 1_u8);
         io.set(data_rdata, 0_u64);
         io.set(data_response_sequence, 0_u8);
+        io.set(counter_freeze, 0_u8);
+        io.set(debug_counter_index, 0_u8);
     })?;
     simulator.tick(clock)?;
     simulator.modify(|io| io.set(reset, 1_u8))?;

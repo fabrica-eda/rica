@@ -241,6 +241,16 @@ fn run_act4(
         )
         .into());
     }
+    let missing = available.difference(&enabled).cloned().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} omits tests from the pinned complete ACT4 RV64{} catalog: {}",
+            enabled_file.display(),
+            suite.name(),
+            missing.join(", ")
+        )
+        .into());
+    }
 
     let mut elfs = BTreeMap::new();
     collect_elfs(elf_dir, &mut elfs)?;
@@ -293,7 +303,7 @@ fn run_act4(
         failures.len(),
         catalog.len()
     );
-    if failures.is_empty() {
+    if failures.is_empty() && ignored == 0 && passed == catalog.len() {
         Ok(())
     } else {
         Err(format!("ACT4 failures:\n  {}", failures.join("\n  ")).into())

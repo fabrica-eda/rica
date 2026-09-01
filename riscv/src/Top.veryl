@@ -24,6 +24,7 @@ module Top (
     var unused_commit_address       : 'cpu logic          <64>;
     var unused_commit_wdata         : 'cpu logic          <64>;
     var unused_commit_wmask         : 'cpu logic          <8> ;
+    var unused_debug_counter        : 'cpu logic          <64>;
     var x31                         : 'cpu logic          <64>;
     var commit_count_q              : 'cpu logic          <25>;
     var led_count_q                 : 'cpu logic          <6> ;
@@ -38,6 +39,9 @@ module Top (
         instr_valid           : 1'b1                        ,
         data_rdata            : 64'h0000_0000_0000_0000     ,
         data_response_sequence: 1'b0                        ,
+        counter_freeze        : 1'b0                        ,
+        debug_counter_index   : 3'd0                        ,
+        debug_counter_data    : unused_debug_counter        ,
         pc                    : core_pc                     ,
         data_addr             : unused_data_addr            ,
         data_memory_addr      : unused_memory_addr          ,

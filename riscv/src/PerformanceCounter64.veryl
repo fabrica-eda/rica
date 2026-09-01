@@ -1,0 +1,56 @@
+/// Exact 64-bit event counter with no 64-bit combinational carry path.
+///
+/// The low and high increments are computed in parallel. A low-half overflow
+/// enables the high-half register on the same edge, so the architectural
+/// output never needs a corrective adder and neither D path carries through
+/// all 64 bits.
+module PerformanceCounter64 (
+    clk         : input  clock    ,
+    rst_n       : input  reset    ,
+    write_enable: input  logic    ,
+    write_value : input  logic<64>,
+    increment   : input  logic    ,
+    freeze      : input  logic    ,
+    value       : output logic<64>,
+) {
+    var low_q        : logic<32>;
+    var high_q       : logic<32>;
+    var low_next     : logic<32>;
+    var high_next    : logic<32>;
+    var low_update   : logic    ;
+    var high_update  : logic    ;
+    var low_plus_one : logic<33>;
+    var high_plus_one: logic<32>;
+
+    always_comb {
+        low_plus_one  = {1'b0, low_q} + 33'd1;
+        high_plus_one = high_q + 32'd1;
+        low_next      = low_plus_one[31:0];
+        high_next     = high_plus_one;
+        low_update    = write_enable || (!freeze && increment);
+        high_update   = write_enable || (!freeze && increment && low_plus_one[32]);
+        if write_enable {
+            low_next  = write_value[31:0];
+            high_next = write_value[63:32];
+        }
+        value = {high_q, low_q};
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            low_q = 32'd0;
+        } else if low_update {
+            low_q = low_next;
+        }
+    }
+
+    // Keep both clock-enable boundaries explicit. Update priority is resolved
+    // before each D input; the outer self-hold is only a single CE condition.
+    always_ff (clk, rst_n) {
+        if_reset {
+            high_q = 32'd0;
+        } else if high_update {
+            high_q = high_next;
+        }
+    }
+}
