@@ -1,0 +1,132 @@
+/// Direct JTAG debug transport using a 128-bit ER1 command mailbox.
+///
+/// ECP5 JTAGG registers JTDI by one TCK. Its registered JSHIFT remains visible
+/// on the trailing TAP transition, which delivers physical command bit 127
+/// before JUPDATE captures the mailbox. The host therefore scans exactly 128
+/// bits, least-significant bit first; adding a dummy bit misaligns the frame.
+module JtagDebugTransport (
+    clk               : input  'cpu clock              ,
+    rst_n             : input  'cpu reset_async_low    ,
+    command_valid     : output 'cpu logic              ,
+    command_frame_low : output 'cpu logic          <64>,
+    command_frame_high: output 'cpu logic          <64>,
+    response_bit      : input  'cpu logic              ,
+    status_bit        : input  'cpu logic              ,
+    jtag_tdi          : input  'tap logic              ,
+    jtag_tck          : input  'tap clock              ,
+    jtag_rti1         : input  'tap logic              ,
+    jtag_rti2         : input  'tap logic              ,
+    jtag_shift        : input  'tap logic              ,
+    jtag_update       : input  'tap clock              ,
+    jtag_rst_n        : input  'tap reset_async_low    ,
+    jtag_ce1          : input  'tap logic              ,
+    jtag_ce2          : input  'tap logic              ,
+    jtag_tdo1         : output 'tap logic              ,
+    jtag_tdo2         : output 'tap logic              ,
+) {
+    var shift_low                : 'tap logic<64>;
+    var shift_high               : 'tap logic<64>;
+    var last_chain_er1           : 'tap logic    ;
+    var mailbox_low              : 'tap logic<64>;
+    var mailbox_high             : 'tap logic<64>;
+    var request_toggle           : 'tap logic    ;
+    var request_toggle_tap_meta_q: 'tap logic    ;
+    var request_toggle_tap_sync_q: 'tap logic    ;
+    var request_toggle_tap_seen_q: 'tap logic    ;
+
+    var mailbox_low_async    : 'cpu logic<64>;
+    var mailbox_high_async   : 'cpu logic<64>;
+    var request_toggle_async : 'cpu logic    ;
+    var request_toggle_meta_q: 'cpu logic    ;
+    var request_toggle_sync_q: 'cpu logic    ;
+    var request_toggle_seen_q: 'cpu logic    ;
+    var request_sync_warmup_q: 'cpu logic<2> ;
+
+    // CE is not guaranteed to remain asserted through UPDATE-DR.  Retain the
+    // chain selected during the preceding TCK activity so an ER2 status scan
+    // can never publish the ER1 shift register as a new command.
+    always_ff (jtag_tck, jtag_rst_n) {
+        if_reset {
+            shift_low                 = 64'd0;
+            shift_high                = 64'd0;
+            last_chain_er1            = 1'b0;
+            request_toggle_tap_meta_q = 1'b0;
+            request_toggle_tap_sync_q = 1'b0;
+            request_toggle_tap_seen_q = 1'b0;
+        } else {
+            // Disarm the retained chain after its UPDATE has toggled the
+            // mailbox request. A later non-ER DR update then cannot replay a
+            // stale command; a new CE1 capture takes precedence below.
+            request_toggle_tap_meta_q = request_toggle;
+            request_toggle_tap_sync_q = request_toggle_tap_meta_q;
+            if request_toggle_tap_sync_q != request_toggle_tap_seen_q {
+                request_toggle_tap_seen_q = request_toggle_tap_sync_q;
+                last_chain_er1            = 1'b0;
+            }
+
+            if jtag_ce1 {
+                last_chain_er1 = 1'b1;
+            } else if jtag_ce2 {
+                last_chain_er1 = 1'b0;
+            }
+
+            if jtag_ce1 && jtag_shift {
+                shift_low  = {shift_high[0], shift_low[63:1]};
+                shift_high = {jtag_tdi, shift_high[63:1]};
+            }
+        }
+    }
+
+    // The mailbox remains unchanged until the next complete ER1 scan.  Its
+    // toggle is the only control signal that crosses into the CPU clock
+    // domain; the two synchronizer stages give the bundled frame time to
+    // settle before it is sampled there.
+    always_ff (jtag_update, jtag_rst_n) {
+        if_reset {
+            mailbox_low    = 64'd0;
+            mailbox_high   = 64'd0;
+            request_toggle = 1'b0;
+        } else if last_chain_er1 {
+            mailbox_low    = shift_low;
+            mailbox_high   = shift_high;
+            request_toggle = !request_toggle;
+        }
+    }
+
+    unsafe (cdc) {
+        assign mailbox_low_async    = mailbox_low;
+        assign mailbox_high_async   = mailbox_high;
+        assign request_toggle_async = request_toggle;
+        assign jtag_tdo1            = response_bit;
+        assign jtag_tdo2            = status_bit;
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            request_toggle_meta_q = 1'b0;
+            request_toggle_sync_q = 1'b0;
+            request_toggle_seen_q = 1'b0;
+            request_sync_warmup_q = 2'd0;
+            command_valid         = 1'b0;
+            command_frame_low     = 64'd0;
+            command_frame_high    = 64'd0;
+        } else {
+            request_toggle_meta_q = request_toggle_async;
+            request_toggle_sync_q = request_toggle_meta_q;
+            command_valid         = 1'b0;
+
+            // rst_n can fall when the PLL loses lock without resetting the
+            // JTAG producer. Align to its existing toggle for three clocks so
+            // relock cannot replay the previous mailbox contents.
+            if request_sync_warmup_q != 2'd3 {
+                request_sync_warmup_q = request_sync_warmup_q + 2'd1;
+                request_toggle_seen_q = request_toggle_sync_q;
+            } else if request_toggle_sync_q != request_toggle_seen_q {
+                request_toggle_seen_q = request_toggle_sync_q;
+                command_frame_low     = mailbox_low_async;
+                command_frame_high    = mailbox_high_async;
+                command_valid         = 1'b1;
+            }
+        }
+    }
+}

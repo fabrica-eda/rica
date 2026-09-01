@@ -10,12 +10,14 @@ use std::process::Command;
 
 use verify_riscv::ElfImage;
 
-const WINDOW_START: u8 = 0x20;
-const WINDOW_LENGTH: usize = 0xe0;
-const COMMAND_SETTLE_TCK: usize = 16;
 const DEFAULT_RUN_TCK: usize = 1_000_000;
 const HARDWARE_MEMORY_BYTES: usize = 256 * 1024;
 const TRAMPOLINE_WINDOW_BYTES: usize = 4 * 1024;
+const FRAME_BYTES: usize = 16;
+const FRAME_BITS: usize = FRAME_BYTES * 8;
+const PHYSICAL_SCAN_BITS: usize = FRAME_BITS;
+const FRAME_MAGIC: u8 = 0xd5;
+const FRAME_VERSION: u8 = 1;
 type MemoryRange = (u32, usize, usize);
 type HardwareMemoryImage = (Vec<u8>, Vec<MemoryRange>);
 
@@ -135,15 +137,43 @@ fn act4_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     Ok(elfs)
 }
 
-struct SvfI2c {
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum Opcode {
+    Nop = 0,
+    Write64 = 1,
+    SetTohost = 2,
+    Control = 3,
+    Select = 4,
+}
+
+fn frame(opcode: Opcode, sequence: u8, address: u32, data: u64, mask: u8) -> [u8; 16] {
+    let mut frame = [0_u8; FRAME_BYTES];
+    frame[0] = FRAME_MAGIC;
+    frame[1] = ((opcode as u8) << 4) | FRAME_VERSION;
+    frame[2] = sequence;
+    frame[3..7].copy_from_slice(&address.to_le_bytes());
+    frame[7..15].copy_from_slice(&data.to_le_bytes());
+    frame[15] = mask;
+    frame
+}
+
+trait DirectJtag {
+    /// Scan one physical 128-bit protocol frame, least-significant bit first.
+    /// `expected_tdo` checks the response selected by the preceding frame.
+    fn scan_frame(&mut self, frame: &[u8; FRAME_BYTES], expected_tdo: Option<bool>);
+    fn run_test(&mut self, clocks: usize);
+}
+
+struct SvfDirect {
     text: String,
 }
 
-impl SvfI2c {
+impl SvfDirect {
     fn new() -> Self {
         Self {
             text: String::from(
-                "! Rica RV64 JTAGG ER1 I2C hardware test\n\
+                "! Rica RV64 JTAGG ER1 direct hardware test\n\
                  TRST OFF;\n\
                  ENDIR IDLE;\n\
                  ENDDR IDLE;\n\
@@ -153,214 +183,49 @@ impl SvfI2c {
             ),
         }
     }
+
+    fn scan_hex(frame: &[u8; FRAME_BYTES]) -> String {
+        // SVF shifts bit zero first; hexadecimal text is written MSB first.
+        let mut encoded = String::with_capacity(PHYSICAL_SCAN_BITS.div_ceil(4));
+        for byte in frame.iter().rev() {
+            write!(encoded, "{byte:02X}").unwrap();
+        }
+        encoded
+    }
 }
 
-trait I2cJtag {
-    fn command(&mut self, scl: bool, sda_low: bool);
-    fn sample(&mut self, scl: bool, sda_low: bool, expected_high: bool);
-    fn run_test(&mut self, clocks: usize);
-
-    fn start(&mut self) {
-        self.command(true, false);
-        self.command(true, true);
-        self.command(false, true);
-    }
-
-    fn repeated_start(&mut self) {
-        self.command(false, false);
-        self.command(true, false);
-        self.command(true, true);
-        self.command(false, true);
-    }
-
-    fn stop(&mut self) {
-        self.command(false, true);
-        self.command(true, true);
-        self.command(true, false);
-    }
-
-    fn write_bit(&mut self, bit: bool) {
-        let drive_low = !bit;
-        self.command(false, drive_low);
-        self.command(true, drive_low);
-        self.command(false, drive_low);
-    }
-
-    fn write_byte(&mut self, byte: u8) {
-        for bit in (0..8).rev() {
-            self.write_bit(byte & (1 << bit) != 0);
-        }
-        self.command(false, false);
-        self.command(true, false);
-        self.sample(true, false, false);
-        self.command(false, false);
-    }
-
-    fn read_bit(&mut self, expected: bool, check: bool) {
-        self.command(false, false);
-        self.command(true, false);
-        if check {
-            self.sample(true, false, expected);
+impl DirectJtag for SvfDirect {
+    fn scan_frame(&mut self, frame: &[u8; FRAME_BYTES], expected_tdo: Option<bool>) {
+        let tdi = Self::scan_hex(frame);
+        if let Some(expected) = expected_tdo {
+            let tdo = if expected {
+                "F".repeat(PHYSICAL_SCAN_BITS / 4)
+            } else {
+                "0".repeat(PHYSICAL_SCAN_BITS.div_ceil(4))
+            };
+            let mask = "F".repeat(PHYSICAL_SCAN_BITS / 4);
+            writeln!(
+                self.text,
+                "SDR {PHYSICAL_SCAN_BITS} TDI ({tdi}) TDO ({tdo}) MASK ({mask});"
+            )
+            .unwrap();
         } else {
-            self.command(true, false);
+            writeln!(self.text, "SDR {PHYSICAL_SCAN_BITS} TDI ({tdi});").unwrap();
         }
-        self.command(false, false);
-    }
-
-    fn read_byte_masked(&mut self, expected: u8, mask: u8, acknowledge: bool) {
-        for bit in (0..8).rev() {
-            self.read_bit(expected & (1 << bit) != 0, mask & (1 << bit) != 0);
-        }
-        self.command(false, acknowledge);
-        self.command(true, acknowledge);
-        self.command(false, acknowledge);
-        self.command(false, false);
-    }
-
-    fn write_registers(&mut self, address: u8, data: &[u8]) {
-        self.start();
-        self.write_byte(0x42 << 1);
-        self.write_byte(address);
-        for byte in data {
-            self.write_byte(*byte);
-        }
-        self.stop();
-    }
-
-    fn expect_registers(&mut self, address: u8, expected: &[(u8, u8)]) {
-        self.start();
-        self.write_byte(0x42 << 1);
-        self.write_byte(address);
-        self.repeated_start();
-        self.write_byte((0x42 << 1) | 1);
-        for (index, (value, mask)) in expected.iter().copied().enumerate() {
-            self.read_byte_masked(value, mask, index + 1 != expected.len());
-        }
-        self.stop();
-    }
-}
-
-impl I2cJtag for SvfI2c {
-    fn command(&mut self, scl: bool, sda_low: bool) {
-        let command = (u8::from(scl) << 1) | u8::from(sda_low);
-        writeln!(self.text, "SDR 3 TDI ({command:X});").unwrap();
-        writeln!(self.text, "RUNTEST {COMMAND_SETTLE_TCK} TCK;").unwrap();
     }
 
     fn run_test(&mut self, clocks: usize) {
         writeln!(self.text, "RUNTEST {clocks} TCK;").unwrap();
     }
-
-    fn sample(&mut self, scl: bool, sda_low: bool, expected_high: bool) {
-        let command = (u8::from(scl) << 1) | u8::from(sda_low);
-        let expected = if expected_high { 7 } else { 0 };
-        writeln!(
-            self.text,
-            "SDR 3 TDI ({command:X}) TDO ({expected:X}) MASK (7);"
-        )
-        .unwrap();
-        writeln!(self.text, "RUNTEST {COMMAND_SETTLE_TCK} TCK;").unwrap();
-    }
-
-    fn start(&mut self) {
-        self.command(true, false);
-        self.command(true, true);
-        self.command(false, true);
-    }
-
-    fn repeated_start(&mut self) {
-        self.command(false, false);
-        self.command(true, false);
-        self.command(true, true);
-        self.command(false, true);
-    }
-
-    fn stop(&mut self) {
-        self.command(false, true);
-        self.command(true, true);
-        self.command(true, false);
-    }
-
-    fn write_bit(&mut self, bit: bool) {
-        let drive_low = !bit;
-        self.command(false, drive_low);
-        self.command(true, drive_low);
-        self.command(false, drive_low);
-    }
-
-    fn write_byte(&mut self, byte: u8) {
-        for bit in (0..8).rev() {
-            self.write_bit(byte & (1 << bit) != 0);
-        }
-        self.command(false, false);
-        self.command(true, false);
-        self.sample(true, false, false);
-        self.command(false, false);
-    }
-
-    fn read_bit(&mut self, expected: bool, check: bool) {
-        self.command(false, false);
-        self.command(true, false);
-        if check {
-            self.sample(true, false, expected);
-        } else {
-            self.command(true, false);
-        }
-        self.command(false, false);
-    }
-
-    fn read_byte_masked(&mut self, expected: u8, mask: u8, acknowledge: bool) {
-        for bit in (0..8).rev() {
-            self.read_bit(expected & (1 << bit) != 0, mask & (1 << bit) != 0);
-        }
-        self.command(false, acknowledge);
-        self.command(true, acknowledge);
-        self.command(false, acknowledge);
-        self.command(false, false);
-    }
-
-    fn write_registers(&mut self, address: u8, data: &[u8]) {
-        writeln!(
-            self.text,
-            "! WRITE register 0x{address:02x}, {} byte(s)",
-            data.len()
-        )
-        .unwrap();
-        self.start();
-        self.write_byte(0x42 << 1);
-        self.write_byte(address);
-        for byte in data {
-            self.write_byte(*byte);
-        }
-        self.stop();
-    }
-
-    fn expect_registers(&mut self, address: u8, expected: &[(u8, u8)]) {
-        writeln!(
-            self.text,
-            "! READ register 0x{address:02x}, {} byte(s)",
-            expected.len()
-        )
-        .unwrap();
-        self.start();
-        self.write_byte(0x42 << 1);
-        self.write_byte(address);
-        self.repeated_start();
-        self.write_byte((0x42 << 1) | 1);
-        for (index, (value, mask)) in expected.iter().copied().enumerate() {
-            self.read_byte_masked(value, mask, index + 1 != expected.len());
-        }
-        self.stop();
-    }
 }
 
-struct XvcI2c {
+struct XvcDirect {
     tms: Vec<bool>,
     tdi: Vec<bool>,
     checks: Vec<(usize, bool)>,
 }
 
-impl XvcI2c {
+impl XvcDirect {
     fn new() -> Self {
         let mut bus = Self {
             tms: Vec::new(),
@@ -392,33 +257,31 @@ impl XvcI2c {
         self.push(false, false);
     }
 
-    fn scan_dr(&mut self, value: u8, width: usize) -> std::ops::Range<usize> {
+    fn begin_scan_dr(&mut self) -> usize {
         for tms in [true, false, false] {
             self.push(tms, false);
         }
-        let start = self.tms.len();
-        for bit in 0..width {
-            self.push(bit + 1 == width, value & (1 << bit) != 0);
-        }
-        let end = self.tms.len();
+        self.tms.len()
+    }
+
+    fn end_scan_dr(&mut self) {
         self.push(true, false);
         self.push(false, false);
-        start..end
     }
 }
 
-impl I2cJtag for XvcI2c {
-    fn command(&mut self, scl: bool, sda_low: bool) {
-        let command = (u8::from(scl) << 1) | u8::from(sda_low);
-        self.scan_dr(command, 3);
-        self.run_test(COMMAND_SETTLE_TCK);
-    }
-
-    fn sample(&mut self, scl: bool, sda_low: bool, expected_high: bool) {
-        let command = (u8::from(scl) << 1) | u8::from(sda_low);
-        let bits = self.scan_dr(command, 3);
-        self.checks.extend(bits.map(|bit| (bit, expected_high)));
-        self.run_test(COMMAND_SETTLE_TCK);
+impl DirectJtag for XvcDirect {
+    fn scan_frame(&mut self, frame: &[u8; FRAME_BYTES], expected_tdo: Option<bool>) {
+        let start = self.begin_scan_dr();
+        for bit in 0..PHYSICAL_SCAN_BITS {
+            let value = bit < FRAME_BITS && frame[bit / 8] & (1 << (bit % 8)) != 0;
+            self.push(bit + 1 == PHYSICAL_SCAN_BITS, value);
+        }
+        if let Some(expected) = expected_tdo {
+            self.checks
+                .extend((start..start + PHYSICAL_SCAN_BITS).map(|bit| (bit, expected)));
+        }
+        self.end_scan_dr();
     }
 
     fn run_test(&mut self, clocks: usize) {
@@ -479,7 +342,7 @@ impl XvcClient {
         packed
     }
 
-    fn shift(&mut self, bus: &XvcI2c) -> Result<(), Box<dyn Error>> {
+    fn shift(&mut self, bus: &XvcDirect) -> Result<(), Box<dyn Error>> {
         if bus.tms.len() != bus.tdi.len() {
             return Err("internal XVC TMS/TDI length mismatch".into());
         }
@@ -506,7 +369,8 @@ impl XvcClient {
                 let actual = tdo[local / 8] & (1 << (local % 8)) != 0;
                 if actual != expected {
                     return Err(format!(
-                        "XVC TDO mismatch at scan bit {bit}: expected {}, got {}",
+                        "XVC TDO mismatch at scan bit {bit} (check {check}/{}, local bit {local}): expected {}, got {}",
+                        bus.checks.len(),
                         u8::from(expected),
                         u8::from(actual)
                     )
@@ -555,37 +419,109 @@ fn memory_image(image: &ElfImage) -> Result<HardwareMemoryImage, Box<dyn Error>>
     Ok((bytes, ranges))
 }
 
+struct DirectSession<'a, B: DirectJtag> {
+    bus: &'a mut B,
+    next_sequence: u8,
+}
+
+impl<'a, B: DirectJtag> DirectSession<'a, B> {
+    fn new(bus: &'a mut B) -> Self {
+        Self {
+            bus,
+            next_sequence: 1,
+        }
+    }
+
+    fn issue(&mut self, opcode: Opcode, address: u32, data: u64, mask: u8) -> u8 {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.bus
+            .scan_frame(&frame(opcode, sequence, address, data, mask), None);
+        sequence
+    }
+
+    fn control(&mut self, value: u64) -> u8 {
+        self.issue(Opcode::Control, 0, value, 0)
+    }
+
+    fn expect_selected_bits(&mut self, expected: &[(u32, bool)]) {
+        let mut pending = None;
+        for &(selector, value) in expected {
+            let sequence = self.next_sequence;
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+            let select = frame(Opcode::Select, sequence, selector, 0, 0);
+            self.bus.scan_frame(&select, pending);
+            pending = Some(value);
+        }
+
+        // SELECT takes effect on Update-DR, so the response to the final
+        // selector is observed throughout this following scan.
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let nop = frame(Opcode::Nop, sequence, 0, 0, 0);
+        self.bus.scan_frame(&nop, pending);
+    }
+}
+
+fn push_value_bits(expected: &mut Vec<(u32, bool)>, first: u32, value: u64, width: u32) {
+    expected.extend((0..width).map(|bit| (first + bit, value & (1_u64 << bit) != 0)));
+}
+
 fn emit_test(
-    bus: &mut impl I2cJtag,
+    bus: &mut impl DirectJtag,
     image: &ElfImage,
     run_tck: usize,
     expected_tohost: u64,
 ) -> Result<(), Box<dyn Error>> {
     let (memory, ranges) = memory_image(image)?;
+    let mut session = DirectSession::new(bus);
 
-    bus.expect_registers(0x00, &[(0x52, 0xff), (0x03, 0xff), (0x01, 0xff)]);
-    bus.write_registers(0x10, &[0x02]);
-    bus.write_registers(0x08, &(image.tohost as u32).to_le_bytes());
+    // Quiesce a preceding test before replacing its instruction image.
+    session.control(2);
 
     for (address_base, start, end) in ranges {
-        for offset in (start..end).step_by(WINDOW_LENGTH) {
-            let chunk_end = end.min(offset + WINDOW_LENGTH);
-            let aperture = address_base + u32::try_from(offset - start)?;
-            bus.write_registers(0x04, &aperture.to_le_bytes());
-            bus.write_registers(WINDOW_START, &memory[offset..chunk_end]);
+        for offset in (start..end).step_by(8) {
+            let chunk_end = end.min(offset + 8);
+            let mut bytes = [0_u8; 8];
+            bytes[..chunk_end - offset].copy_from_slice(&memory[offset..chunk_end]);
+            let valid_bytes = chunk_end - offset;
+            let mask = if valid_bytes == 8 {
+                u8::MAX
+            } else {
+                (1_u8 << valid_bytes) - 1
+            };
+            let address = address_base + u32::try_from(offset - start)?;
+            session.issue(Opcode::Write64, address, u64::from_le_bytes(bytes), mask);
         }
     }
 
-    bus.write_registers(0x10, &[0x01]);
-    bus.run_test(run_tck);
-    // A self-checking ELF reports through tohost before entering its terminal
-    // loop. Architectural ECALL/EBREAK now trap instead of asserting the legacy
-    // debug halt bit, so verify lock/run/result-valid/result without requiring
-    // a non-RISC-V halt side effect.
-    let expected_status = 0x0b | (u8::from(expected_tohost & 1 != 0) << 4);
-    bus.expect_registers(0x03, &[(expected_status, 0x1b)]);
-    let expected_result = expected_tohost.to_le_bytes().map(|byte| (byte, 0xff));
-    bus.expect_registers(0x18, &expected_result);
+    let set_tohost_sequence = session.issue(Opcode::SetTohost, image.tohost as u32, 0, 0);
+    let mut load_status = vec![(20, false), (21, false)];
+    push_value_bits(&mut load_status, 24, u64::from(set_tohost_sequence), 8);
+    session.expect_selected_bits(&load_status);
+
+    // Reassert reset and clear the previous result only after checking that
+    // the complete image and tohost address were accepted without error.
+    session.control(2);
+    let run_sequence = session.control(1);
+    session.bus.run_test(run_tck);
+
+    // Each SELECT updates the response mux only after its own scan. Pipeline
+    // selectors and check the previous selection on every bit of the next scan.
+    let mut expected = Vec::with_capacity(94);
+    push_value_bits(&mut expected, 0, 0x52, 8);
+    push_value_bits(&mut expected, 8, 0x04, 8);
+    expected.extend([
+        (16, true),  // PLL locked
+        (17, true),  // run remains enabled
+        (18, true),  // tohost result captured
+        (19, false), // architectural traps do not assert debug halt
+        (20, false), // no WRITE64 remains busy
+        (21, false), // no malformed/busy/run-time command was rejected
+    ]);
+    push_value_bits(&mut expected, 24, u64::from(run_sequence), 8);
+    push_value_bits(&mut expected, 32, expected_tohost, 64);
+    session.expect_selected_bits(&expected);
     Ok(())
 }
 
@@ -594,7 +530,7 @@ fn test_svf(
     run_tck: usize,
     expected_tohost: u64,
 ) -> Result<String, Box<dyn Error>> {
-    let mut bus = SvfI2c::new();
+    let mut bus = SvfDirect::new();
     emit_test(&mut bus, image, run_tck, expected_tohost)?;
     bus.text.push_str("STATE IDLE;\n");
     Ok(bus.text)
@@ -618,7 +554,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut program = true;
     let mut act4 = false;
     let mut xvc_address = None::<String>;
-    let mut bitstream = project.join("build/riscv-hardware-test-125.bit");
+    let mut bitstream = project.join("build/riscv-hardware-test-125-texo.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {
@@ -697,7 +633,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(OsStr::to_str)
             .ok_or("ELF has no valid filename")?;
         if let Some(xvc) = &mut xvc {
-            let mut bus = XvcI2c::new();
+            let mut bus = XvcDirect::new();
             emit_test(&mut bus, &image, run_tck, expected_tohost)?;
             xvc.shift(&bus)?;
         } else {

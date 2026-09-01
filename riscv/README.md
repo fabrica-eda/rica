@@ -111,31 +111,22 @@ cargo run --locked --offline -p verify-riscv -- --regfile-only
 ```
 
 Export either the current core or the complete board wrapper's 125 MHz-targeted
-ECP5 mapping for nextpnr diagnostics:
+ECP5 mapping for netlist diagnostics. This does not run the system's old
+nextpnr 0.6 binary; production placement, STA, and bitgen use Texo below.
 
 ```sh
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- Top
 cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- HardwareTestTop
-nextpnr-ecp5 --um5g-85k --package CABGA381 --speed 8 \
-  --json riscv/build/riscv-hardware-test-125.nextpnr.json \
-  --lpf riscv/lfe5um5g-85f-evn.lpf \
-  --textcfg riscv/build/riscv-hardware-test-125.bit.config \
-  --report riscv/build/riscv-hardware-test-125.nextpnr-report.json \
-  --freq 125 --seed 6
-cargo run --locked --offline -p verify-riscv --bin nextpnr-riscv -- \
-  --validate-board-report riscv/build/riscv-hardware-test-125.nextpnr-report.json
-ecppack riscv/build/riscv-hardware-test-125.bit.config \
-  riscv/build/riscv-hardware-test-125.bit --compress --freq 38.8
 ```
 
-`HardwareTestTop` adds 256 KiB of JTAG-I2C-loadable unified true-dual-port BRAM,
+`HardwareTestTop` adds 256 KiB of direct-JTAG-loadable unified true-dual-port BRAM,
 CPU run/reset control, and a `tohost` result mailbox. The first physical port
 serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction buffer consumes two 32-bit instructions from each
 line. After timing closure, routing, and packing
-`riscv/build/riscv-hardware-test-125.bit`, program it and run the bundled RV64
+`riscv/build/riscv-hardware-test-125-texo.bit`, program it and run the bundled RV64
 ELFs on the EVN with:
 
 ```sh
@@ -151,8 +142,9 @@ checks the status and 64-bit `tohost` result. The physical test RAM accepts a
 at `0x80000000..0x8003efff`. The timing-critical high region maps directly to
 BRAM; the trampoline is relocated to the final physical 4 KiB.
 
-When the USB adapter is attached to a Windows-side openFPGALoader XVC server,
-the same runner programs the FPGA and drives the JTAG-I2C protocol directly
+When the USB adapter is attached to a Windows-side XVC server (including the
+D2XX bridge used for the EVN),
+the same runner programs the FPGA and drives the direct ER1 protocol
 over TCP:
 
 ```sh
@@ -160,9 +152,11 @@ cargo run --locked --offline --release -p verify-riscv \
   --bin hardware-riscv-tests -- --xvc HOST:PORT
 ```
 
-`--act4` selects all 51 pinned ACT4 RV64I ELFs. It is functional with either
-transport, but the current byte-oriented I2C loader is slow over an XVC server
-whose maximum shift packet is 2048 bits.
+`--act4` selects all 51 pinned ACT4 RV64I ELFs. ER1 carries fixed 128-bit
+commands (8-byte masked memory writes, control, and response selection), while
+JTDO1 returns one stable selected response bit throughout each scan. ECP5's
+registered JTDI/JSHIFT timing requires exactly 128 physical bits here; adding
+the dummy bit used by the former two-bit bridge misaligns this full frame.
 
 The board wrapper binds the EVN's 12 MHz reference to a 124.8 MHz EHXPLLL. Its
 ROM increments x31 immediately after reset and then enters a delay/branch loop
@@ -188,6 +182,7 @@ target/texo-git/bin/texo pnr riscv --top HardwareTestTop --package CABGA381 --sp
   --lpf riscv/lfe5um5g-85f-evn.lpf \
   --pll-binding riscv/pll-12-to-124p8.json \
   --synthesis-goal-mhz 125 --jtagg-prefix jtag \
+  --placement-weight-exponent 2 \
   --register-enable-fanout ff_core.csr_file.*=4 \
   --output riscv/build/riscv-hardware-test-125.texo.json
 ```
@@ -202,13 +197,14 @@ target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125.texo.json \
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
 `f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). On the current
-256 KiB wrapper, the refactored memory maps to 14,966 ECP5 cells. A complete
-placement and routing run takes 30.24 s and closes 124.8 MHz at +0.061 ns WNS,
-zero setup TNS, +0.290 ns hold WNS, and zero hold TNS.
+256 KiB direct-JTAG wrapper maps to 16,461 ECP5 cells (13,545 implemented
+cells, including 136 DP16KD and one JTAGG). Placement weight exponent 2 closes
+124.8 MHz at +0.014 ns setup WNS, zero setup TNS, +0.290 ns hold WNS, and zero
+hold TNS with Texo 0.1.6.
 
-The nextpnr seed-6 bitstream is timing-qualified by the explicit related-clock
-validator. JTAG detection, SRAM programming, ELF upload, CPU execution, and
-mailbox readback pass all six bundled RV64 ELFs on the current 256 KiB wrapper
-at 124.8 MHz, using both direct USB and XVC transports.
+The Texo bitstream passes JTAG detection, SRAM programming, direct ER1 ELF
+upload, CPU execution, and 64-bit mailbox readback for all six bundled RV64
+ELFs and all 51 enabled ACT4 RV64I ELFs on the current 256 KiB wrapper at
+124.8 MHz through the Windows D2XX XVC transport.
 Use `--um5g-85k`, not `--85k`: the latter targets LFE5U and produces a
 bitstream with the wrong device ID and configuration semantics.

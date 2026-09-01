@@ -153,19 +153,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Top.veryl",
         "InstructionBuffer.veryl",
         "HardwareMemory.veryl",
+        "JtagDebugTransport.veryl",
         "HardwareTestTop.veryl",
     ] {
         source.push('\n');
         source.push_str(&fs::read_to_string(project.join("src").join(file))?);
     }
-    if top == "HardwareTestTop" {
-        source = source.replace("rica_i2c::", "");
-        source.push('\n');
-        source.push_str(&fs::read_to_string(
-            project.parent().unwrap().join("i2c/src/I2cTarget250.veryl"),
-        )?);
-    }
-
     let design = analyze_and_lower(&source, "rica_riscv", &top)?;
     let synthesized = synthesize(&design)?;
     let mut mapped = map_to_ecp5_with_options(

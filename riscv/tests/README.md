@@ -33,13 +33,13 @@ Set `LLVM_MC` or `RUST_LLD` to override either executable.
 
 ## EVN hardware runner
 
-The same ELF contract is supported by the JTAG-I2C hardware harness:
+The same ELF contract is supported by the direct-JTAG hardware harness:
 
 ```sh
 cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-tests
 ```
 
-The default command programs `build/riscv-hardware-test-125.bit` and then runs
+The default command programs `build/riscv-hardware-test-125-texo.bit` and then runs
 all bundled tests. `--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
 execution window. `--expect-tohost value` selects an exact diagnostic mailbox
@@ -49,11 +49,10 @@ Each ELF must fit in the 4 KiB reset-trampoline window
 `0x80000000..0x8003efff`.
 
 The runner writes generated SVF files under `build/hardware-rv64`. A successful
-result covers the entire board path: JTAGG ER1, I2C register transport, BRAM
-loading, PLL/reset, RV64 execution, and `tohost` readback. The previous 4 KiB
-wrapper passed all six bundled smoke tests on the EVN at 124.8 MHz. The current
-256 KiB unified-memory wrapper must not be programmed as a qualified image
-until its 124.8 MHz timing failure is closed.
+result covers the entire board path: JTAGG ER1, 128-bit command transport,
+BRAM loading, PLL/reset, RV64 execution, and `tohost` readback. The timing-
+closed 256 KiB wrapper passes all six bundled smoke tests and all 51 enabled
+ACT4 RV64I tests on the EVN at 124.8 MHz.
 
 ## Architectural test integration
 

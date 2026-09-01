@@ -1,8 +1,9 @@
-/// JTAG-I2C loadable RV64 hardware-test system.
+/// Direct-JTAG loadable RV64 hardware-test system.
 ///
-/// ER1 retains the established two-bit I2C bit-bang protocol. The CPU remains
-/// reset while the host fills the 4 KiB Harvard memories, then reports its
-/// self-check result through the programmed `tohost` address.
+/// ER1 carries one 128-bit command frame per update. The CPU remains reset
+/// while the host fills memory, then reports its self-check result through the
+/// programmed `tohost` address. ER1 returns the selected response bit while
+/// each command frame is scanned; ER2 independently reports PLL lock.
 module HardwareTestTop (
     clk        : input  'reference clock             ,
     clk_cpu    : input  'cpu       clock             ,
@@ -21,39 +22,38 @@ module HardwareTestTop (
     jtag_tdo1  : output 'tap       logic             ,
     jtag_tdo2  : output 'tap       logic             ,
 ) {
-    var shift_register     : 'tap logic          <2>;
-    var master_scl         : 'tap logic             ;
-    var master_sda_low     : 'tap logic             ;
-    var target_scl         : 'cpu logic             ;
-    var target_sda_low     : 'cpu logic             ;
-    var wired_sda          : 'cpu logic             ;
     var debug_reset_async_n: 'cpu reset_async_low   ;
     var debug_reset_sync_q : 'cpu logic          <2>;
     var debug_rst_n        : 'cpu reset_async_low   ;
 
-    var debug_address       : 'cpu logic<8>;
-    var debug_write_data    : 'cpu logic<8>;
-    var debug_write_strobe  : 'cpu logic   ;
-    var debug_read_data     : 'cpu logic<8>;
-    var debug_read_address_q: 'cpu logic<8>;
-    var debug_identity_mux  : 'cpu logic<8>;
-    var debug_result_mux    : 'cpu logic<8>;
-    var debug_identity_q    : 'cpu logic<8>;
-    var debug_result_q      : 'cpu logic<8>;
-    var debug_read_group_q  : 'cpu logic<2>;
+    var command_valid      : 'cpu logic    ;
+    var command_frame_low  : 'cpu logic<64>;
+    var command_frame_high : 'cpu logic<64>;
+    var response_selector_q: 'cpu logic<8> ;
+    var response_bank      : 'cpu logic<32>;
+    var response_mux_16    : 'cpu logic<16>;
+    var response_mux_8     : 'cpu logic<8> ;
+    var response_mux_4     : 'cpu logic<4> ;
+    var response_mux_2     : 'cpu logic<2> ;
+    var response_bit       : 'cpu logic    ;
 
     var run_q               : 'cpu logic              ;
-    var aperture_base_q     : 'cpu logic          <32>;
     var tohost_address_q    : 'cpu logic          <32>;
     var result_q            : 'cpu logic          <64>;
     var result_valid_q      : 'cpu logic              ;
+    var command_error_q     : 'cpu logic              ;
+    var last_sequence_q     : 'cpu logic          <8> ;
     var activity_q          : 'cpu logic          <24>;
     var cpu_rst_n           : 'cpu reset_async_low    ;
-    var memory_debug_write  : 'cpu logic              ;
-    var memory_debug_addr   : 'cpu logic          <32>;
     var memory_debug_write_q: 'cpu logic          <2> ;
     var memory_debug_addr_q : 'cpu logic          <32>;
     var memory_debug_data_q : 'cpu logic          <8> ;
+    var write_busy_q        : 'cpu logic              ;
+    var write_address_q     : 'cpu logic          <32>;
+    var write_data_q        : 'cpu logic          <64>;
+    var write_mask_q        : 'cpu logic          <8> ;
+    var write_index_q       : 'cpu logic          <3> ;
+    var write_sequence_q    : 'cpu logic          <8> ;
 
     var instruction                  : 'cpu    logic<32>;
     var instruction_valid            : 'cpu    logic    ;
@@ -82,16 +82,25 @@ module HardwareTestTop (
     var unused_commit_mem_wdata      : 'cpu    logic<64>;
     var unused_commit_mem_wmask      : 'cpu    logic<8> ;
 
-    inst i2c_target: rica_i2c::I2cTarget250 (
+    inst jtag_debug_transport: JtagDebugTransport (
         clk               : clk_cpu           ,
         rst_n             : debug_rst_n       ,
-        scl_i             : target_scl        ,
-        sda_i             : wired_sda         ,
-        sda_drive_low     : target_sda_low    ,
-        debug_address     : debug_address     ,
-        debug_write_data  : debug_write_data  ,
-        debug_write_strobe: debug_write_strobe,
-        debug_read_data   : debug_read_data   ,
+        jtag_tdi          : jtag_tdi          ,
+        jtag_tck          : jtag_tck          ,
+        jtag_rti1         : jtag_rti1         ,
+        jtag_rti2         : jtag_rti2         ,
+        jtag_shift        : jtag_shift        ,
+        jtag_update       : jtag_update       ,
+        jtag_rst_n        : jtag_rst_n        ,
+        jtag_ce1          : jtag_ce1          ,
+        jtag_ce2          : jtag_ce2          ,
+        jtag_tdo1         : jtag_tdo1         ,
+        jtag_tdo2         : jtag_tdo2         ,
+        command_valid     : command_valid     ,
+        command_frame_low : command_frame_low ,
+        command_frame_high: command_frame_high,
+        response_bit      : response_bit      ,
+        status_bit        : pll_locked        ,
     );
 
     inst instruction_buffer: InstructionBuffer (
@@ -162,27 +171,9 @@ module HardwareTestTop (
         debug_x31             : debug_x31              ,
     );
 
-    always_ff (jtag_tck, jtag_rst_n) {
-        if_reset {
-            shift_register = 2'b00;
-        } else if jtag_ce1 && jtag_shift {
-            shift_register = {jtag_tdi, shift_register[1]};
-        }
-    }
-
-    always_ff (jtag_update, jtag_rst_n) {
-        if_reset {
-            master_scl     = 1'b1;
-            master_sda_low = 1'b0;
-        } else {
-            master_scl     = shift_register[1];
-            master_sda_low = shift_register[0];
-        }
-    }
-
     // PLL lock and TAP reset may assert reset without a running CPU clock.
-    // Release is synchronized so placement-dependent reset recovery cannot
-    // leave the I2C target's one-hot state in an invalid combination.
+    // Release is synchronized so the CPU-side command mailbox and test system
+    // cannot leave reset on a placement-dependent recovery edge.
     always_ff (clk_cpu, debug_reset_async_n) {
         if_reset {
             debug_reset_sync_q = 2'b00;
@@ -194,34 +185,56 @@ module HardwareTestTop (
     unsafe (cdc) {
         assign debug_reset_async_n = jtag_rst_n && pll_locked;
         assign debug_rst_n         = debug_reset_sync_q[1];
-        assign target_scl          = master_scl;
-        assign wired_sda           = !(master_sda_low || target_sda_low);
-        assign jtag_tdo1           = wired_sda;
-        assign jtag_tdo2           = pll_locked;
     }
 
     always_comb {
-        cpu_rst_n          = debug_rst_n && run_q;
-        memory_debug_write = debug_write_strobe && !run_q && (debug_address >= 8'h20);
-        memory_debug_addr  = aperture_base_q + {24'h000000, debug_address - 8'h20};
-
-        case debug_read_address_q[1:0] {
-            2'd0   : debug_identity_mux = 8'h52;
-            2'd1   : debug_identity_mux = 8'h03;
-            2'd2   : debug_identity_mux = 8'h01;
-            default: debug_identity_mux = {
-                2'b00, activity_q[23], result_q[0], result_valid_q, halted, run_q, pll_locked
+        cpu_rst_n     = debug_rst_n && run_q;
+        response_bank = 32'd0;
+        case response_selector_q[7:5] {
+            3'd0   : response_bank = {
+                last_sequence_q, 2'b00, command_error_q, write_busy_q || (memory_debug_write_q != 2'd0), halted,
+                result_valid_q, run_q, pll_locked, 8'h04, 8'h52
             };
+            3'd1   : response_bank = result_q[31:0];
+            3'd2   : response_bank = result_q[63:32];
+            3'd3   : response_bank = debug_x31[31:0];
+            3'd4   : response_bank = debug_x31[63:32];
+            default: {}
         }
-        case debug_read_address_q[2:0] {
-            3'd0   : debug_result_mux = result_q[7:0];
-            3'd1   : debug_result_mux = result_q[15:8];
-            3'd2   : debug_result_mux = result_q[23:16];
-            3'd3   : debug_result_mux = result_q[31:24];
-            3'd4   : debug_result_mux = result_q[39:32];
-            3'd5   : debug_result_mux = result_q[47:40];
-            3'd6   : debug_result_mux = result_q[55:48];
-            default: debug_result_mux = result_q[63:56];
+        // A static five-level tree avoids the unsupported dynamic packed
+        // select without exploding into one equality decoder per response bit.
+        for index in 0..16 {
+            if response_selector_q[0] {
+                response_mux_16[index] = response_bank[index * 2 + 1];
+            } else {
+                response_mux_16[index] = response_bank[index * 2];
+            }
+        }
+        for index in 0..8 {
+            if response_selector_q[1] {
+                response_mux_8[index] = response_mux_16[index * 2 + 1];
+            } else {
+                response_mux_8[index] = response_mux_16[index * 2];
+            }
+        }
+        for index in 0..4 {
+            if response_selector_q[2] {
+                response_mux_4[index] = response_mux_8[index * 2 + 1];
+            } else {
+                response_mux_4[index] = response_mux_8[index * 2];
+            }
+        }
+        for index in 0..2 {
+            if response_selector_q[3] {
+                response_mux_2[index] = response_mux_4[index * 2 + 1];
+            } else {
+                response_mux_2[index] = response_mux_4[index * 2];
+            }
+        }
+        if response_selector_q[4] {
+            response_bit = response_mux_2[1];
+        } else {
+            response_bit = response_mux_2[0];
         }
 
         if result_valid_q {
@@ -235,73 +248,106 @@ module HardwareTestTop (
 
     always_ff (clk_cpu, debug_rst_n) {
         if_reset {
-            debug_read_address_q = 8'h00;
-            debug_identity_q     = 8'hff;
-            debug_result_q       = 8'hff;
-            debug_read_group_q   = 2'd3;
-            debug_read_data      = 8'hff;
-        } else {
-            debug_read_address_q = debug_address;
-            debug_identity_q     = debug_identity_mux;
-            debug_result_q       = debug_result_mux;
-            if debug_read_address_q[7:2] == 6'b000000 {
-                debug_read_group_q = 2'd0;
-            } else if debug_read_address_q[7:3] == 5'b00011 {
-                debug_read_group_q = 2'd1;
-            } else if debug_read_address_q == 8'h10 {
-                debug_read_group_q = 2'd2;
-            } else {
-                debug_read_group_q = 2'd3;
-            }
-            case debug_read_group_q {
-                2'd0   : debug_read_data = debug_identity_q;
-                2'd1   : debug_read_data = debug_result_q;
-                2'd2   : debug_read_data = {6'b000000, result_valid_q, run_q};
-                default: debug_read_data = 8'hff;
-            }
-        }
-    }
-
-    always_ff (clk_cpu, debug_rst_n) {
-        if_reset {
             run_q                = 1'b0;
-            aperture_base_q      = 32'h0000_0000;
             tohost_address_q     = 32'h0000_0000;
             result_q             = 64'h0000_0000_0000_0000;
             result_valid_q       = 1'b0;
+            command_error_q      = 1'b0;
+            last_sequence_q      = 8'h00;
+            response_selector_q  = 8'd0;
             activity_q           = 24'h000000;
             memory_debug_write_q = 2'd0;
             memory_debug_addr_q  = 32'h0000_0000;
             memory_debug_data_q  = 8'h00;
+            write_busy_q         = 1'b0;
+            write_address_q      = 32'h0000_0000;
+            write_data_q         = 64'h0000_0000_0000_0000;
+            write_mask_q         = 8'h00;
+            write_index_q        = 3'd0;
+            write_sequence_q     = 8'h00;
         } else {
             activity_q = activity_q + 24'd1;
-            if memory_debug_write {
-                memory_debug_write_q = 2'd3;
-                memory_debug_addr_q  = memory_debug_addr;
-                memory_debug_data_q  = debug_write_data;
-            } else if memory_debug_write_q != 2'd0 {
+
+            // HardwareMemory is in the divided memory clock domain. Keep each
+            // byte's write enable, address, and data stable for three CPU
+            // clocks, matching the established CDC stretch contract.
+            if memory_debug_write_q != 2'd0 {
                 memory_debug_write_q = memory_debug_write_q - 2'd1;
-            }
-            if debug_write_strobe {
-                case debug_address {
-                    8'h04: aperture_base_q[7:0]    = debug_write_data;
-                    8'h05: aperture_base_q[15:8]   = debug_write_data;
-                    8'h06: aperture_base_q[23:16]  = debug_write_data;
-                    8'h07: aperture_base_q[31:24]  = debug_write_data;
-                    8'h08: tohost_address_q[7:0]   = debug_write_data;
-                    8'h09: tohost_address_q[15:8]  = debug_write_data;
-                    8'h0a: tohost_address_q[23:16] = debug_write_data;
-                    8'h0b: tohost_address_q[31:24] = debug_write_data;
-                    8'h10: {
-                        run_q = debug_write_data[0];
-                        if debug_write_data[1] {
-                            result_valid_q = 1'b0;
-                            result_q       = 64'h0000_0000_0000_0000;
-                        }
-                    }
-                    default: {}
+            } else if write_busy_q {
+                if write_mask_q[0] {
+                    memory_debug_write_q = 2'd3;
+                    memory_debug_addr_q  = write_address_q;
+                    memory_debug_data_q  = write_data_q[7:0];
+                    write_mask_q[0]      = 1'b0;
+                }
+
+                if write_index_q != 3'd7 {
+                    write_index_q   = write_index_q + 3'd1;
+                    write_address_q = write_address_q + 32'd1;
+                    write_data_q    = {8'd0, write_data_q[63:8]};
+                    write_mask_q    = {1'b0, write_mask_q[7:1]};
+                } else if !write_mask_q[0] {
+                    write_busy_q    = 1'b0;
+                    last_sequence_q = write_sequence_q;
                 }
             }
+
+            if command_valid {
+                if (command_frame_low[7:0] != 8'hd5) || (command_frame_low[11:8] != 4'd1) {
+                    command_error_q = 1'b1;
+                } else {
+                    case command_frame_low[15:12] {
+                        // NOP preserves the completed side-effect sequence.
+                        4'd0: {}
+                        // WRITE64 is accepted only while the CPU is stopped
+                        // and no previous write is still being serialized.
+                        4'd1: {
+                            if write_busy_q || run_q {
+                                command_error_q = 1'b1;
+                                if !write_busy_q {
+                                    last_sequence_q = command_frame_low[23:16];
+                                }
+                            } else {
+                                write_busy_q     = 1'b1;
+                                write_address_q  = command_frame_low[55:24];
+                                write_data_q     = {command_frame_high[55:0], command_frame_low[63:56]};
+                                write_mask_q     = command_frame_high[63:56];
+                                write_index_q    = 3'd0;
+                                write_sequence_q = command_frame_low[23:16];
+                            }
+                        }
+                        // SET_TOHOST
+                        4'd2: {
+                            if write_busy_q {
+                                command_error_q = 1'b1;
+                            } else {
+                                tohost_address_q = command_frame_low[55:24];
+                                last_sequence_q  = command_frame_low[23:16];
+                            }
+                        }
+                        // CONTROL: data[0] controls run; data[1] clears the
+                        // prior result and sticky command error.
+                        4'd3: {
+                            if write_busy_q {
+                                command_error_q = 1'b1;
+                            } else {
+                                run_q           = command_frame_low[56];
+                                last_sequence_q = command_frame_low[23:16];
+                                if command_frame_low[57] {
+                                    result_valid_q  = 1'b0;
+                                    result_q        = 64'h0000_0000_0000_0000;
+                                    command_error_q = 1'b0;
+                                }
+                            }
+                        }
+                        // SELECT changes the stable ER1 response bit without
+                        // disturbing the completed transaction sequence.
+                        4'd4   : response_selector_q = command_frame_low[31:24];
+                        default: command_error_q     = 1'b1;
+                    }
+                }
+            }
+
             if run_q && data_we && (data_addr[31:0] == tohost_address_q) {
                 result_q       = data_wdata;
                 result_valid_q = data_wdata != 64'h0000_0000_0000_0000;

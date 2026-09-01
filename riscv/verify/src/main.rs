@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{cmp, collections::HashMap};
 
-use celox::SimulatorBuilder;
+use celox::{BigUint, SimulatorBuilder};
 use object::{Object, ObjectSymbol};
 use struo_celox::ecp5_simulator;
 use struo_frontend_veryl::analyze_and_lower;
@@ -851,6 +851,153 @@ fn verify_hardware_memory_rtl(
     Ok(())
 }
 
+fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
+    let source = fs::read_to_string(project.join("src/JtagDebugTransport.veryl"))?;
+    let mut simulator = SimulatorBuilder::new(&source, "JtagDebugTransport").build_native()?;
+    let clk = simulator.event("clk");
+    let jtag_tck = simulator.event("jtag_tck");
+    let jtag_update = simulator.event("jtag_update");
+    let rst_n = simulator.signal("rst_n");
+    let jtag_rst_n = simulator.signal("jtag_rst_n");
+    let jtag_tdi = simulator.signal("jtag_tdi");
+    let jtag_shift = simulator.signal("jtag_shift");
+    let jtag_ce1 = simulator.signal("jtag_ce1");
+    let jtag_ce2 = simulator.signal("jtag_ce2");
+    let response_bit = simulator.signal("response_bit");
+    let status_bit = simulator.signal("status_bit");
+    let command_valid = simulator.signal("command_valid");
+    let command_frame_low = simulator.signal("command_frame_low");
+    let command_frame_high = simulator.signal("command_frame_high");
+    let jtag_tdo1 = simulator.signal("jtag_tdo1");
+    let jtag_tdo2 = simulator.signal("jtag_tdo2");
+
+    simulator.modify(|io| {
+        io.set(rst_n, 0_u8);
+        io.set(jtag_rst_n, 0_u8);
+        io.set(jtag_tdi, 0_u8);
+        io.set(jtag_shift, 0_u8);
+        io.set(jtag_ce1, 0_u8);
+        io.set(jtag_ce2, 0_u8);
+        io.set(response_bit, 1_u8);
+        io.set(status_bit, 1_u8);
+    })?;
+    simulator.tick(jtag_tck)?;
+    simulator.tick(jtag_update)?;
+    simulator.tick(clk)?;
+    simulator.modify(|io| {
+        io.set(rst_n, 1_u8);
+        io.set(jtag_rst_n, 1_u8);
+    })?;
+    // The real CPU clock runs throughout a 128-TCK scan. Complete the reset
+    // alignment here before presenting the first mailbox update.
+    for _ in 0..4 {
+        simulator.tick(clk)?;
+    }
+
+    if simulator.get(jtag_tdo1) != BigUint::from(1_u8)
+        || simulator.get(jtag_tdo2) != BigUint::from(1_u8)
+    {
+        return Err("direct JTAG stable response outputs are not transparent".into());
+    }
+
+    let mut frame = [0_u8; 16];
+    frame[0] = 0xd5;
+    frame[1] = 0x11;
+    frame[2] = 0x6a;
+    frame[3..7].copy_from_slice(&0x8001_2340_u32.to_le_bytes());
+    frame[7..15].copy_from_slice(&0x8877_6655_4433_2211_u64.to_le_bytes());
+    frame[15] = 0xa5;
+
+    // Model the ECP5 JTAGG registers explicitly: JTDI is one TCK late, and
+    // registered JSHIFT remains asserted on the trailing TAP transition. The
+    // host sends exactly 128 physical bits; that transition delivers bit 127
+    // to this post-JTAGG transport before JUPDATE captures the mailbox.
+    simulator.modify(|io| {
+        io.set(jtag_shift, 1_u8);
+        io.set(jtag_ce1, 1_u8);
+    })?;
+    let mut delayed_tdi = false;
+    for physical_bit in 0..128 {
+        simulator.modify(|io| io.set(jtag_tdi, u8::from(delayed_tdi)))?;
+        simulator.tick(jtag_tck)?;
+        delayed_tdi = frame[physical_bit / 8] & (1 << (physical_bit % 8)) != 0;
+    }
+    simulator.modify(|io| io.set(jtag_tdi, u8::from(delayed_tdi)))?;
+    simulator.tick(jtag_tck)?;
+    simulator.modify(|io| {
+        io.set(jtag_shift, 0_u8);
+        io.set(jtag_ce1, 0_u8);
+    })?;
+    simulator.tick(jtag_update)?;
+
+    let expected_low = BigUint::from(u64::from_le_bytes(frame[0..8].try_into()?));
+    let expected_high = BigUint::from(u64::from_le_bytes(frame[8..16].try_into()?));
+    let mut observed = None;
+    for _ in 0..6 {
+        simulator.tick(clk)?;
+        if simulator.get(command_valid) != BigUint::from(0_u8) {
+            observed = Some((
+                simulator.get(command_frame_low),
+                simulator.get(command_frame_high),
+            ));
+        }
+    }
+    if observed.as_ref() != Some(&(expected_low.clone(), expected_high.clone())) {
+        return Err(format!(
+            "direct JTAG mailbox mismatch: expected high:low 0x{expected_high:016x}:{expected_low:016x}, observed {observed:?}"
+        )
+        .into());
+    }
+
+    // A PLL-only CPU reset must align to the producer's retained toggle,
+    // rather than replaying the most recent JTAG mailbox after relock.
+    simulator.modify(|io| io.set(rst_n, 0_u8))?;
+    simulator.tick(clk)?;
+    simulator.modify(|io| io.set(rst_n, 1_u8))?;
+    for _ in 0..8 {
+        simulator.tick(clk)?;
+        if simulator.get(command_valid) != BigUint::from(0_u8) {
+            return Err("CPU-domain relock replayed a stale direct JTAG command".into());
+        }
+    }
+
+    // Synchronize the consumed request back to TCK, then update an unrelated
+    // DR chain (neither CE1 nor CE2). It must not reuse the retained ER1 arm.
+    for _ in 0..4 {
+        simulator.tick(jtag_tck)?;
+    }
+    simulator.tick(jtag_update)?;
+    for _ in 0..6 {
+        simulator.tick(clk)?;
+        if simulator.get(command_valid) != BigUint::from(0_u8) {
+            return Err("non-user DR UPDATE replayed a stale ER1 direct JTAG command".into());
+        }
+    }
+
+    // An ER2 scan updates only the status chain and must not replay the last
+    // ER1 mailbox when UPDATE-DR occurs.
+    simulator.modify(|io| {
+        io.set(jtag_shift, 1_u8);
+        io.set(jtag_ce2, 1_u8);
+    })?;
+    for _ in 0..8 {
+        simulator.tick(jtag_tck)?;
+    }
+    simulator.modify(|io| {
+        io.set(jtag_shift, 0_u8);
+        io.set(jtag_ce2, 0_u8);
+    })?;
+    simulator.tick(jtag_update)?;
+    for _ in 0..6 {
+        simulator.tick(clk)?;
+        if simulator.get(command_valid) != BigUint::from(0_u8) {
+            return Err("ER2 UPDATE-DR replayed a stale ER1 direct JTAG command".into());
+        }
+    }
+    println!("Direct JTAG transport: 128-bit ER1/JTDI alignment and stale-update isolation passed");
+    Ok(())
+}
+
 fn board_diagnostic_instruction(pc: u64) -> u32 {
     match pc {
         0x00 => i_type(1, 0, 0, 31, 0x13),
@@ -1144,6 +1291,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect::<Vec<_>>();
         return verify_hardware_memory_rtl(project, &requested_elfs);
     }
+    verify_direct_jtag_transport(project)?;
     verify_register_file(project)?;
     if register_file_only {
         return Ok(());
