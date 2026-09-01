@@ -52,4 +52,6 @@ cargo run --locked --release --offline -p verify-i2c
 ```
 
 See [riscv/README.md](riscv/README.md) for the CPU plan and
-[i2c/README.md](i2c/README.md) for the debug protocol.
+[i2c/README.md](i2c/README.md) for the debug protocol. Confirmed synthesis,
+simulation, STA, P&R, and bitgen defects are tracked separately in
+[TOOLCHAIN_ISSUES.md](TOOLCHAIN_ISSUES.md).
