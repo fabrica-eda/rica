@@ -731,10 +731,15 @@ fn verify_hardware_memory_elf(source: &str, elf: &Path, label: &str) -> Result<(
                 value_native(&mut simulator, "data_wmask"),
             )
         });
-        simulator.tick(clk_cpu)?;
+        // On a coincident physical edge, each clock domain samples the
+        // other domain's old register values. Tick the memory domain first
+        // so it cannot observe a CPU request token from this same CPU edge.
+        // This is the conservative ordering for the request-toggle CDC; the
+        // related-clock STA separately checks both physical directions.
         if cycle % 2 == 0 {
             simulator.tick(clk_mem)?;
         }
+        simulator.tick(clk_cpu)?;
         if value_native(&mut simulator, "commit_valid") != 0 {
             commits += 1;
             let commit_pc = value_native(&mut simulator, "commit_pc");

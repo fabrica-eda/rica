@@ -749,7 +749,13 @@ module Core #(
                 cm_load_size_q     = ex_load_size_q;
                 cm_load_unsigned_q = ex_load_unsigned_q;
                 cm_is_store_q      = ex_is_store_q;
-                if ex_valid_q && (ex_is_load_q || ex_is_store_q) {
+                // A current or registered redirect flushes the current EX
+                // instruction. Do not let that wrong-path memory operation
+                // toggle the cross-domain request token: the refetched target
+                // can otherwise toggle it a second time before the slower
+                // memory clock observes either edge.
+                if ex_valid_q && (ex_is_load_q || ex_is_store_q)
+                    && !redirect_valid && !redirect_pending_q {
                     data_request_sequence_q = !data_request_sequence_q;
                 }
                 cm_store_size_q      = ex_store_size_q;

@@ -30,8 +30,27 @@ jalr_return:
 jalr_target:
     la x9, jalr_return
     bne x8, x9, fail_7
+
+    # A taken branch can have its target load in the speculative pipeline
+    # before the registered redirect is applied.  The flushed copy must not
+    # emit a memory request; the refetched load must still forward to the
+    # immediately dependent branch.
+    la x10, redirect_load_value
+    addi x11, x0, 0x5a
+    beq x0, x0, redirect_load_target
+    addi x11, x0, -1
+redirect_load_target:
+    ld x12, 0(x10)
+    beq x12, x11, redirect_load_ok
+    FAIL 8
+redirect_load_ok:
     PASS
 
 fail_1: FAIL 1
 fail_5: FAIL 5
 fail_7: FAIL 7
+
+.section .data, "aw", @progbits
+.balign 8
+redirect_load_value:
+    .dword 0x5a
