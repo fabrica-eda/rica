@@ -22,6 +22,7 @@ tool. Unconfirmed observations remain excluded until a reproducer is retained.
 | STR-008 | Struo Veryl lowering | [PR #83](https://github.com/fabrica-eda/struo/pull/83) validated (`a4b9dad`) and included in integration revision `eb6dd6a` | `68be24c` verified pre-fix; fixed by the validated PR #83 candidate | Left-associated AND/OR expressions retain avoidable depth through synthesis and mapping |
 | STR-009 | Struo ECP5 CE fanout constraints | Open algorithmic limitation; broad predictor constraint rejected | current integration snapshots | Broad LUT-driver replication can increase input fanout, route delay, and negative slack |
 | STR-010 | Struo Veryl lowering | [PR #84](https://github.com/fabrica-eda/struo/pull/84) validated (`367101a`); Rica structural workaround active | integration revision `eb6dd6a` and upstream before PR #84 | Disjoint packed-struct fields written by separate FF processes are falsely reported as multiple drivers |
+| STR-011 | Struo ECP5 mapper | [PR #86](https://github.com/fabrica-eda/struo/pull/86) validated (`eff404d`) and pinned through Texo PR #60 (`893d699`) | integration revision `eb6dd6a` and upstream before PR #86 | INIT-independent dynamic LUT inputs create false timing arcs and unnecessary routing load |
 | CEL-001 | Celox native x86 backend | Historical fix; original Rica MRE/log not retained | before PR #712 | SSA reload materialization could exhaust the register allocator |
 | CEL-002 | Celox SIR optimizer | [PR #736](https://github.com/celox-sim/celox/pull/736) open (`c005d316`); current workflow pins validated 0.3.1 [backport `f5c548d5`](https://github.com/celox-sim/celox/commit/f5c548d5d4becb298f924ab06e1febb9eb3da064) | Celox 0.3.1 and upstream before `c005d316` | Rejecting a >128-bit concat fold can discard operands and make native verification fail |
 | TEX-001 | Texo ECP5 STA | Fixed upstream/current pin | before `bcc53c6` | Corner, clock-edge, and margin policy did not correlate with nextpnr |
@@ -423,6 +424,80 @@ workspace/Veryl/ECP5 CI and the fixed-seed 300 MHz physical smoke gate. AXI4
 and counter32 mapped JSON remain byte-identical to upstream main. Rica does not
 repin solely for this fix because its explicit payload/valid split is also the
 desired reset and clock-enable structure.
+
+## STR-011 — LUT inputs outside functional support remain routed and timed
+
+**Observed.** The current `HardwareTestTop` map, SHA-256
+`8dbbe688e3c736f9f5ea7ea247aef1f73398f1c602e2137b874625a37f0da167`,
+contains `lut11591` with `INIT=0xa000` and dynamic inputs A, B, C, and D.
+ECP5 LUT input A is the least-significant INIT index bit, so this truth table
+implements `A && C && D`: its B=0 and B=1 cofactors are identical. Nevertheless
+B remains connected to the high-fanout `lookup_accept` wire, and the LUT output
+drives all four tagged-table `WEA` pins.
+
+Official nextpnr 0.11.1 therefore reports the current static-seed-5 CPU
+critical path through `lut11591.B` and into tagged-table 3 `WEA`. The retained
+baseline report has SHA-256
+`ba1ea3023f1c5a10d609bb92caacd4c33ada39fb6688d666886af1098f57ebe0`
+and reports 11.161 ns. This is not an isolated LUT: an exhaustive cofactor scan
+of the current mapped JSON finds 114 dynamic LUT pin connections outside their
+INIT functional support across 89 LUT4 cells. The counts by physical input are
+40 A, 27 B, 32 C, and 15 D connections.
+
+**Isolation.** A controlled netlist edit changed only `lut11591.B` from its
+dynamic wire to constant zero, which is functionally equivalent for
+`INIT=0xa000`. Re-running the same official nextpnr 0.11.1 static-seed-5 flow
+removed the impossible `lookup_accept -> lut11591.B -> WEA` timing path. The
+reported CPU critical path instead ended at the genuine
+`tage.lookup_base_q[5].CE` endpoint. The edited map and report have SHA-256
+`3c37b8f91841f99d7193d65cee82328035ac40bcfd7f6819d2c2fc8cbe5e4cdf`
+and `4576db1312168a4ed263a499e91d758e81f11bf598b97a828ec0b7019f4dee33`.
+
+| Variant | CPU period | Endpoint |
+| --- | ---: | --- |
+| Current mapped netlist | 11.161 ns | tagged table 3 `WEA` through `lut11591.B` |
+| Only dead B input tied low | 11.301 ns | `tage.lookup_base_q[5].CE` |
+
+The slightly worse replacement path is placement/routing perturbation plus the
+next genuine bottleneck; it does not make the removed B dependency real. This
+experiment also shows that support pruning corrects timing-path validity but
+does not by itself close the current CPU timing.
+
+**Root cause.** LUT covering can retain a cut leaf after the resulting truth
+table has become independent of that leaf. `LutEmitter` preserves every
+selected leaf as a physical LUT input, and later mapped timing, depth, fanout,
+serialization, and nextpnr STA process every connected A/B/C/D pin. Neither
+the mapper nor the emitted netlist minimizes the final LUT's functional
+support.
+
+**Required resolution/regression.** Before mapped fanout/timing scoring and
+nextpnr serialization, Struo must compare each LUT4 input's two INIT cofactors.
+When they are identical, a dynamic connection on that pin must be replaced by
+a constant; tying it low preserves INIT unchanged. The pass must cover LUTs
+created by later mapped transformations as well as the initial `LutEmitter`.
+
+A false-path constraint is not an accepted fix: it would suppress STA while
+retaining the useless physical connection and congestion. A net-wide exception
+on `lookup_accept` would additionally hide its genuine CE paths, while a
+generated-cell/pin-specific exception would be unstable across mapping and
+retiming. The focused upstream regression must construct a mapped LUT4 with
+four dynamic inputs and `INIT=0xa000`, prune functional support, and assert
+that only B becomes constant, its former wire loses that fanout, and exhaustive
+input evaluation remains equivalent. A control LUT whose output depends on B
+must retain B. A final-map invariant should reject every dynamic LUT input
+whose INIT cofactors are identical.
+
+**Resolution.** Struo PR #86 implements the functional-support cleanup at the
+mapped-netlist normalization points and includes equivalence plus focused LUT
+regressions. Rica pins its validated head
+`eff404dff0c4806064e2a4e0f59564b1079c001d` directly and also consumes the
+matching Texo integration from PR #60 at
+`893d699f3624e8ff23e00e0264cfd87e9ed1ba2c`. An exhaustive scan of the final
+`HardwareTestTop` map (SHA-256
+`91d811681b519be86218558ca588f6617ee7cfc3c4281b69e087e5b62347ea8a`)
+finds zero dynamic LUT4 pins outside functional support. The retained patch in
+`toolchain/patches/` is the review artifact; normal builds use the pinned Git
+dependencies and do not apply it locally.
 
 ## CEL-001 — Native x86 SSA reconstruction exceeded planned pressure
 
