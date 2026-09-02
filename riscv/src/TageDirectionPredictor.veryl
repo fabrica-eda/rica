@@ -30,7 +30,7 @@ module TageDirectionPredictor #(
     // registered queue outputs: the base and each tagged bank can keep its
     // enable close to its own BRAM/FF cluster instead of making one
     // lookup-accept net drive all five memories and every metadata register.
-    lookup_valid: input logic,
+    lookup_valid     : input logic,
     lookup_valid_base: input logic,
     lookup_valid_tag0: input logic,
     lookup_valid_tag1: input logic,
@@ -323,31 +323,31 @@ module TageDirectionPredictor #(
     // Port-B control.  Scrub has priority, then architectural training, then
     // one background aging operation.  Lookup forwarding uses these final
     // signals, so same-address read/write behavior is independent of the RAM.
-    var base_portb_write: logic    ;
-    var base_portb_addr : logic<11>;
-    var base_portb_data : logic<2> ;
-    var base_porta_addr : logic<11>;
+    var base_portb_write : logic    ;
+    var base_portb_addr  : logic<11>;
+    var base_portb_data  : logic<2> ;
+    var base_porta_addr  : logic<11>;
     var tag_porta_enable0: logic    ;
     var tag_porta_enable1: logic    ;
     var tag_porta_enable2: logic    ;
     var tag_porta_enable3: logic    ;
-    var tag_porta_write : logic    ;
-    var tag_porta_addr0 : logic<9> ;
-    var tag_porta_addr1 : logic<9> ;
-    var tag_porta_addr2 : logic<9> ;
-    var tag_porta_addr3 : logic<9> ;
-    var tag_portb_write0: logic    ;
-    var tag_portb_write1: logic    ;
-    var tag_portb_write2: logic    ;
-    var tag_portb_write3: logic    ;
-    var tag_portb_addr0 : logic<9> ;
-    var tag_portb_addr1 : logic<9> ;
-    var tag_portb_addr2 : logic<9> ;
-    var tag_portb_addr3 : logic<9> ;
-    var tag_portb_data0 : logic<16>;
-    var tag_portb_data1 : logic<16>;
-    var tag_portb_data2 : logic<16>;
-    var tag_portb_data3 : logic<16>;
+    var tag_porta_write  : logic    ;
+    var tag_porta_addr0  : logic<9> ;
+    var tag_porta_addr1  : logic<9> ;
+    var tag_porta_addr2  : logic<9> ;
+    var tag_porta_addr3  : logic<9> ;
+    var tag_portb_write0 : logic    ;
+    var tag_portb_write1 : logic    ;
+    var tag_portb_write2 : logic    ;
+    var tag_portb_write3 : logic    ;
+    var tag_portb_addr0  : logic<9> ;
+    var tag_portb_addr1  : logic<9> ;
+    var tag_portb_addr2  : logic<9> ;
+    var tag_portb_addr3  : logic<9> ;
+    var tag_portb_data0  : logic<16>;
+    var tag_portb_data1  : logic<16>;
+    var tag_portb_data2  : logic<16>;
+    var tag_portb_data3  : logic<16>;
 
     var scrub_active_q: logic    ;
     var scrub_addr_q  : logic<11>;
@@ -432,8 +432,15 @@ module TageDirectionPredictor #(
         // backpressure is local: a pending response may be replaced only on
         // the edge on which it is accepted.  Keeping response_accept out of
         // ready also avoids a ready/accept loop in the enclosing frontend.
-        ready         = !scrub_active_q;
-        lookup_accept = lookup_valid && ready && (!response_valid_q || response_accept);
+        ready = !scrub_active_q;
+        // Capture one transaction only when every physical bank presents the
+        // same-cycle valid. The local accepts below intentionally stay
+        // independent so this all-bank guard does not fan out to the BRAM
+        // enables. A malformed partial lookup may update a subset of the raw
+        // read registers, but it cannot publish metadata; the next complete
+        // lookup overwrites every bank before response_valid can rise.
+        lookup_accept = lookup_valid && lookup_valid_base && lookup_valid_tag0 && lookup_valid_tag1 && lookup_valid_tag2
+            && lookup_valid_tag3 && ready && (!response_valid_q || response_accept);
         // Keep the response queue's single transaction decision centralized,
         // but let each physical bank consume its own registered valid.  The
         // frontend guarantees lockstep bank valids; spelling the accepts
@@ -940,19 +947,19 @@ module TageDirectionPredictor #(
             age_write_data3[1] = 1'b0;
         }
 
-        base_portb_write = train_packet_base_write_q;
-        base_portb_addr  = train_packet_base_addr_q;
-        base_portb_data  = train_packet_base_data_q;
-        base_porta_addr  = lookup_pc[11:1];
+        base_portb_write  = train_packet_base_write_q;
+        base_portb_addr   = train_packet_base_addr_q;
+        base_portb_data   = train_packet_base_data_q;
+        base_porta_addr   = lookup_pc[11:1];
         tag_porta_enable0 = lookup_accept_tag0;
         tag_porta_enable1 = lookup_accept_tag1;
         tag_porta_enable2 = lookup_accept_tag2;
         tag_porta_enable3 = lookup_accept_tag3;
-        tag_porta_write  = 1'b0;
-        tag_porta_addr0  = lookup_index_0;
-        tag_porta_addr1  = lookup_index_1;
-        tag_porta_addr2  = lookup_index_2;
-        tag_porta_addr3  = lookup_index_3;
+        tag_porta_write   = 1'b0;
+        tag_porta_addr0   = lookup_index_0;
+        tag_porta_addr1   = lookup_index_1;
+        tag_porta_addr2   = lookup_index_2;
+        tag_porta_addr3   = lookup_index_3;
 
         tag_portb_write0 = train_packet_tag_write0_q;
         tag_portb_write1 = train_packet_tag_write1_q;
@@ -1000,18 +1007,18 @@ module TageDirectionPredictor #(
         }
 
         if scrub_active_q {
-            base_portb_write = 1'b1;
-            base_portb_addr  = scrub_addr_q;
-            base_portb_data  = 2'b01;
+            base_portb_write  = 1'b1;
+            base_portb_addr   = scrub_addr_q;
+            base_portb_data   = 2'b01;
             tag_porta_enable0 = scrub_addr_q <: 11'd512;
             tag_porta_enable1 = scrub_addr_q <: 11'd512;
             tag_porta_enable2 = scrub_addr_q <: 11'd512;
             tag_porta_enable3 = scrub_addr_q <: 11'd512;
-            tag_porta_write  = scrub_addr_q <: 11'd512;
-            tag_porta_addr0  = scrub_addr_q[8:0];
-            tag_porta_addr1  = scrub_addr_q[8:0];
-            tag_porta_addr2  = scrub_addr_q[8:0];
-            tag_porta_addr3  = scrub_addr_q[8:0];
+            tag_porta_write   = scrub_addr_q <: 11'd512;
+            tag_porta_addr0   = scrub_addr_q[8:0];
+            tag_porta_addr1   = scrub_addr_q[8:0];
+            tag_porta_addr2   = scrub_addr_q[8:0];
+            tag_porta_addr3   = scrub_addr_q[8:0];
         }
 
     }
@@ -1031,59 +1038,59 @@ module TageDirectionPredictor #(
     }
 
     inst tagged_table0: TageTaggedTableMemory (
-        clk           : clk             ,
+        clk           : clk              ,
         port_a_enable : tag_porta_enable0,
-        port_a_write  : tag_porta_write ,
-        port_a_address: tag_porta_addr0 ,
-        port_a_data   : 16'd0           ,
-        port_a_read   : tag_read_raw0_q ,
-        port_b_enable : 1'b1            ,
-        port_b_write  : tag_portb_write0,
-        port_b_address: tag_portb_addr0 ,
-        port_b_data   : tag_portb_data0 ,
-        port_b_read   : age_read0_q     ,
+        port_a_write  : tag_porta_write  ,
+        port_a_address: tag_porta_addr0  ,
+        port_a_data   : 16'd0            ,
+        port_a_read   : tag_read_raw0_q  ,
+        port_b_enable : 1'b1             ,
+        port_b_write  : tag_portb_write0 ,
+        port_b_address: tag_portb_addr0  ,
+        port_b_data   : tag_portb_data0  ,
+        port_b_read   : age_read0_q      ,
     );
 
     inst tagged_table1: TageTaggedTableMemory (
-        clk           : clk             ,
+        clk           : clk              ,
         port_a_enable : tag_porta_enable1,
-        port_a_write  : tag_porta_write ,
-        port_a_address: tag_porta_addr1 ,
-        port_a_data   : 16'd0           ,
-        port_a_read   : tag_read_raw1_q ,
-        port_b_enable : 1'b1            ,
-        port_b_write  : tag_portb_write1,
-        port_b_address: tag_portb_addr1 ,
-        port_b_data   : tag_portb_data1 ,
-        port_b_read   : age_read1_q     ,
+        port_a_write  : tag_porta_write  ,
+        port_a_address: tag_porta_addr1  ,
+        port_a_data   : 16'd0            ,
+        port_a_read   : tag_read_raw1_q  ,
+        port_b_enable : 1'b1             ,
+        port_b_write  : tag_portb_write1 ,
+        port_b_address: tag_portb_addr1  ,
+        port_b_data   : tag_portb_data1  ,
+        port_b_read   : age_read1_q      ,
     );
 
     inst tagged_table2: TageTaggedTableMemory (
-        clk           : clk             ,
+        clk           : clk              ,
         port_a_enable : tag_porta_enable2,
-        port_a_write  : tag_porta_write ,
-        port_a_address: tag_porta_addr2 ,
-        port_a_data   : 16'd0           ,
-        port_a_read   : tag_read_raw2_q ,
-        port_b_enable : 1'b1            ,
-        port_b_write  : tag_portb_write2,
-        port_b_address: tag_portb_addr2 ,
-        port_b_data   : tag_portb_data2 ,
-        port_b_read   : age_read2_q     ,
+        port_a_write  : tag_porta_write  ,
+        port_a_address: tag_porta_addr2  ,
+        port_a_data   : 16'd0            ,
+        port_a_read   : tag_read_raw2_q  ,
+        port_b_enable : 1'b1             ,
+        port_b_write  : tag_portb_write2 ,
+        port_b_address: tag_portb_addr2  ,
+        port_b_data   : tag_portb_data2  ,
+        port_b_read   : age_read2_q      ,
     );
 
     inst tagged_table3: TageTaggedTableMemory (
-        clk           : clk             ,
+        clk           : clk              ,
         port_a_enable : tag_porta_enable3,
-        port_a_write  : tag_porta_write ,
-        port_a_address: tag_porta_addr3 ,
-        port_a_data   : 16'd0           ,
-        port_a_read   : tag_read_raw3_q ,
-        port_b_enable : 1'b1            ,
-        port_b_write  : tag_portb_write3,
-        port_b_address: tag_portb_addr3 ,
-        port_b_data   : tag_portb_data3 ,
-        port_b_read   : age_read3_q     ,
+        port_a_write  : tag_porta_write  ,
+        port_a_address: tag_porta_addr3  ,
+        port_a_data   : 16'd0            ,
+        port_a_read   : tag_read_raw3_q  ,
+        port_b_enable : 1'b1             ,
+        port_b_write  : tag_portb_write3 ,
+        port_b_address: tag_portb_addr3  ,
+        port_b_data   : tag_portb_data3  ,
+        port_b_read   : age_read3_q      ,
     );
 
     // Bypass metadata is ordinary FF state, not part of either BRAM port.

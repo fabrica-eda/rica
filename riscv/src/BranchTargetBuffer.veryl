@@ -15,44 +15,44 @@
 module BranchTargetBuffer #(
     param SCRUB_ON_RESET: bit = 0,
 ) (
-    clk             : input  clock    ,
-    rst_n           : input  reset    ,
-    ready           : output logic    ,
-    lookup_valid    : input  logic    ,
+    clk         : input  clock,
+    rst_n       : input  reset,
+    ready       : output logic,
+    lookup_valid: input  logic,
     // Keep the response transaction valid separate from the three physical
     // bank issue valids. Each BRAM bank is fed by its own registered ingress
     // copy, avoiding a single lookup-accept CE tree across both ways and PLRU.
-    lookup_valid_way0: input logic    ,
-    lookup_valid_way1: input logic    ,
-    lookup_valid_replacement: input logic,
-    lookup_token    : input  logic<3> ,
+    lookup_valid_way0       : input logic   ,
+    lookup_valid_way1       : input logic   ,
+    lookup_valid_replacement: input logic   ,
+    lookup_token            : input logic<3>,
     // The three packet copies carry their own address to the physical bank.
     // `lookup_pc` remains the transaction-level address used for response
     // metadata; under the frontend lockstep contract all four values match.
-    lookup_pc_way0  : input  logic<32>,
-    lookup_pc_way1  : input  logic<32>,
-    lookup_pc_replacement: input logic<32>,
-    lookup_pc       : input  logic<32>,
-    response_accept : input  logic    ,
-    response_cancel : input  logic    ,
-    rollback_valid  : input  logic    ,
-    rollback_set    : input  logic<7> ,
-    rollback_data   : input  logic    ,
-    response_valid  : output logic    ,
-    response_token  : output logic<3> ,
-    response_hit    : output logic    ,
-    response_kind   : output logic<3> ,
-    response_target : output logic<32>,
-    response_way    : output logic    ,
-    response_plru   : output logic    ,
-    update_valid    : input  logic    ,
-    update_pc       : input  logic<32>,
-    update_kind     : input  logic<3> ,
-    update_target   : input  logic<32>,
-    update_way      : input  logic    ,
-    invalidate_valid: input  logic    ,
-    invalidate_pc   : input  logic<32>,
-    invalidate_way  : input  logic    ,
+    lookup_pc_way0       : input  logic<32>,
+    lookup_pc_way1       : input  logic<32>,
+    lookup_pc_replacement: input  logic<32>,
+    lookup_pc            : input  logic<32>,
+    response_accept      : input  logic    ,
+    response_cancel      : input  logic    ,
+    rollback_valid       : input  logic    ,
+    rollback_set         : input  logic<7> ,
+    rollback_data        : input  logic    ,
+    response_valid       : output logic    ,
+    response_token       : output logic<3> ,
+    response_hit         : output logic    ,
+    response_kind        : output logic<3> ,
+    response_target      : output logic<32>,
+    response_way         : output logic    ,
+    response_plru        : output logic    ,
+    update_valid         : input  logic    ,
+    update_pc            : input  logic<32>,
+    update_kind          : input  logic<3> ,
+    update_target        : input  logic<32>,
+    update_way           : input  logic    ,
+    invalidate_valid     : input  logic    ,
+    invalidate_pc        : input  logic<32>,
+    invalidate_way       : input  logic    ,
 ) {
     // Entry layout: valid, kind, target, tag, four padding bits.
     // The padding keeps both inferred memories at a natural 64-bit width.
@@ -61,23 +61,23 @@ module BranchTargetBuffer #(
     #[sv("struo_memory = \"required\"")]
     var way_1_memory: logic<64> [128];
 
-    var way_0_read_q  : logic<64>;
-    var way_1_read_q  : logic<64>;
-    var way_0_bypass_q: logic    ;
-    var way_1_bypass_q: logic    ;
-    var bypass_data_0_q : logic<64>;
-    var bypass_data_1_q : logic<64>;
-    var way_0_entry   : logic<64>;
-    var way_1_entry   : logic<64>;
+    var way_0_read_q   : logic<64>;
+    var way_1_read_q   : logic<64>;
+    var way_0_bypass_q : logic    ;
+    var way_1_bypass_q : logic    ;
+    var bypass_data_0_q: logic<64>;
+    var bypass_data_1_q: logic<64>;
+    var way_0_entry    : logic<64>;
+    var way_1_entry    : logic<64>;
 
-    var lookup_valid_q: logic    ;
-    var lookup_token_q: logic<3> ;
-    var lookup_set_q  : logic<7> ;
-    var lookup_tag_q  : logic<24>;
-    var lookup_accept : logic    ;
-    var lookup_accept_way0: logic;
-    var lookup_accept_way1: logic;
-    var lookup_accept_replacement: logic;
+    var lookup_valid_q           : logic    ;
+    var lookup_token_q           : logic<3> ;
+    var lookup_set_q             : logic<7> ;
+    var lookup_tag_q             : logic<24>;
+    var lookup_accept            : logic    ;
+    var lookup_accept_way0       : logic    ;
+    var lookup_accept_way1       : logic    ;
+    var lookup_accept_replacement: logic    ;
 
     // One pseudo-LRU bit per set selects the next victim.  Keep this as a
     // canonical simple-dual-port memory as well: spelling it as a packed
@@ -107,9 +107,15 @@ module BranchTargetBuffer #(
         // `lookup_valid_q` is the response-storage valid bit itself.  Using it
         // directly keeps the local capacity gate acyclic while retaining the
         // accept-and-replace case.
-        lookup_accept = lookup_valid && ready && (!lookup_valid_q || response_accept);
-        lookup_accept_way0 = lookup_valid_way0 && ready && (!lookup_valid_q || response_accept);
-        lookup_accept_way1 = lookup_valid_way1 && ready && (!lookup_valid_q || response_accept);
+        // The response metadata describes one transaction, so require every
+        // physical read bank to be valid before capturing it. Local accepts
+        // remain separate below to keep each BRAM enable in its own cone; a
+        // partial malformed lookup therefore cannot publish a mixed response,
+        // and the next complete lookup rewrites all three physical reads.
+        lookup_accept             = lookup_valid && lookup_valid_way0 && lookup_valid_way1 && lookup_valid_replacement
+            && ready && (!lookup_valid_q || response_accept);
+        lookup_accept_way0        = lookup_valid_way0 && ready && (!lookup_valid_q || response_accept);
+        lookup_accept_way1        = lookup_valid_way1 && ready && (!lookup_valid_q || response_accept);
         lookup_accept_replacement = lookup_valid_replacement && ready && (!lookup_valid_q || response_accept);
 
         way_0_entry = way_0_read_q;
@@ -223,20 +229,20 @@ module BranchTargetBuffer #(
     // regardless of the block RAM's configured read-during-write mode.
     always_ff (clk, rst_n) {
         if_reset {
-            way_0_bypass_q = 1'b0;
+            way_0_bypass_q  = 1'b0;
             bypass_data_0_q = 64'd0;
         } else if lookup_accept_way0 {
-            way_0_bypass_q = write_way_0 && (write_set == lookup_pc_way0[7:1]);
+            way_0_bypass_q  = write_way_0 && (write_set == lookup_pc_way0[7:1]);
             bypass_data_0_q = write_entry;
         }
     }
 
     always_ff (clk, rst_n) {
         if_reset {
-            way_1_bypass_q = 1'b0;
+            way_1_bypass_q  = 1'b0;
             bypass_data_1_q = 64'd0;
         } else if lookup_accept_way1 {
-            way_1_bypass_q = write_way_1 && (write_set == lookup_pc_way1[7:1]);
+            way_1_bypass_q  = write_way_1 && (write_set == lookup_pc_way1[7:1]);
             bypass_data_1_q = write_entry;
         } else if lookup_accept_way0 {
             way_1_bypass_q = 1'b0;

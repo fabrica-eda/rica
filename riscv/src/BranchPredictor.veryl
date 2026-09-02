@@ -232,103 +232,113 @@ module BranchPredictor #(
         tag_a_nt      : Fold9x4    ,
         tag_b_nt      : Fold8x4    ,
     }
-    var ingress_valid_q      : logic             ;
-    var ingress_q            : LookupRequest     ;
+    var ingress_valid_q: logic        ;
+    var ingress_q      : LookupRequest;
     // The one-entry ingress is physically split at the predictor-bank
-    // boundary.  These packets replace the old wide fanout from a single
-    // lookup-accept/packet register with independent registered state for
-    // each table cluster.  They are all enqueued and retired in lockstep, so
-    // the architectural request remains one transaction and can still be
-    // replaced by a new request on the same edge.
-    struct TageBankPacket {
-        pc   : logic<32>,
-        token: logic<3> ,
-        index: logic<9> ,
-        tag  : logic<9> ,
-    }
-    struct BtbBankPacket {
-        pc   : logic<32>,
+    // boundary. Keep only the bits consumed by each physical port: the
+    // central ingress still owns the full history/request packet, while these
+    // narrow packets terminate at the local BRAM cones.
+    struct TageBasePacket {
+        row  : logic<11>,
         token: logic<3> ,
     }
-    var tage_base_packet_q : TageBankPacket;
-    var tage_tag0_packet_q : TageBankPacket;
-    var tage_tag1_packet_q : TageBankPacket;
-    var tage_tag2_packet_q : TageBankPacket;
-    var tage_tag3_packet_q : TageBankPacket;
-    var btb_way0_packet_q   : BtbBankPacket;
-    var btb_way1_packet_q   : BtbBankPacket;
-    var btb_plru_packet_q   : BtbBankPacket;
-    var tage_base_valid_q   : logic;
-    var tage_tag0_valid_q   : logic;
-    var tage_tag1_valid_q   : logic;
-    var tage_tag2_valid_q   : logic;
-    var tage_tag3_valid_q   : logic;
-    var btb_way0_valid_q    : logic;
-    var btb_way1_valid_q    : logic;
-    var btb_plru_valid_q    : logic;
-    var tage_base_issue_valid: logic;
-    var tage_tag0_issue_valid: logic;
-    var tage_tag1_issue_valid: logic;
-    var tage_tag2_issue_valid: logic;
-    var tage_tag3_issue_valid: logic;
-    var btb_way0_issue_valid : logic;
-    var btb_way1_issue_valid : logic;
-    var btb_plru_issue_valid : logic;
-    var tage_base_issue_pc   : logic<32>;
-    var tage_tag0_issue_pc   : logic<32>;
-    var tage_tag1_issue_pc   : logic<32>;
-    var tage_tag2_issue_pc   : logic<32>;
-    var tage_tag3_issue_pc   : logic<32>;
-    var btb_way0_issue_pc    : logic<32>;
-    var btb_way1_issue_pc    : logic<32>;
-    var btb_plru_issue_pc    : logic<32>;
-    var tage_issue_token     : logic<3>;
-    var btb_issue_token      : logic<3>;
-    var tage_base_issue_index: logic<9>;
-    var tage_tag0_issue_index: logic<9>;
-    var tage_tag1_issue_index: logic<9>;
-    var tage_tag2_issue_index: logic<9>;
-    var tage_tag3_issue_index: logic<9>;
-    var tage_base_issue_tag  : logic<9>;
-    var tage_tag0_issue_tag  : logic<9>;
-    var tage_tag1_issue_tag  : logic<9>;
-    var tage_tag2_issue_tag  : logic<9>;
-    var tage_tag3_issue_tag  : logic<9>;
-    var enqueue_tage_index0  : logic<9>;
-    var enqueue_tage_index1  : logic<9>;
-    var enqueue_tage_index2  : logic<9>;
-    var enqueue_tage_index3  : logic<9>;
-    var enqueue_tage_tag0    : logic<9>;
-    var enqueue_tage_tag1    : logic<9>;
-    var enqueue_tage_tag2    : logic<9>;
-    var enqueue_tage_tag3    : logic<9>;
-    var ingress_payload_enqueue: logic;
-    var tage_base_enqueue    : logic;
-    var tage_tag0_enqueue    : logic;
-    var tage_tag1_enqueue    : logic;
-    var tage_tag2_enqueue    : logic;
-    var tage_tag3_enqueue    : logic;
-    var btb_way0_enqueue     : logic;
-    var btb_way1_enqueue     : logic;
-    var btb_plru_enqueue     : logic;
-    var issue_pc             : logic        <32> ;
-    var issue_fallthrough    : logic        <32> ;
-    var issue_is_conditional : logic             ;
-    var issue_token          : logic        <3>  ;
-    var issue_index_fold     : Fold9x4           ;
-    var issue_tag_a_fold     : Fold9x4           ;
-    var issue_tag_b_fold     : Fold8x4           ;
-    var issue_index_nt       : Fold9x4           ;
-    var issue_tag_a_nt       : Fold9x4           ;
-    var issue_tag_b_nt       : Fold8x4           ;
-    var speculative_history_q: logic        <108>;
-    var committed_history_q  : logic        <108>;
-    var speculative_index_q  : Fold9x4           ;
-    var committed_index_q    : Fold9x4           ;
-    var speculative_tag_a_q  : Fold9x4           ;
-    var committed_tag_a_q    : Fold9x4           ;
-    var speculative_tag_b_q  : Fold8x4           ;
-    var committed_tag_b_q    : Fold8x4           ;
+    struct TageTagPacket {
+        index: logic<9>,
+        tag  : logic<9>,
+    }
+    struct BtbWay0Packet {
+        set  : logic<7> ,
+        tag  : logic<24>,
+        token: logic<3> ,
+    }
+    struct BtbSetPacket {
+        set: logic<7>,
+    }
+    var tage_base_packet_q: TageBasePacket    ;
+    var tage_tag_packet_q : TageTagPacket  [4];
+    var btb_way0_packet_q : BtbWay0Packet     ;
+    var btb_set_packet_q  : BtbSetPacket   [2];
+    var tage_base_valid_q : logic             ;
+    var tage_tag_valid_q  : logic          [4];
+    var btb_way0_valid_q  : logic             ;
+    var btb_set_valid_q   : logic          [2];
+
+    // Scalar views retain the existing native-test probe names without
+    // creating another registered copy of the validity state.
+    var tage_tag0_valid_q: logic;
+    var tage_tag1_valid_q: logic;
+    var tage_tag2_valid_q: logic;
+    var tage_tag3_valid_q: logic;
+    var btb_way1_valid_q : logic;
+    var btb_plru_valid_q : logic;
+
+    var tage_base_issue_valid  : logic    ;
+    var tage_tag0_issue_valid  : logic    ;
+    var tage_tag1_issue_valid  : logic    ;
+    var tage_tag2_issue_valid  : logic    ;
+    var tage_tag3_issue_valid  : logic    ;
+    var btb_way0_issue_valid   : logic    ;
+    var btb_way1_issue_valid   : logic    ;
+    var btb_plru_issue_valid   : logic    ;
+    var tage_base_issue_pc     : logic<32>;
+    var btb_way0_issue_pc      : logic<32>;
+    var btb_way1_issue_pc      : logic<32>;
+    var btb_plru_issue_pc      : logic<32>;
+    var tage_issue_token       : logic<3> ;
+    var btb_issue_token        : logic<3> ;
+    var tage_tag0_issue_index  : logic<9> ;
+    var tage_tag1_issue_index  : logic<9> ;
+    var tage_tag2_issue_index  : logic<9> ;
+    var tage_tag3_issue_index  : logic<9> ;
+    var tage_tag0_issue_tag    : logic<9> ;
+    var tage_tag1_issue_tag    : logic<9> ;
+    var tage_tag2_issue_tag    : logic<9> ;
+    var tage_tag3_issue_tag    : logic<9> ;
+    var enqueue_tage_index0    : logic<9> ;
+    var enqueue_tage_index1    : logic<9> ;
+    var enqueue_tage_index2    : logic<9> ;
+    var enqueue_tage_index3    : logic<9> ;
+    var enqueue_tage_tag0      : logic<9> ;
+    var enqueue_tage_tag1      : logic<9> ;
+    var enqueue_tage_tag2      : logic<9> ;
+    var enqueue_tage_tag3      : logic<9> ;
+    var ingress_payload_enqueue: logic    ;
+    var tage_base_enqueue      : logic    ;
+    var tage_tag0_enqueue      : logic    ;
+    var tage_tag1_enqueue      : logic    ;
+    var tage_tag2_enqueue      : logic    ;
+    var tage_tag3_enqueue      : logic    ;
+    var btb_way0_enqueue       : logic    ;
+    var btb_way1_enqueue       : logic    ;
+    var btb_plru_enqueue       : logic    ;
+
+    // Compatibility views for the existing native probes. They are wires,
+    // not additional registered copies of the validity state.
+    assign tage_tag0_valid_q = tage_tag_valid_q[0];
+    assign tage_tag1_valid_q = tage_tag_valid_q[1];
+    assign tage_tag2_valid_q = tage_tag_valid_q[2];
+    assign tage_tag3_valid_q = tage_tag_valid_q[3];
+    assign btb_way1_valid_q  = btb_set_valid_q[0];
+    assign btb_plru_valid_q  = btb_set_valid_q[1];
+
+    var issue_pc             : logic  <32> ;
+    var issue_fallthrough    : logic  <32> ;
+    var issue_is_conditional : logic       ;
+    var issue_token          : logic  <3>  ;
+    var issue_index_fold     : Fold9x4     ;
+    var issue_tag_a_fold     : Fold9x4     ;
+    var issue_tag_b_fold     : Fold8x4     ;
+    var issue_index_nt       : Fold9x4     ;
+    var issue_tag_a_nt       : Fold9x4     ;
+    var issue_tag_b_nt       : Fold8x4     ;
+    var speculative_history_q: logic  <108>;
+    var committed_history_q  : logic  <108>;
+    var speculative_index_q  : Fold9x4     ;
+    var committed_index_q    : Fold9x4     ;
+    var speculative_tag_a_q  : Fold9x4     ;
+    var committed_tag_a_q    : Fold9x4     ;
+    var speculative_tag_b_q  : Fold8x4     ;
+    var committed_tag_b_q    : Fold8x4     ;
 
     var speculative_history_next : logic  <108>;
     var committed_history_next   : logic  <108>;
@@ -400,38 +410,38 @@ module BranchPredictor #(
     inst btb: BranchTargetBuffer #(
         SCRUB_ON_RESET: SCRUB_ON_RESET,
     ) (
-        clk             : clk                          ,
-        rst_n           : rst_n                        ,
-        ready           : btb_ready                    ,
-        lookup_valid    : btb_way0_issue_valid        ,
-        lookup_valid_way0: btb_way0_issue_valid        ,
-        lookup_valid_way1: btb_way1_issue_valid        ,
-        lookup_valid_replacement: btb_plru_issue_valid ,
-        lookup_token    : btb_issue_token              ,
-        lookup_pc_way0  : btb_way0_issue_pc             ,
-        lookup_pc_way1  : btb_way1_issue_pc             ,
-        lookup_pc_replacement: btb_plru_issue_pc       ,
-        lookup_pc       : btb_way0_issue_pc            ,
-        response_accept : table_response_accept        ,
-        response_cancel : table_response_cancel        ,
-        rollback_valid  : decision_replacement_rollback,
-        rollback_set    : decision_btb_set_q           ,
-        rollback_data   : decision_btb_plru_q          ,
-        response_valid  : btb_response_valid           ,
-        response_token  : btb_response_token           ,
-        response_hit    : btb_response_hit             ,
-        response_kind   : btb_response_kind            ,
-        response_target : btb_response_target          ,
-        response_way    : btb_response_way             ,
-        response_plru   : btb_response_plru            ,
-        update_valid    : btb_update_valid             ,
-        update_pc       : retire_pc                    ,
-        update_kind     : retire_kind                  ,
-        update_target   : retire_target                ,
-        update_way      : btb_update_way               ,
-        invalidate_valid: btb_invalidate_valid         ,
-        invalidate_pc   : retire_pc                    ,
-        invalidate_way  : retire_slot_btb_way          ,
+        clk                     : clk                          ,
+        rst_n                   : rst_n                        ,
+        ready                   : btb_ready                    ,
+        lookup_valid            : btb_way0_issue_valid         ,
+        lookup_valid_way0       : btb_way0_issue_valid         ,
+        lookup_valid_way1       : btb_way1_issue_valid         ,
+        lookup_valid_replacement: btb_plru_issue_valid         ,
+        lookup_token            : btb_issue_token              ,
+        lookup_pc_way0          : btb_way0_issue_pc            ,
+        lookup_pc_way1          : btb_way1_issue_pc            ,
+        lookup_pc_replacement   : btb_plru_issue_pc            ,
+        lookup_pc               : btb_way0_issue_pc            ,
+        response_accept         : table_response_accept        ,
+        response_cancel         : table_response_cancel        ,
+        rollback_valid          : decision_replacement_rollback,
+        rollback_set            : decision_btb_set_q           ,
+        rollback_data           : decision_btb_plru_q          ,
+        response_valid          : btb_response_valid           ,
+        response_token          : btb_response_token           ,
+        response_hit            : btb_response_hit             ,
+        response_kind           : btb_response_kind            ,
+        response_target         : btb_response_target          ,
+        response_way            : btb_response_way             ,
+        response_plru           : btb_response_plru            ,
+        update_valid            : btb_update_valid             ,
+        update_pc               : retire_pc                    ,
+        update_kind             : retire_kind                  ,
+        update_target           : retire_target                ,
+        update_way              : btb_update_way               ,
+        invalidate_valid        : btb_invalidate_valid         ,
+        invalidate_pc           : retire_pc                    ,
+        invalidate_way          : retire_slot_btb_way          ,
     );
 
     // The exact port list is intentionally flat: this keeps every BRAM address
@@ -442,23 +452,23 @@ module BranchPredictor #(
         clk                    : clk                         ,
         rst_n                  : rst_n                       ,
         ready                  : tage_ready                  ,
-        lookup_valid           : tage_base_issue_valid        ,
-        lookup_valid_base      : tage_base_issue_valid        ,
-        lookup_valid_tag0      : tage_tag0_issue_valid        ,
-        lookup_valid_tag1      : tage_tag1_issue_valid        ,
-        lookup_valid_tag2      : tage_tag2_issue_valid        ,
-        lookup_valid_tag3      : tage_tag3_issue_valid        ,
-        lookup_token           : tage_issue_token             ,
+        lookup_valid           : tage_base_issue_valid       ,
+        lookup_valid_base      : tage_base_issue_valid       ,
+        lookup_valid_tag0      : tage_tag0_issue_valid       ,
+        lookup_valid_tag1      : tage_tag1_issue_valid       ,
+        lookup_valid_tag2      : tage_tag2_issue_valid       ,
+        lookup_valid_tag3      : tage_tag3_issue_valid       ,
+        lookup_token           : tage_issue_token            ,
         snapshot_token         : allocation_token_q          ,
-        lookup_pc              : tage_base_issue_pc           ,
-        lookup_index_0         : tage_tag0_issue_index         ,
-        lookup_index_1         : tage_tag1_issue_index         ,
-        lookup_index_2         : tage_tag2_issue_index         ,
-        lookup_index_3         : tage_tag3_issue_index         ,
-        lookup_tag_0           : tage_tag0_issue_tag           ,
-        lookup_tag_1           : tage_tag1_issue_tag           ,
-        lookup_tag_2           : tage_tag2_issue_tag           ,
-        lookup_tag_3           : tage_tag3_issue_tag           ,
+        lookup_pc              : tage_base_issue_pc          ,
+        lookup_index_0         : tage_tag0_issue_index       ,
+        lookup_index_1         : tage_tag1_issue_index       ,
+        lookup_index_2         : tage_tag2_issue_index       ,
+        lookup_index_3         : tage_tag3_issue_index       ,
+        lookup_tag_0           : tage_tag0_issue_tag[7:0]    ,
+        lookup_tag_1           : tage_tag1_issue_tag[7:0]    ,
+        lookup_tag_2           : tage_tag2_issue_tag         ,
+        lookup_tag_3           : tage_tag3_issue_tag         ,
         response_accept        : table_response_accept       ,
         response_cancel        : table_response_cancel       ,
         response_valid         : tage_response_valid         ,
@@ -657,29 +667,23 @@ module BranchPredictor #(
             && !(output_valid_q && output_taken_q);
         ingress_accept = request_valid && request_ready;
         request_accept = ingress_accept;
-        // Use the corresponding local occupancy bit as part of each packet's
-        // enqueue predicate.  All eight predicates are equivalent under the
-        // lockstep invariant, but their distinct registered state keeps the
-        // payload CE cone local to its bank instead of making one ingress CE
-        // drive every packet bit.
-        ingress_payload_enqueue = request_valid && request_ready
-            && (!ingress_valid_q || request_fire);
-        tage_base_enqueue = request_valid && request_ready
-            && (!tage_base_valid_q || request_fire);
-        tage_tag0_enqueue = request_valid && request_ready
-            && (!tage_tag0_valid_q || request_fire);
-        tage_tag1_enqueue = request_valid && request_ready
-            && (!tage_tag1_valid_q || request_fire);
-        tage_tag2_enqueue = request_valid && request_ready
-            && (!tage_tag2_valid_q || request_fire);
-        tage_tag3_enqueue = request_valid && request_ready
-            && (!tage_tag3_valid_q || request_fire);
-        btb_way0_enqueue = request_valid && request_ready
-            && (!btb_way0_valid_q || request_fire);
-        btb_way1_enqueue = request_valid && request_ready
-            && (!btb_way1_valid_q || request_fire);
-        btb_plru_enqueue = request_valid && request_ready
-            && (!btb_plru_valid_q || request_fire);
+        // Payload registers are elastic storage: their valid bit masks any
+        // write made while the slot is empty.  Therefore the CE does not need
+        // request_valid/request_ready (which carry the fetch-line fanout).
+        // Empty slots may capture don't-care inputs, and a pop-without-push
+        // may overwrite the just-issued word; neither can become observable
+        // because the valid state is cleared on that edge. A simultaneous
+        // pop/push has request_fire=1 and captures the new request while all
+        // consumers still read the old registered packet.
+        ingress_payload_enqueue = ingress_ready;
+        tage_base_enqueue       = !tage_base_valid_q || request_fire;
+        btb_way0_enqueue        = !btb_way0_valid_q || request_fire;
+        tage_tag0_enqueue       = !tage_tag_valid_q[0] || request_fire;
+        tage_tag1_enqueue       = !tage_tag_valid_q[1] || request_fire;
+        tage_tag2_enqueue       = !tage_tag_valid_q[2] || request_fire;
+        tage_tag3_enqueue       = !tage_tag_valid_q[3] || request_fire;
+        btb_way1_enqueue        = !btb_set_valid_q[0] || request_fire;
+        btb_plru_enqueue        = !btb_set_valid_q[1] || request_fire;
         // The table token only proves that the BTB and TAGE results belong to
         // the same physical lookup.  Claim the next architectural snapshot
         // only when that result becomes a visible decision.
@@ -832,18 +836,14 @@ module BranchPredictor #(
         enqueue_tage_index1 = request_pc[9:1] ^ lookup_index_fold.bank1;
         enqueue_tage_index2 = request_pc[9:1] ^ lookup_index_fold.bank2;
         enqueue_tage_index3 = request_pc[9:1] ^ lookup_index_fold.bank3;
-        enqueue_tage_tag0 = (request_pc[8:1] ^ request_pc[16:9] ^ request_pc[24:17]
-            ^ {1'b0, request_pc[31:25]}) ^ lookup_tag_a_fold.bank0[7:0]
-            ^ {lookup_tag_b_fold.bank0[6:0], 1'b0};
-        enqueue_tage_tag1 = (request_pc[8:1] ^ request_pc[16:9] ^ request_pc[24:17]
-            ^ {1'b0, request_pc[31:25]}) ^ lookup_tag_a_fold.bank1[7:0]
-            ^ {lookup_tag_b_fold.bank1[6:0], 1'b0};
-        enqueue_tage_tag2 = (request_pc[9:1] ^ request_pc[18:10] ^ request_pc[27:19]
-            ^ {5'd0, request_pc[31:28]}) ^ lookup_tag_a_fold.bank2
-            ^ {lookup_tag_b_fold.bank2, 1'b0};
-        enqueue_tage_tag3 = (request_pc[9:1] ^ request_pc[18:10] ^ request_pc[27:19]
-            ^ {5'd0, request_pc[31:28]}) ^ lookup_tag_a_fold.bank3
-            ^ {lookup_tag_b_fold.bank3, 1'b0};
+        enqueue_tage_tag0   = (request_pc[8:1] ^ request_pc[16:9] ^ request_pc[24:17] ^ {1'b0, request_pc[31:25]})
+            ^ lookup_tag_a_fold.bank0[7:0] ^ {lookup_tag_b_fold.bank0[6:0], 1'b0};
+        enqueue_tage_tag1   = (request_pc[8:1] ^ request_pc[16:9] ^ request_pc[24:17] ^ {1'b0, request_pc[31:25]})
+            ^ lookup_tag_a_fold.bank1[7:0] ^ {lookup_tag_b_fold.bank1[6:0], 1'b0};
+        enqueue_tage_tag2   = (request_pc[9:1] ^ request_pc[18:10] ^ request_pc[27:19] ^ {5'd0, request_pc[31:28]})
+            ^ lookup_tag_a_fold.bank2 ^ {lookup_tag_b_fold.bank2, 1'b0};
+        enqueue_tage_tag3   = (request_pc[9:1] ^ request_pc[18:10] ^ request_pc[27:19] ^ {5'd0, request_pc[31:28]})
+            ^ lookup_tag_a_fold.bank3 ^ {lookup_tag_b_fold.bank3, 1'b0};
 
         // Output ports are leaves of the wrapper logic.  Internal state and
         // feedback consume the selected signals above, never the port nets.
@@ -1058,49 +1058,39 @@ module BranchPredictor #(
         }
     }
 
-    // The local bank packets are the physical S0/S1 boundary.  A normal
-    // request uses the packet captured by `ingress_accept`; a same-edge
+    // The local bank packets are the physical S0/S1 boundary. A normal
+    // request uses the narrow packet captured by `ingress_accept`; a same-edge
     // prediction/shadow replacement uses the already-derived issue values,
-    // exactly as the former central packet did.  The valid bits remain
+    // exactly as the former central packet did. The valid bits remain
     // independent registered state, while `issue_ready` keeps all eight
     // banks in lockstep and still permits one pop plus one push per cycle.
     always_comb {
         tage_base_issue_valid = tage_base_valid_q && issue_ready;
-        tage_tag0_issue_valid = tage_tag0_valid_q && issue_ready;
-        tage_tag1_issue_valid = tage_tag1_valid_q && issue_ready;
-        tage_tag2_issue_valid = tage_tag2_valid_q && issue_ready;
-        tage_tag3_issue_valid = tage_tag3_valid_q && issue_ready;
         btb_way0_issue_valid  = btb_way0_valid_q && issue_ready;
-        btb_way1_issue_valid  = btb_way1_valid_q && issue_ready;
-        btb_plru_issue_valid  = btb_plru_valid_q && issue_ready;
+        tage_tag0_issue_valid = tage_tag_valid_q[0] && issue_ready;
+        tage_tag1_issue_valid = tage_tag_valid_q[1] && issue_ready;
+        tage_tag2_issue_valid = tage_tag_valid_q[2] && issue_ready;
+        tage_tag3_issue_valid = tage_tag_valid_q[3] && issue_ready;
+        btb_way1_issue_valid  = btb_set_valid_q[0] && issue_ready;
+        btb_plru_issue_valid  = btb_set_valid_q[1] && issue_ready;
 
-        tage_base_issue_pc    = tage_base_packet_q.pc;
-        tage_tag0_issue_pc    = tage_tag0_packet_q.pc;
-        tage_tag1_issue_pc    = tage_tag1_packet_q.pc;
-        tage_tag2_issue_pc    = tage_tag2_packet_q.pc;
-        tage_tag3_issue_pc    = tage_tag3_packet_q.pc;
-        btb_way0_issue_pc     = btb_way0_packet_q.pc;
-        btb_way1_issue_pc     = btb_way1_packet_q.pc;
-        btb_plru_issue_pc     = btb_plru_packet_q.pc;
+        tage_base_issue_pc    = {20'd0, tage_base_packet_q.row, 1'b0};
+        btb_way0_issue_pc     = {btb_way0_packet_q.tag, btb_way0_packet_q.set, 1'b0};
+        btb_way1_issue_pc     = {24'd0, btb_set_packet_q[0].set, 1'b0};
+        btb_plru_issue_pc     = {24'd0, btb_set_packet_q[1].set, 1'b0};
         tage_issue_token      = tage_base_packet_q.token;
         btb_issue_token       = btb_way0_packet_q.token;
-        tage_base_issue_index = 9'd0;
-        tage_tag0_issue_index = tage_tag0_packet_q.index;
-        tage_tag1_issue_index = tage_tag1_packet_q.index;
-        tage_tag2_issue_index = tage_tag2_packet_q.index;
-        tage_tag3_issue_index = tage_tag3_packet_q.index;
-        tage_base_issue_tag   = 9'd0;
-        tage_tag0_issue_tag   = tage_tag0_packet_q.tag;
-        tage_tag1_issue_tag   = tage_tag1_packet_q.tag;
-        tage_tag2_issue_tag   = tage_tag2_packet_q.tag;
-        tage_tag3_issue_tag   = tage_tag3_packet_q.tag;
+        tage_tag0_issue_index = tage_tag_packet_q[0].index;
+        tage_tag1_issue_index = tage_tag_packet_q[1].index;
+        tage_tag2_issue_index = tage_tag_packet_q[2].index;
+        tage_tag3_issue_index = tage_tag_packet_q[3].index;
+        tage_tag0_issue_tag   = tage_tag_packet_q[0].tag;
+        tage_tag1_issue_tag   = tage_tag_packet_q[1].tag;
+        tage_tag2_issue_tag   = tage_tag_packet_q[2].tag;
+        tage_tag3_issue_tag   = tage_tag_packet_q[3].tag;
 
         if append_prediction || launch_conditional_shadow {
             tage_base_issue_pc    = issue_pc;
-            tage_tag0_issue_pc    = issue_pc;
-            tage_tag1_issue_pc    = issue_pc;
-            tage_tag2_issue_pc    = issue_pc;
-            tage_tag3_issue_pc    = issue_pc;
             btb_way0_issue_pc     = issue_pc;
             btb_way1_issue_pc     = issue_pc;
             btb_plru_issue_pc     = issue_pc;
@@ -1544,46 +1534,50 @@ module BranchPredictor #(
             ingress_valid_q   = 1'b0;
             lookup_sequence_q = 3'd0;
             tage_base_valid_q = 1'b0;
-            tage_tag0_valid_q = 1'b0;
-            tage_tag1_valid_q = 1'b0;
-            tage_tag2_valid_q = 1'b0;
-            tage_tag3_valid_q = 1'b0;
             btb_way0_valid_q  = 1'b0;
-            btb_way1_valid_q  = 1'b0;
-            btb_plru_valid_q  = 1'b0;
         } else if recover_valid || discard_all {
             // No younger request may issue after a recovery/discard edge.
             // Payload is retained; valid is the transaction boundary.
             ingress_valid_q   = 1'b0;
             tage_base_valid_q = 1'b0;
-            tage_tag0_valid_q = 1'b0;
-            tage_tag1_valid_q = 1'b0;
-            tage_tag2_valid_q = 1'b0;
-            tage_tag3_valid_q = 1'b0;
             btb_way0_valid_q  = 1'b0;
-            btb_way1_valid_q  = 1'b0;
-            btb_plru_valid_q  = 1'b0;
         } else if ingress_accept {
             ingress_valid_q   = 1'b1;
             lookup_sequence_q = lookup_sequence_q + 3'd1;
             tage_base_valid_q = 1'b1;
-            tage_tag0_valid_q = 1'b1;
-            tage_tag1_valid_q = 1'b1;
-            tage_tag2_valid_q = 1'b1;
-            tage_tag3_valid_q = 1'b1;
             btb_way0_valid_q  = 1'b1;
-            btb_way1_valid_q  = 1'b1;
-            btb_plru_valid_q  = 1'b1;
         } else if request_fire {
             ingress_valid_q   = 1'b0;
             tage_base_valid_q = 1'b0;
-            tage_tag0_valid_q = 1'b0;
-            tage_tag1_valid_q = 1'b0;
-            tage_tag2_valid_q = 1'b0;
-            tage_tag3_valid_q = 1'b0;
             btb_way0_valid_q  = 1'b0;
-            btb_way1_valid_q  = 1'b0;
-            btb_plru_valid_q  = 1'b0;
+        }
+    }
+
+    for bank in 0..4 :g_tage_valid {
+        always_ff (clk, rst_n) {
+            if_reset {
+                tage_tag_valid_q[bank] = 1'b0;
+            } else if recover_valid || discard_all {
+                tage_tag_valid_q[bank] = 1'b0;
+            } else if ingress_accept {
+                tage_tag_valid_q[bank] = 1'b1;
+            } else if request_fire {
+                tage_tag_valid_q[bank] = 1'b0;
+            }
+        }
+    }
+
+    for bank in 0..2 :g_btb_set_valid {
+        always_ff (clk, rst_n) {
+            if_reset {
+                btb_set_valid_q[bank] = 1'b0;
+            } else if recover_valid || discard_all {
+                btb_set_valid_q[bank] = 1'b0;
+            } else if ingress_accept {
+                btb_set_valid_q[bank] = 1'b1;
+            } else if request_fire {
+                btb_set_valid_q[bank] = 1'b0;
+            }
         }
     }
 
@@ -1623,46 +1617,41 @@ module BranchPredictor #(
             ingress_q.tag_b_nt.bank3   = request_tag_b_nt.bank3;
         }
         if tage_base_enqueue {
-            tage_base_packet_q.pc      = request_pc;
-            tage_base_packet_q.token   = lookup_sequence_q;
-            tage_base_packet_q.index   = 9'd0;
-            tage_base_packet_q.tag     = 9'd0;
-        }
-        if tage_tag0_enqueue {
-            tage_tag0_packet_q.pc      = request_pc;
-            tage_tag0_packet_q.token   = lookup_sequence_q;
-            tage_tag0_packet_q.index   = enqueue_tage_index0;
-            tage_tag0_packet_q.tag     = {1'b0, enqueue_tage_tag0};
-        }
-        if tage_tag1_enqueue {
-            tage_tag1_packet_q.pc      = request_pc;
-            tage_tag1_packet_q.token   = lookup_sequence_q;
-            tage_tag1_packet_q.index   = enqueue_tage_index1;
-            tage_tag1_packet_q.tag     = {1'b0, enqueue_tage_tag1};
-        }
-        if tage_tag2_enqueue {
-            tage_tag2_packet_q.pc      = request_pc;
-            tage_tag2_packet_q.token   = lookup_sequence_q;
-            tage_tag2_packet_q.index   = enqueue_tage_index2;
-            tage_tag2_packet_q.tag     = enqueue_tage_tag2;
-        }
-        if tage_tag3_enqueue {
-            tage_tag3_packet_q.pc      = request_pc;
-            tage_tag3_packet_q.token   = lookup_sequence_q;
-            tage_tag3_packet_q.index   = enqueue_tage_index3;
-            tage_tag3_packet_q.tag     = enqueue_tage_tag3;
+            tage_base_packet_q.row   = request_pc[11:1];
+            tage_base_packet_q.token = lookup_sequence_q;
         }
         if btb_way0_enqueue {
-            btb_way0_packet_q.pc      = request_pc;
-            btb_way0_packet_q.token   = lookup_sequence_q;
+            btb_way0_packet_q.set   = request_pc[7:1];
+            btb_way0_packet_q.tag   = request_pc[31:8];
+            btb_way0_packet_q.token = lookup_sequence_q;
         }
-        if btb_way1_enqueue {
-            btb_way1_packet_q.pc      = request_pc;
-            btb_way1_packet_q.token   = lookup_sequence_q;
+    }
+
+    for bank in 0..4 :g_tage_tag_packet {
+        always_ff (clk) {
+            if (bank == 0) && tage_tag0_enqueue {
+                tage_tag_packet_q[bank].index = enqueue_tage_index0;
+                tage_tag_packet_q[bank].tag   = enqueue_tage_tag0;
+            } else if (bank == 1) && tage_tag1_enqueue {
+                tage_tag_packet_q[bank].index = enqueue_tage_index1;
+                tage_tag_packet_q[bank].tag   = enqueue_tage_tag1;
+            } else if (bank == 2) && tage_tag2_enqueue {
+                tage_tag_packet_q[bank].index = enqueue_tage_index2;
+                tage_tag_packet_q[bank].tag   = enqueue_tage_tag2;
+            } else if (bank == 3) && tage_tag3_enqueue {
+                tage_tag_packet_q[bank].index = enqueue_tage_index3;
+                tage_tag_packet_q[bank].tag   = enqueue_tage_tag3;
+            }
         }
-        if btb_plru_enqueue {
-            btb_plru_packet_q.pc      = request_pc;
-            btb_plru_packet_q.token   = lookup_sequence_q;
+    }
+
+    for bank in 0..2 :g_btb_set_packet {
+        always_ff (clk) {
+            if (bank == 0) && btb_way1_enqueue {
+                btb_set_packet_q[bank].set = request_pc[7:1];
+            } else if (bank == 1) && btb_plru_enqueue {
+                btb_set_packet_q[bank].set = request_pc[7:1];
+            }
         }
     }
 
