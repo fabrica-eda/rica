@@ -639,9 +639,14 @@ fn $function(
     {
         return Err(format!("{label}: dependent shift-to-ALU latency was not exactly two clocks").into());
     }
-    if elapsed_cycles > 120 {
+    // The one-entry predictor ingress adds one fetch edge.  This trace has
+    // seven control-transfer boundaries before the terminal self-loop, each
+    // of which exposes the extra predictor response edge to the in-order
+    // frontend; the resulting architectural count is intentionally exact.
+    const EXPECTED_TRACE_CYCLES: usize = 126;
+    if elapsed_cycles != EXPECTED_TRACE_CYCLES {
         return Err(format!(
-            "{label}: architectural trace took {elapsed_cycles} clocks, expected at most 120"
+            "{label}: architectural trace took {elapsed_cycles} clocks, expected exactly {EXPECTED_TRACE_CYCLES}"
         )
         .into());
     }

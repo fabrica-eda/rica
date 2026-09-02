@@ -167,10 +167,37 @@ impl Driver {
         self.set_u32("request_fallthrough", fallthrough);
         self.set_u8("request_is_conditional", 0);
         self.set_u8("request_valid", 1);
+        // S0 is only an ingress enqueue.  No table may see the request on
+        // this edge, and the public acceptance is the fetch-side handshake.
+        assert_eq!(self.get("request_accept"), 1);
+        assert_eq!(self.get("request_fire"), 0);
         self.tick();
         self.set_u8("request_valid", 0);
+        assert_eq!(self.get("ingress_valid_q"), 1);
+        assert_eq!(self.get("request_fire"), 1);
+        assert_eq!(self.get("btb_response_valid"), 0);
+        assert_eq!(self.get("tage_response_valid"), 0);
+
+        // S1 launches the registered S0 packet into both synchronous tables.
         self.tick();
+        assert_eq!(self.get("ingress_valid_q"), 0);
+        assert_eq!(self.get("btb_response_valid"), 1);
+        assert_eq!(self.get("tage_response_valid"), 1);
+        assert_eq!(self.get("response_valid"), 0);
+
+        // S2 captures the paired table response; a cold miss is now visible
+        // through the fast-miss response path. A BTB hit takes one additional
+        // classifier/output edge, so select the two legal response paths
+        // explicitly instead of hiding the distinction behind extra ticks.
         self.tick();
+        if self.get("decision_btb_hit_q") != 0 {
+            assert_eq!(self.get("decision_valid_q"), 1);
+            assert_eq!(self.get("response_valid"), 0);
+            assert_eq!(self.get("decision_promote"), 1);
+            self.tick();
+        } else {
+            assert_eq!(self.get("response_valid"), 1);
+        }
         assert_eq!(self.get("response_valid"), 1);
         Response {
             token: self.get("response_token") as u8,
@@ -340,6 +367,7 @@ fn reset_scrub_blocks_requests_for_the_full_sweep_and_clears_poisoned_tables() {
     for completed in 1..=SCRUB_CYCLES {
         assert_eq!(driver.get("ready"), 0);
         assert_eq!(driver.get("request_accept"), 0);
+        assert_eq!(driver.get("request_fire"), 0);
         driver.tick();
 
         assert_eq!(
@@ -355,6 +383,8 @@ fn reset_scrub_blocks_requests_for_the_full_sweep_and_clears_poisoned_tables() {
     // ready/request_accept rise combinationally after the final scrub edge, but
     // the held request was never sampled on an edge while acceptance was high.
     assert_eq!(driver.get("request_accept"), 1);
+    assert_eq!(driver.get("request_fire"), 0);
+    assert_eq!(driver.get("ingress_valid_q"), 0);
     assert_eq!(driver.get("response_valid"), 0);
     driver.set_u8("request_valid", 0);
 
