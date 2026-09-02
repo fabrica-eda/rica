@@ -5,9 +5,10 @@
 /// EX2. Consecutive dependent ALU instructions use a registered EX bypass;
 /// load-use plus two-stage shift/compare dependencies stall once.
 module Core #(
-    param COMMIT_PAYLOAD   : bit = 1,
-    param SYNC_DATA_MEMORY : bit = 0,
-    param RELOCATE_LOW_DATA: bit = 0,
+    param COMMIT_PAYLOAD        : bit = 1,
+    param SYNC_DATA_MEMORY      : bit = 0,
+    param RELOCATE_LOW_DATA     : bit = 0,
+    param SCRUB_BRANCH_PREDICTOR: bit = 0,
 ) (
     clk                   : input  clock    ,
     rst_n                 : input  reset    ,
@@ -34,13 +35,14 @@ module Core #(
     commit_mem_wdata      : output logic<64>,
     commit_mem_wmask      : output logic<8> ,
     counter_freeze        : input  logic    ,
-    debug_counter_index   : input  logic<3> ,
+    debug_counter_index   : input  logic<4> ,
     debug_counter_data    : output logic<64>,
     debug_x31             : output logic<64>,
 ) {
     // This implementation exposes a 32-bit physical address space while the
     // architectural integer datapath and visible addresses remain XLEN-wide.
-    // FetchPacket is the registered boundary after instruction-line selection.
+    // FetchPayload is the registered boundary after instruction-line selection;
+    // FetchPacket adds the separately registered occupancy bit to its view.
     // DecodePacket keeps the original encoding beside its canonical RV64I form:
     // the latter feeds the ordinary decoder while the former remains available
     // for architectural traces and illegal-instruction trap values.
@@ -50,63 +52,85 @@ module Core #(
         is_compressed  : logic    ,
         valid          : logic    ,
     }
-    struct DecodePacket {
+    struct FetchPayload {
         pc             : logic<32>,
-        instruction    : logic<32>,
         raw_instruction: logic<32>,
         is_compressed  : logic    ,
-        illegal        : logic    ,
-        valid          : logic    ,
     }
-    var fetch_line_q      : logic       <29>;
-    var fetch_next_line_q : logic       <29>;
-    var fetch_parcel_q    : logic       <2> ;
-    var fetch_address     : logic       <32>;
-    var next_line_plus_one: logic       <29>;
-    var fetch_next_parcel : logic       <2> ;
-    var fetch_cross_line  : logic           ;
-    var debug_x31_q       : logic       <64>;
-    var fetch_packet      : FetchPacket     ;
-    var fetch_q           : FetchPacket     ;
-    var decode_packet     : DecodePacket    ;
-    var fd_q              : DecodePacket    ;
+    struct DecodePacket {
+        pc               : logic<32>,
+        instruction      : logic<32>,
+        raw_instruction  : logic<32>,
+        is_compressed    : logic    ,
+        illegal          : logic    ,
+        prediction_token : logic<3> ,
+        predicted_kind   : logic<3> ,
+        predicted_taken  : logic    ,
+        predicted_next_pc: logic<32>,
+        valid            : logic    ,
+    }
+    var fetch_line_q             : logic       <29>;
+    var fetch_next_line_q        : logic       <29>;
+    var fetch_parcel_q           : logic       <2> ;
+    var fetch_address            : logic       <32>;
+    var next_line_plus_one       : logic       <29>;
+    var fetch_next_parcel        : logic       <2> ;
+    var fetch_cross_line         : logic           ;
+    var fetch_fallthrough        : logic       <32>;
+    var fetch_is_conditional     : logic           ;
+    var debug_x31_q              : logic       <64>;
+    var fetch_packet             : FetchPacket     ;
+    var fetch_payload_q          : FetchPayload    ;
+    var fetch_lookahead_payload_q: FetchPayload    ;
+    var fetch_tail_payload_q     : FetchPayload    ;
+    var fetch_valid_q            : logic           ;
+    var fetch_lookahead_valid_q  : logic           ;
+    var fetch_tail_valid_q       : logic           ;
+    var fetch_q                  : FetchPacket     ;
+    var fetch_lookahead_q        : FetchPacket     ;
+    var decode_packet            : DecodePacket    ;
+    var fd_q                     : DecodePacket    ;
 
-    var rx_valid_q        : logic    ;
-    var rx_pc_q           : logic<32>;
-    var rx_raw_instr_q    : logic<32>;
-    var rx_is_compressed_q: logic    ;
-    var rx_rs1_q          : logic<5> ;
-    var rx_rs2_q          : logic<5> ;
-    var rx_rd_q           : logic<5> ;
-    var rx_immediate_q    : logic<64>;
-    var rx_alu_op_q       : logic<4> ;
-    var rx_use_pc_q       : logic    ;
-    var rx_use_immediate_q: logic    ;
-    var rx_use_rs1_q      : logic    ;
-    var rx_use_rs2_q      : logic    ;
-    var rx_write_enable_q : logic    ;
-    var rx_is_load_q      : logic    ;
-    var rx_load_size_q    : logic<2> ;
-    var rx_load_unsigned_q: logic    ;
-    var rx_is_store_q     : logic    ;
-    var rx_store_size_q   : logic<2> ;
-    var rx_word_op_q      : logic    ;
-    var rx_is_branch_q    : logic    ;
-    var rx_branch_op_q    : logic<3> ;
-    var rx_is_jal_q       : logic    ;
-    var rx_is_jalr_q      : logic    ;
-    var rx_is_csr_q       : logic    ;
-    var rx_csr_op_q       : logic<2> ;
-    var rx_csr_use_imm_q  : logic    ;
-    var rx_csr_write_q    : logic    ;
-    var rx_csr_index_q    : logic<4> ;
-    var rx_is_ecall_q     : logic    ;
-    var rx_is_ebreak_q    : logic    ;
-    var rx_is_mret_q      : logic    ;
-    var rx_illegal_q      : logic    ;
-    var rx_stalled_q      : logic    ;
-    var rx_stall_data_a_q : logic<64>;
-    var rx_stall_data_b_q : logic<64>;
+    var rx_valid_q            : logic    ;
+    var rx_pc_q               : logic<32>;
+    var rx_raw_instr_q        : logic<32>;
+    var rx_is_compressed_q    : logic    ;
+    var rx_rs1_q              : logic<5> ;
+    var rx_rs2_q              : logic<5> ;
+    var rx_rd_q               : logic<5> ;
+    var rx_immediate_q        : logic<64>;
+    var rx_alu_op_q           : logic<4> ;
+    var rx_use_pc_q           : logic    ;
+    var rx_use_immediate_q    : logic    ;
+    var rx_use_rs1_q          : logic    ;
+    var rx_use_rs2_q          : logic    ;
+    var rx_write_enable_q     : logic    ;
+    var rx_is_load_q          : logic    ;
+    var rx_load_size_q        : logic<2> ;
+    var rx_load_unsigned_q    : logic    ;
+    var rx_is_store_q         : logic    ;
+    var rx_store_size_q       : logic<2> ;
+    var rx_word_op_q          : logic    ;
+    var rx_is_branch_q        : logic    ;
+    var rx_branch_op_q        : logic<3> ;
+    var rx_is_jal_q           : logic    ;
+    var rx_is_jalr_q          : logic    ;
+    var rx_is_csr_q           : logic    ;
+    var rx_csr_op_q           : logic<2> ;
+    var rx_csr_use_imm_q      : logic    ;
+    var rx_csr_write_q        : logic    ;
+    var rx_csr_index_q        : logic<4> ;
+    var rx_is_ecall_q         : logic    ;
+    var rx_is_ebreak_q        : logic    ;
+    var rx_is_mret_q          : logic    ;
+    var rx_illegal_q          : logic    ;
+    var rx_prediction_token_q : logic<3> ;
+    var rx_predicted_kind_q   : logic<3> ;
+    var rx_predicted_taken_q  : logic    ;
+    var rx_predicted_next_pc_q: logic<32>;
+    var rx_stalled_q          : logic    ;
+    var rx_stall_data_a_q     : logic<64>;
+    var rx_stall_data_b_q     : logic<64>;
 
     var ex_valid_q             : logic    ;
     var ex_pc_q                : logic<32>;
@@ -135,6 +159,11 @@ module Core #(
     var ex_is_ebreak_q         : logic    ;
     var ex_is_mret_q           : logic    ;
     var ex_illegal_q           : logic    ;
+    var ex_prediction_token_q  : logic<3> ;
+    var ex_predicted_kind_q    : logic<3> ;
+    var ex_predicted_taken_q   : logic    ;
+    var ex_predicted_next_pc_q : logic<32>;
+    var ex_fallthrough_pc_q    : logic<32>;
     var ex_operand_a_q         : logic<64>;
     var ex_operand_b_q         : logic<64>;
     var ex_store_data_q        : logic<64>;
@@ -189,6 +218,12 @@ module Core #(
     var cm_exception_cause_q   : logic<64>;
     var cm_exception_value_q   : logic<64>;
     var cm_is_mret_q           : logic    ;
+    var cm_prediction_token_q  : logic<3> ;
+    var cm_predicted_kind_q    : logic<3> ;
+    var cm_predicted_taken_q   : logic    ;
+    var cm_predicted_next_pc_q : logic<32>;
+    var cm_fallthrough_pc_q    : logic<32>;
+    var cm_control_kind_q      : logic<3> ;
 
     var wb_valid_q       : logic    ;
     var wb_pc_q          : logic<32>;
@@ -217,6 +252,11 @@ module Core #(
     var execute_store_data      : logic<64>;
     var ex_bypass_hit_rs1       : logic    ;
     var ex_bypass_hit_rs2       : logic    ;
+    var redirect_addend_a       : logic<32>;
+    var redirect_low            : logic<17>;
+    var redirect_high_c0        : logic<17>;
+    var redirect_high_c1        : logic<17>;
+    var redirect_high           : logic<17>;
     var redirect_sum            : logic<32>;
     var cm_branch_equal         : logic    ;
     var cm_branch_taken         : logic    ;
@@ -226,10 +266,17 @@ module Core #(
     var ex_redirect_target      : logic<32>;
     var redirect_target         : logic<32>;
     var redirect_pending_q      : logic    ;
+    var redirect_preserve_cm    : logic    ;
+    var redirect_preserve_cm_q  : logic    ;
+    var redirect_discards_cm    : logic    ;
+    var redirect_event_delay_q  : logic    ;
     var redirect_flush_wb_q     : logic    ;
     var redirect_target_q       : logic<32>;
     var execution_hazard        : logic    ;
-    var operand_match_ex        : logic    ;
+    var decode_operand_match_rx : logic    ;
+    var rx_result_can_bypass    : logic    ;
+    var decode_execution_hazard : logic    ;
+    var rx_execution_hazard_q   : logic    ;
     var memory_wait             : logic    ;
     var data_request_sequence_q : logic    ;
     var csr_source              : logic<64>;
@@ -243,6 +290,68 @@ module Core #(
     var cm_retire_event         : logic    ;
     var decompressed_instruction: logic<32>;
     var compressed_illegal      : logic    ;
+    var rx_control_kind         : logic<3> ;
+    var ex_control_kind_q       : logic<3> ;
+    var ex_actual_next_pc       : logic<32>;
+    var ex_prediction_mismatch  : logic    ;
+    var cm_actual_next_pc       : logic<32>;
+    var cm_prediction_mismatch  : logic    ;
+
+    var predictor_ready                : logic    ;
+    var predictor_wait                 : logic    ;
+    var predictor_request_ready        : logic    ;
+    var predictor_request_valid        : logic    ;
+    var predictor_request_accept       : logic    ;
+    var fetch_candidate_offer          : logic    ;
+    var fetch_payload_capture          : logic    ;
+    var fetch_queue_push_valid         : logic    ;
+    var fetch_queue_advance            : logic    ;
+    var predictor_response_accept      : logic    ;
+    var predictor_response_valid       : logic    ;
+    var predictor_response_token       : logic<3> ;
+    var predictor_response_kind        : logic<3> ;
+    var predictor_response_taken       : logic    ;
+    var predictor_response_next_pc     : logic<32>;
+    var predictor_response_btb_hit     : logic    ;
+    var predictor_response_tage_hit    : logic    ;
+    var predictor_response_ras_fallback: logic    ;
+    var predictor_frontend_redirect    : logic    ;
+    var predictor_recover_valid        : logic    ;
+    var predictor_recover_token        : logic<3> ;
+    var predictor_recover_kind         : logic<3> ;
+    var predictor_recover_taken        : logic    ;
+    var predictor_recover_fallthrough  : logic<32>;
+    var predictor_discard_all          : logic    ;
+    var predictor_conditional_event    : logic    ;
+    var predictor_direction_wrong_event: logic    ;
+    var predictor_btb_miss_event       : logic    ;
+    var predictor_ras_fallback_event   : logic    ;
+
+    // Predictor maintenance is deliberately one stage behind architectural
+    // resolution.  A redirect already blocks frontend requests while its
+    // registered target is installed, so applying recovery in that window
+    // cuts EX forwarding/redirect arithmetic away from TAGE and RAS state
+    // without adding a normal-path bubble.
+    struct PredictorRetirePayload {
+        token      : logic<3> ,
+        pc         : logic<32>,
+        kind       : logic<3> ,
+        taken      : logic    ,
+        target     : logic<32>,
+        fallthrough: logic<32>,
+    }
+    struct PredictorRecoverPayload {
+        token      : logic<3> ,
+        kind       : logic<3> ,
+        taken      : logic    ,
+        fallthrough: logic<32>,
+    }
+    var predictor_retire_valid_q  : logic                  ;
+    var predictor_retire_q        : PredictorRetirePayload ;
+    var predictor_recover_valid_q : logic                  ;
+    var predictor_recover_branch_q: logic                  ;
+    var predictor_recover_q       : PredictorRecoverPayload;
+    var predictor_discard_all_q   : logic                  ;
 
     inst registers: RegisterFile (
         clk           : clk                    ,
@@ -284,6 +393,46 @@ module Core #(
         completion: completion_bus,
     );
 
+    inst branch_predictor: BranchPredictor #(
+        SCRUB_ON_RESET: SCRUB_BRANCH_PREDICTOR,
+    ) (
+        clk                       : clk                            ,
+        rst_n                     : rst_n                          ,
+        ready                     : predictor_ready                ,
+        request_ready             : predictor_request_ready        ,
+        request_valid             : predictor_request_valid        ,
+        request_accept            : predictor_request_accept       ,
+        request_pc                : fetch_packet.pc                ,
+        request_fallthrough       : fetch_fallthrough              ,
+        request_is_conditional    : fetch_is_conditional           ,
+        response_accept           : predictor_response_accept      ,
+        response_valid            : predictor_response_valid       ,
+        response_token            : predictor_response_token       ,
+        response_kind             : predictor_response_kind        ,
+        response_taken            : predictor_response_taken       ,
+        response_next_pc          : predictor_response_next_pc     ,
+        response_btb_hit          : predictor_response_btb_hit     ,
+        response_tage_hit         : predictor_response_tage_hit    ,
+        response_ras_fallback     : predictor_response_ras_fallback,
+        retire_valid              : predictor_retire_valid_q       ,
+        retire_token              : predictor_retire_q.token       ,
+        retire_pc                 : predictor_retire_q.pc          ,
+        retire_kind               : predictor_retire_q.kind        ,
+        retire_taken              : predictor_retire_q.taken       ,
+        retire_target             : predictor_retire_q.target      ,
+        retire_fallthrough        : predictor_retire_q.fallthrough ,
+        recover_valid             : predictor_recover_valid_q      ,
+        recover_token             : predictor_recover_token        ,
+        recover_kind              : predictor_recover_kind         ,
+        recover_taken             : predictor_recover_taken        ,
+        recover_fallthrough       : predictor_recover_fallthrough  ,
+        discard_all               : predictor_discard_all_q        ,
+        conditional_resolved_event: predictor_conditional_event    ,
+        direction_wrong_event     : predictor_direction_wrong_event,
+        btb_miss_event            : predictor_btb_miss_event       ,
+        ras_fallback_event        : predictor_ras_fallback_event   ,
+    );
+
     always_comb {
         rf_write_enable  = wb_valid_q && wb_write_enable_q && (wb_rd_q != 5'd0);
         decode_bus.instr = fd_q.instruction;
@@ -294,7 +443,35 @@ module Core #(
         fetch_packet.raw_instruction = instr;
         fetch_packet.is_compressed   = instr_is_compressed;
         fetch_packet.valid           = instr_valid;
+        // Preserve the packed queue views used by decode and verification while
+        // keeping their payload and occupancy in disjoint physical registers.
+        fetch_q.pc                        = fetch_payload_q.pc;
+        fetch_q.raw_instruction           = fetch_payload_q.raw_instruction;
+        fetch_q.is_compressed             = fetch_payload_q.is_compressed;
+        fetch_q.valid                     = fetch_valid_q;
+        fetch_lookahead_q.pc              = fetch_lookahead_payload_q.pc;
+        fetch_lookahead_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
+        fetch_lookahead_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
+        fetch_lookahead_q.valid           = fetch_lookahead_valid_q;
+        // Exact RV64I/RV64C conditional predecode. Reserved standard branch
+        // funct3 values 010/011 are illegal and must not perturb history.
+        // C.BEQZ/C.BNEZ are the only compressed conditional encodings; every
+        // encoding in those two funct3 spaces is legal in RV64C/Zca.
+        fetch_is_conditional = 1'b0;
         if fetch_packet.is_compressed {
+            fetch_is_conditional = (fetch_packet.raw_instruction[1:0] == 2'b01)
+                && ((fetch_packet.raw_instruction[15:13] == 3'b110) || (fetch_packet.raw_instruction[15:13] == 3'b111));
+        } else if fetch_packet.raw_instruction[6:0] == 7'b1100011 {
+            case fetch_packet.raw_instruction[14:12] {
+                3'b000, 3'b001, 3'b100, 3'b101, 3'b110, 3'b111: {
+                    fetch_is_conditional = 1'b1;
+                }
+                default: {}
+            }
+        }
+        fetch_fallthrough = fetch_packet.pc + 32'd4;
+        if fetch_packet.is_compressed {
+            fetch_fallthrough = fetch_packet.pc + 32'd2;
             fetch_next_parcel = fetch_parcel_q + 2'd1;
             fetch_cross_line  = fetch_parcel_q == 2'd3;
         } else {
@@ -302,16 +479,29 @@ module Core #(
             fetch_cross_line  = fetch_parcel_q[1];
         }
 
-        decode_packet.pc              = fetch_q.pc;
-        decode_packet.instruction     = fetch_q.raw_instruction;
-        decode_packet.raw_instruction = fetch_q.raw_instruction;
-        decode_packet.is_compressed   = fetch_q.is_compressed;
-        decode_packet.illegal         = 1'b0;
-        decode_packet.valid           = fetch_q.valid;
+        decode_packet.pc                = fetch_q.pc;
+        decode_packet.instruction       = fetch_q.raw_instruction;
+        decode_packet.raw_instruction   = fetch_q.raw_instruction;
+        decode_packet.is_compressed     = fetch_q.is_compressed;
+        decode_packet.illegal           = 1'b0;
+        decode_packet.prediction_token  = predictor_response_token;
+        decode_packet.predicted_kind    = predictor_response_kind;
+        decode_packet.predicted_taken   = predictor_response_taken;
+        decode_packet.predicted_next_pc = predictor_response_next_pc;
+        decode_packet.valid             = fetch_q.valid;
+        if !predictor_response_valid {
+            decode_packet.prediction_token  = 3'd0;
+            decode_packet.predicted_kind    = 3'd0;
+            decode_packet.predicted_taken   = 1'b0;
+            decode_packet.predicted_next_pc = fetch_q.pc + 32'd4;
+        }
         if fetch_q.is_compressed {
             decode_packet.instruction     = decompressed_instruction;
             decode_packet.raw_instruction = {16'd0, fetch_q.raw_instruction[15:0]};
             decode_packet.illegal         = compressed_illegal;
+            if !predictor_response_valid {
+                decode_packet.predicted_next_pc = fetch_q.pc + 32'd2;
+            }
         }
 
         // The preceding EX result is already registered in the common
@@ -436,20 +626,82 @@ module Core #(
             3'b111 : cm_branch_taken = !completion_bus.compare_result;
             default: cm_branch_taken = 1'b0;
         }
-        if ex_bypass_q.redirect {
-            redirect_sum = bypass_data[31:0] + ex_redirect_offset_q;
-        } else {
-            redirect_sum = ex_redirect_base_q + ex_redirect_offset_q;
+
+        // RISC-V uses x1 and x5 as the link-register hints for the return
+        // stack.  Keep the classification registered with the instruction so
+        // prediction recovery never has to decode the instruction again.
+        rx_control_kind = 3'd0;
+        if rx_is_branch_q {
+            rx_control_kind = 3'd1;
+        } else if rx_is_jal_q {
+            if (rx_rd_q == 5'd1) || (rx_rd_q == 5'd5) {
+                rx_control_kind = 3'd4;
+            } else {
+                rx_control_kind = 3'd2;
+            }
+        } else if rx_is_jalr_q {
+            if !((rx_rd_q == 5'd1) || (rx_rd_q == 5'd5)) && ((rx_rs1_q == 5'd1) || (rx_rs1_q == 5'd5)) {
+                rx_control_kind = 3'd5;
+            } else if ((rx_rd_q == 5'd1) || (rx_rd_q == 5'd5)) && ((rx_rs1_q == 5'd1) || (rx_rs1_q == 5'd5))
+                && (rx_rd_q != rx_rs1_q) {
+                rx_control_kind = 3'd6;
+            } else if (rx_rd_q == 5'd1) || (rx_rd_q == 5'd5) {
+                rx_control_kind = 3'd4;
+            } else {
+                rx_control_kind = 3'd3;
+            }
         }
-        ex_redirect_valid     = ex_valid_q && ex_link_q;
-        branch_redirect_valid = cm_valid_q && cm_is_branch_q && cm_branch_taken;
+        if ex_bypass_q.redirect {
+            redirect_addend_a = bypass_data[31:0];
+        } else {
+            redirect_addend_a = ex_redirect_base_q;
+        }
+        // A dependent JALR is the one redirect path that starts at the prior
+        // completion result.  Split its 32-bit sum into two 16-bit slices and
+        // precompute both upper carries, matching the RV64 ALU's carry-select
+        // organization without adding a cycle to control-flow recovery.
+        redirect_low     = {1'b0, redirect_addend_a[15:0]} + {1'b0, ex_redirect_offset_q[15:0]};
+        redirect_high_c0 = {1'b0, redirect_addend_a[31:16]} + {1'b0, ex_redirect_offset_q[31:16]};
+        redirect_high_c1 = {1'b0, redirect_addend_a[31:16]} + {1'b0, ex_redirect_offset_q[31:16]} + 17'd1;
+        if redirect_low[16] {
+            redirect_high = redirect_high_c1;
+        } else {
+            redirect_high = redirect_high_c0;
+        }
+        redirect_sum = {redirect_high[15:0], redirect_low[15:0]};
+        if ex_redirect_clear_lsb_q {
+            ex_redirect_target = redirect_sum & 32'hffff_fffe;
+        } else {
+            ex_redirect_target = redirect_sum;
+        }
+        ex_actual_next_pc = ex_fallthrough_pc_q;
+        if ex_link_q {
+            ex_actual_next_pc = ex_redirect_target;
+        }
+        ex_prediction_mismatch = ex_valid_q && !ex_is_branch_q && !ex_exception && !ex_is_mret_q
+            && ((ex_predicted_kind_q != ex_control_kind_q) || (ex_predicted_next_pc_q != ex_actual_next_pc));
+
+        if cm_branch_taken {
+            cm_actual_next_pc = cm_redirect_target_q;
+        } else {
+            cm_actual_next_pc = cm_fallthrough_pc_q;
+        }
+        // A faulting branch must enter the trap vector; a future branch-side
+        // access/alignment exception must never let prediction repair outrank
+        // the older architectural exception.
+        cm_prediction_mismatch = cm_valid_q && cm_is_branch_q && !cm_exception_q
+            && ((cm_predicted_kind_q != 3'd1) || (cm_predicted_taken_q != cm_branch_taken)
+                || (cm_predicted_next_pc_q != cm_actual_next_pc));
+        ex_redirect_valid      = ex_prediction_mismatch;
+        branch_redirect_valid  = cm_prediction_mismatch;
+        redirect_discards_cm   = redirect_pending_q && !redirect_preserve_cm_q;
         // Applying an older redirect takes one extra cycle. Control transfers
         // still present in the younger pipeline during that cycle are
         // wrong-path work and must not enqueue another redirect.
         // A pending older redirect makes the current completion-stage memory
         // operation wrong-path work. It must be flushed immediately instead
         // of stalling the pipeline and thereby dropping the redirect.
-        memory_wait = SYNC_DATA_MEMORY && !redirect_pending_q && cm_valid_q && (cm_is_load_q || cm_is_store_q)
+        memory_wait = SYNC_DATA_MEMORY && !redirect_discards_cm && cm_valid_q && (cm_is_load_q || cm_is_store_q)
             && (data_response_sequence != data_request_sequence_q);
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
@@ -464,7 +716,7 @@ module Core #(
             && !(redirect_pending_q && redirect_flush_wb_q);
         csr_bus.write_index  = cm_csr_index_q;
         csr_bus.write_enable = cm_valid_q && cm_is_csr_q && cm_csr_write_q && !cm_exception_q && !memory_wait
-            && !redirect_pending_q;
+            && !redirect_discards_cm;
         // CSR read/modify/write operates on the value captured for this
         // instruction in EX, not on a free-running counter's newer CM value.
         // Present the resulting atomic value to CsrFile as a replace write.
@@ -485,51 +737,115 @@ module Core #(
 
         redirect_valid = !memory_wait && !redirect_pending_q
             && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
-        if ex_redirect_clear_lsb_q {
-            ex_redirect_target = redirect_sum & 32'hffff_fffe;
-        } else {
-            ex_redirect_target = redirect_sum;
-        }
+        // An EX-owned prediction repair redirects only younger frontend work.
+        // Its instruction becomes the next CM owner and must retain memory or
+        // CSR side effects while the registered redirect is pending. A branch
+        // or system redirect originates from older CM state instead.
+        // This payload is observed only while redirect_pending_q is set. When
+        // neither older CM source owns that pending redirect, redirect_valid
+        // can only have selected the EX repair. Keeping the late EX mismatch
+        // out of this payload FF avoids duplicating the redirect-target cone.
+        redirect_preserve_cm = !branch_redirect_valid && !cm_system_redirect;
         if branch_redirect_valid {
-            redirect_target = cm_redirect_target_q;
+            redirect_target = cm_actual_next_pc;
         } else if cm_trap_event {
             redirect_target = csr_bus.trap_vector;
         } else if cm_mret_event {
             redirect_target = csr_bus.return_pc;
         } else {
-            redirect_target = ex_redirect_target;
+            redirect_target = ex_actual_next_pc;
         }
-        operand_match_ex = ex_valid_q && ex_write_enable_q && (ex_rd_q != 5'd0)
-            && ((rx_use_rs1_q && (rx_rs1_q == ex_rd_q)) || (rx_use_rs2_q && (rx_rs2_q == ex_rd_q)));
-        execution_hazard = rx_valid_q
-            && ((ex_is_load_q || execute_bus.result_use_shift || execute_bus.result_use_compare) && operand_match_ex);
+        // Classify the FD consumer against the RX producer one edge before
+        // that pair becomes RX/EX.  The registered bit makes the eventual
+        // stall decision identical, but removes two register-index compares
+        // from predictor request and fetch-cursor control.
+        rx_result_can_bypass    = rx_write_enable_q && !rx_is_load_q
+            && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8) || (rx_alu_op_q == 4'd9)
+                || (rx_alu_op_q == 4'd11)) && (rx_rd_q != 5'd0);
+        decode_operand_match_rx = fd_q.valid && rx_valid_q && rx_write_enable_q && (rx_rd_q != 5'd0)
+            && ((decode_bus.use_rs1 && (decode_bus.rs1 == rx_rd_q))
+                || (decode_bus.use_rs2 && (decode_bus.rs2 == rx_rd_q)));
+        decode_execution_hazard = decode_operand_match_rx && !rx_result_can_bypass;
         // CSR instructions are rare, so give each one an empty EX predecessor.
         // The preceding CM side effect is then in the CSR bank before the EX
         // read, preserving program order without a counter incrementer in the
         // CSR read path or an index comparator on global hold control.
-        if rx_valid_q && rx_is_csr_q && ex_valid_q {
-            execution_hazard = 1'b1;
+        if fd_q.valid && decode_bus.is_csr && rx_valid_q {
+            decode_execution_hazard = 1'b1;
         }
+        execution_hazard = rx_execution_hazard_q;
 
-        // Performance events follow the same priority as the sequential
-        // pipeline controller, so exactly one event class can advance in a
-        // cycle. These are control events, not a CPI decomposition: a redirect
-        // event can coincide with retirement. Redirect includes applying a registered control-flow target
-        // and the immediate younger-pipeline flush for an exception or MRET.
-        csr_bus.retire               = cm_retire_event;
-        csr_bus.stall_dependency     = 1'b0;
-        csr_bus.stall_memory_wait    = 1'b0;
-        csr_bus.stall_redirect       = 1'b0;
-        csr_bus.stall_frontend_empty = 1'b0;
-        if memory_wait {
-            csr_bus.stall_memory_wait = 1'b1;
-        } else if redirect_valid || redirect_pending_q || ex_exception || (ex_valid_q && ex_is_mret_q) {
-            csr_bus.stall_redirect = 1'b1;
-        } else if execution_hazard {
-            csr_bus.stall_dependency = 1'b1;
-        } else if !fd_q.valid {
-            csr_bus.stall_frontend_empty = 1'b1;
+        predictor_wait = !predictor_ready || (fetch_q.valid && !predictor_response_valid);
+        // A redirect/exception detected in this cycle may consume one younger
+        // prediction and launch its shadow lookup.  Both are speculative: the
+        // registered maintenance event below rolls them back while the
+        // frontend is already blocked by redirect_pending_q.  Keeping the raw
+        // EX redirect out of this handshake avoids extending forwarding and
+        // redirect arithmetic into every predictor state/control endpoint.
+        predictor_response_accept   = predictor_response_valid && fetch_q.valid && !memory_wait && !redirect_pending_q
+            && !ex_exception && !(ex_valid_q && ex_is_mret_q) && !execution_hazard;
+        predictor_frontend_redirect = predictor_response_accept && predictor_response_taken;
+        // Keep the current InstructionBuffer tag hit out of the wide fetch
+        // payload mux.  An invalid candidate may refresh masked payload, but
+        // only the semantic predictor handshake advances the fetch cursor.
+        fetch_candidate_offer   = !memory_wait && !redirect_pending_q && !ex_exception && !(ex_valid_q && ex_is_mret_q)
+            && !execution_hazard
+            && (!fetch_q.valid || !fetch_lookahead_q.valid || !fetch_tail_valid_q || predictor_response_accept)
+            && !predictor_frontend_redirect;
+        fetch_payload_capture   = fetch_candidate_offer && predictor_request_ready;
+        fetch_queue_push_valid  = fetch_payload_capture && fetch_packet.valid;
+        predictor_request_valid = fetch_packet.valid && fetch_candidate_offer;
+        fetch_queue_advance     = !memory_wait && !redirect_pending_q && !ex_exception && !(ex_valid_q && ex_is_mret_q)
+            && !predictor_wait && !execution_hazard && !predictor_frontend_redirect;
+
+        // The CM conditional is older than the EX instruction and therefore
+        // owns recovery when both detect a mismatch in the same cycle.
+        predictor_recover_valid = redirect_valid && !cm_system_redirect;
+        // Recovery is applied one cycle after redirect detection.  An EX-owned
+        // repair has crossed into CM by then, so its token and control metadata
+        // can be read directly from the CM registers.  An older CM branch is
+        // overwritten on that edge; retain its payload in the independent bank
+        // below and select it with the registered one-bit source tag.  This
+        // keeps the late branch comparison off the 39-bit recovery-payload D
+        // mux without changing the recovery edge.
+        predictor_recover_token       = cm_prediction_token_q;
+        predictor_recover_kind        = cm_control_kind_q;
+        predictor_recover_taken       = cm_control_kind_q != 3'd0;
+        predictor_recover_fallthrough = cm_fallthrough_pc_q;
+        if predictor_recover_branch_q {
+            predictor_recover_token       = predictor_recover_q.token;
+            predictor_recover_kind        = predictor_recover_q.kind;
+            predictor_recover_taken       = predictor_recover_q.taken;
+            predictor_recover_fallthrough = predictor_recover_q.fallthrough;
         }
+        predictor_discard_all = !memory_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
+            && (ex_exception || (ex_valid_q && ex_is_mret_q));
+
+        // Present the four raw cycle predicates independently. CsrFile samples
+        // all four at this edge, then applies the controller's memory,
+        // redirect, dependency, frontend priority to those registered bits.
+        // Doing that selection once, after the event boundary, prevents the
+        // late JALR redirect sum from propagating into every counter-event FF.
+        // These are control events, not a CPI decomposition: a redirect event
+        // can coincide with retirement.
+        csr_bus.retire            = cm_retire_event;
+        csr_bus.stall_dependency  = execution_hazard;
+        csr_bus.stall_memory_wait = memory_wait;
+        // Count the same generation/application cycles as the raw redirect
+        // predicates, but one cycle later from the registered maintenance
+        // pulses.  Keeping the delayed pending pulse preserves the second
+        // application cycle without routing JALR forwarding/target arithmetic
+        // into the event register bank.
+        csr_bus.stall_redirect                 = predictor_recover_valid_q || predictor_discard_all_q
+            || redirect_pending_q || redirect_event_delay_q;
+        csr_bus.stall_frontend_empty           = predictor_wait || !fd_q.valid;
+        csr_bus.predictor_conditional_resolved = predictor_conditional_event;
+        csr_bus.predictor_direction_wrong      = predictor_direction_wrong_event;
+        csr_bus.predictor_btb_miss             = predictor_btb_miss_event;
+        csr_bus.predictor_ras_fallback         = predictor_ras_fallback_event;
+        // Count only architectural next-PC repair. Predictor-wide slot
+        // discard is maintenance, not a branch-prediction miss.
+        csr_bus.predictor_repair    = predictor_recover_valid_q;
         csr_bus.counter_freeze      = counter_freeze;
         csr_bus.debug_counter_index = debug_counter_index;
         debug_counter_data          = csr_bus.debug_counter_data;
@@ -545,7 +861,7 @@ module Core #(
         // Hold the architectural store indication for the complete CM
         // transaction. HardwareMemory performs the physical write only when
         // the request sequence changes, so this cannot duplicate the write.
-        data_we               = cm_valid_q && cm_is_store_q && !redirect_pending_q;
+        data_we               = cm_valid_q && cm_is_store_q && !redirect_discards_cm;
         data_request_sequence = data_request_sequence_q;
         // There is no architectural halt instruction. This output remains for
         // the board debug ABI and will be used by a future debug halt request.
@@ -554,65 +870,227 @@ module Core #(
 
     }
 
+    // The valid/source bits are reset while both payload banks refresh from
+    // already-registered CM state every cycle.  Retire validity masks its
+    // payload; recovery validity and the one-bit source tag select either the
+    // current CM payload or the independently captured branch payload below.
+    // Retire and recovery remain independent so a retiring older instruction
+    // can share a cycle with a younger EX redirect, exactly as in the
+    // unregistered interface.
     always_ff (clk, rst_n) {
         if_reset {
-            fetch_line_q            = 29'd0;
-            fetch_next_line_q       = 29'd1;
-            fetch_parcel_q          = 2'd0;
+            predictor_retire_valid_q   = 1'b0;
+            predictor_recover_valid_q  = 1'b0;
+            predictor_recover_branch_q = 1'b0;
+            predictor_discard_all_q    = 1'b0;
+        } else {
+            predictor_retire_valid_q   = cm_retire_event;
+            predictor_recover_valid_q  = predictor_recover_valid;
+            predictor_recover_branch_q = branch_redirect_valid;
+            predictor_discard_all_q    = predictor_discard_all;
+        }
+    }
+
+    // Refresh both payload banks unconditionally from already-registered
+    // source fields.  Their reset-bearing valid/source controls make stale
+    // payload unobservable without qualifying all 104 payload FF clock-enables
+    // with late retirement/redirect decisions.
+    always_ff (clk) {
+        predictor_retire_q.token       = cm_prediction_token_q;
+        predictor_retire_q.pc          = cm_pc_q;
+        predictor_retire_q.kind        = cm_control_kind_q;
+        predictor_retire_q.taken       = !cm_is_branch_q || cm_branch_taken;
+        predictor_retire_q.target      = cm_redirect_target_q;
+        predictor_retire_q.fallthrough = cm_fallthrough_pc_q;
+        // Capture the current CM branch candidate unconditionally.  Only the
+        // adjacent registered source tag makes this bank observable, so no late
+        // branch-valid enable or wide selected D path is required.
+        predictor_recover_q.token       = cm_prediction_token_q;
+        predictor_recover_q.kind        = 3'd1;
+        predictor_recover_q.taken       = cm_branch_taken;
+        predictor_recover_q.fallthrough = cm_fallthrough_pc_q;
+    }
+
+    // Only an accepted semantic predictor request advances the instruction
+    // cursor.  Invalid payload refreshes therefore cannot skip an address.
+    always_ff (clk, rst_n) {
+        if_reset {
+            fetch_line_q      = 29'd0;
+            fetch_next_line_q = 29'd1;
+            fetch_parcel_q    = 2'd0;
+        } else if !memory_wait {
+            if redirect_pending_q {
+                fetch_line_q      = redirect_target_q[31:3];
+                fetch_next_line_q = redirect_target_q[31:3] + 29'd1;
+                fetch_parcel_q    = redirect_target_q[2:1];
+            } else if ex_exception || (ex_valid_q && ex_is_mret_q) {
+                // Hold until the registered architectural redirect arrives.
+            } else if predictor_wait {
+                // A can wait for its decision while B launches behind it.
+                if predictor_request_accept {
+                    if fetch_cross_line {
+                        fetch_line_q      = fetch_next_line_q;
+                        fetch_next_line_q = next_line_plus_one;
+                    }
+                    fetch_parcel_q = fetch_next_parcel;
+                }
+            } else if execution_hazard {
+                // Hold the packet paired with the stalled pipeline owner.
+            } else if predictor_frontend_redirect {
+                fetch_line_q      = predictor_response_next_pc[31:3];
+                fetch_next_line_q = predictor_response_next_pc[31:3] + 29'd1;
+                fetch_parcel_q    = predictor_response_next_pc[2:1];
+            } else if predictor_request_accept {
+                if fetch_cross_line {
+                    fetch_line_q      = fetch_next_line_q;
+                    fetch_next_line_q = next_line_plus_one;
+                }
+                fetch_parcel_q = fetch_next_parcel;
+            }
+        }
+    }
+
+    // Queue payload is masked by separately reset valid bits.  One clock-only
+    // process owns all three packet banks, avoiding packed-struct partial
+    // writes across processes.  Old-value FF semantics make a simultaneous
+    // pop/push shift middle -> head and tail -> middle before appending the
+    // incoming packet to the newly opened slot.
+    always_ff (clk) {
+        if fetch_queue_advance {
+            if fetch_lookahead_valid_q {
+                fetch_payload_q.pc              = fetch_lookahead_payload_q.pc;
+                fetch_payload_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
+                fetch_payload_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
+            } else if fetch_payload_capture {
+                fetch_payload_q.pc              = fetch_packet.pc;
+                fetch_payload_q.raw_instruction = fetch_packet.raw_instruction;
+                fetch_payload_q.is_compressed   = fetch_packet.is_compressed;
+            }
+            if fetch_tail_valid_q {
+                fetch_lookahead_payload_q.pc              = fetch_tail_payload_q.pc;
+                fetch_lookahead_payload_q.raw_instruction = fetch_tail_payload_q.raw_instruction;
+                fetch_lookahead_payload_q.is_compressed   = fetch_tail_payload_q.is_compressed;
+            } else if fetch_lookahead_valid_q && fetch_payload_capture {
+                fetch_lookahead_payload_q.pc              = fetch_packet.pc;
+                fetch_lookahead_payload_q.raw_instruction = fetch_packet.raw_instruction;
+                fetch_lookahead_payload_q.is_compressed   = fetch_packet.is_compressed;
+            }
+            if fetch_tail_valid_q && fetch_payload_capture {
+                fetch_tail_payload_q.pc              = fetch_packet.pc;
+                fetch_tail_payload_q.raw_instruction = fetch_packet.raw_instruction;
+                fetch_tail_payload_q.is_compressed   = fetch_packet.is_compressed;
+            }
+        } else if fetch_payload_capture {
+            if !fetch_lookahead_valid_q {
+                fetch_lookahead_payload_q.pc              = fetch_packet.pc;
+                fetch_lookahead_payload_q.raw_instruction = fetch_packet.raw_instruction;
+                fetch_lookahead_payload_q.is_compressed   = fetch_packet.is_compressed;
+            } else {
+                fetch_tail_payload_q.pc              = fetch_packet.pc;
+                fetch_tail_payload_q.raw_instruction = fetch_packet.raw_instruction;
+                fetch_tail_payload_q.is_compressed   = fetch_packet.is_compressed;
+            }
+        }
+    }
+
+    // Occupancy is a prefix: tail implies middle, and middle implies head.
+    // Reset/redirect own only these valid bits; the payload bank above remains
+    // reset-free.  The normal equations are the complete three-slot FIFO
+    // pop/push truth table under that invariant.
+    always_ff (clk, rst_n) {
+        if_reset {
+            fetch_valid_q           = 1'b0;
+            fetch_lookahead_valid_q = 1'b0;
+            fetch_tail_valid_q      = 1'b0;
+        } else if !memory_wait {
+            if redirect_pending_q || ex_exception || (ex_valid_q && ex_is_mret_q) {
+                fetch_valid_q           = 1'b0;
+                fetch_lookahead_valid_q = 1'b0;
+                fetch_tail_valid_q      = 1'b0;
+            } else if predictor_wait {
+                if fetch_queue_push_valid {
+                    if !fetch_lookahead_valid_q {
+                        fetch_lookahead_valid_q = 1'b1;
+                    } else {
+                        fetch_tail_valid_q = 1'b1;
+                    }
+                }
+            } else if execution_hazard {
+                // Hold all three occupied slots.
+            } else if predictor_frontend_redirect {
+                fetch_valid_q           = 1'b0;
+                fetch_lookahead_valid_q = 1'b0;
+                fetch_tail_valid_q      = 1'b0;
+            } else {
+                fetch_valid_q           = fetch_lookahead_valid_q || fetch_queue_push_valid;
+                fetch_lookahead_valid_q = fetch_tail_valid_q || (fetch_lookahead_valid_q && fetch_queue_push_valid);
+                fetch_tail_valid_q      = fetch_tail_valid_q && fetch_queue_push_valid;
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
             debug_x31_q             = 64'h0000_0000_0000_0000;
             redirect_pending_q      = 1'b0;
+            redirect_preserve_cm_q  = 1'b0;
+            redirect_event_delay_q  = 1'b0;
             redirect_flush_wb_q     = 1'b0;
             redirect_target_q       = 64'h0000_0000_0000_0000;
             data_request_sequence_q = 1'b0;
 
-            fetch_q.pc              = 32'h0000_0000;
-            fetch_q.raw_instruction = 32'h0000_0013;
-            fetch_q.is_compressed   = 1'b0;
-            fetch_q.valid           = 1'b0;
+            fd_q.pc                = 32'h0000_0000;
+            fd_q.instruction       = 32'h0000_0013;
+            fd_q.raw_instruction   = 32'h0000_0013;
+            fd_q.is_compressed     = 1'b0;
+            fd_q.illegal           = 1'b0;
+            fd_q.prediction_token  = 3'd0;
+            fd_q.predicted_kind    = 3'd0;
+            fd_q.predicted_taken   = 1'b0;
+            fd_q.predicted_next_pc = 32'h0000_0004;
+            fd_q.valid             = 1'b0;
 
-            fd_q.pc              = 32'h0000_0000;
-            fd_q.instruction     = 32'h0000_0013;
-            fd_q.raw_instruction = 32'h0000_0013;
-            fd_q.is_compressed   = 1'b0;
-            fd_q.illegal         = 1'b0;
-            fd_q.valid           = 1'b0;
-
-            rx_valid_q         = 1'b0;
-            rx_pc_q            = 64'h0000_0000_0000_0000;
-            rx_raw_instr_q     = 32'h0000_0013;
-            rx_is_compressed_q = 1'b0;
-            rx_rs1_q           = 5'd0;
-            rx_rs2_q           = 5'd0;
-            rx_rd_q            = 5'd0;
-            rx_immediate_q     = 64'h0000_0000_0000_0000;
-            rx_alu_op_q        = 4'd0;
-            rx_use_pc_q        = 1'b0;
-            rx_use_immediate_q = 1'b0;
-            rx_use_rs1_q       = 1'b0;
-            rx_use_rs2_q       = 1'b0;
-            rx_write_enable_q  = 1'b0;
-            rx_is_load_q       = 1'b0;
-            rx_load_size_q     = 2'b11;
-            rx_load_unsigned_q = 1'b0;
-            rx_is_store_q      = 1'b0;
-            rx_store_size_q    = 2'b11;
-            rx_word_op_q       = 1'b0;
-            rx_is_branch_q     = 1'b0;
-            rx_branch_op_q     = 3'b000;
-            rx_is_jal_q        = 1'b0;
-            rx_is_jalr_q       = 1'b0;
-            rx_is_csr_q        = 1'b0;
-            rx_csr_op_q        = 2'b00;
-            rx_csr_use_imm_q   = 1'b0;
-            rx_csr_write_q     = 1'b0;
-            rx_csr_index_q     = 4'd0;
-            rx_is_ecall_q      = 1'b0;
-            rx_is_ebreak_q     = 1'b0;
-            rx_is_mret_q       = 1'b0;
-            rx_illegal_q       = 1'b0;
-            rx_stalled_q       = 1'b0;
-            rx_stall_data_a_q  = 64'h0000_0000_0000_0000;
-            rx_stall_data_b_q  = 64'h0000_0000_0000_0000;
+            rx_valid_q             = 1'b0;
+            rx_pc_q                = 64'h0000_0000_0000_0000;
+            rx_raw_instr_q         = 32'h0000_0013;
+            rx_is_compressed_q     = 1'b0;
+            rx_rs1_q               = 5'd0;
+            rx_rs2_q               = 5'd0;
+            rx_rd_q                = 5'd0;
+            rx_immediate_q         = 64'h0000_0000_0000_0000;
+            rx_alu_op_q            = 4'd0;
+            rx_use_pc_q            = 1'b0;
+            rx_use_immediate_q     = 1'b0;
+            rx_use_rs1_q           = 1'b0;
+            rx_use_rs2_q           = 1'b0;
+            rx_write_enable_q      = 1'b0;
+            rx_is_load_q           = 1'b0;
+            rx_load_size_q         = 2'b11;
+            rx_load_unsigned_q     = 1'b0;
+            rx_is_store_q          = 1'b0;
+            rx_store_size_q        = 2'b11;
+            rx_word_op_q           = 1'b0;
+            rx_is_branch_q         = 1'b0;
+            rx_branch_op_q         = 3'b000;
+            rx_is_jal_q            = 1'b0;
+            rx_is_jalr_q           = 1'b0;
+            rx_is_csr_q            = 1'b0;
+            rx_csr_op_q            = 2'b00;
+            rx_csr_use_imm_q       = 1'b0;
+            rx_csr_write_q         = 1'b0;
+            rx_csr_index_q         = 4'd0;
+            rx_is_ecall_q          = 1'b0;
+            rx_is_ebreak_q         = 1'b0;
+            rx_is_mret_q           = 1'b0;
+            rx_illegal_q           = 1'b0;
+            rx_prediction_token_q  = 3'd0;
+            rx_predicted_kind_q    = 3'd0;
+            rx_predicted_taken_q   = 1'b0;
+            rx_predicted_next_pc_q = 32'h0000_0004;
+            rx_stalled_q           = 1'b0;
+            rx_stall_data_a_q      = 64'h0000_0000_0000_0000;
+            rx_stall_data_b_q      = 64'h0000_0000_0000_0000;
+            rx_execution_hazard_q  = 1'b0;
 
             ex_valid_q              = 1'b0;
             ex_pc_q                 = 64'h0000_0000_0000_0000;
@@ -641,6 +1119,12 @@ module Core #(
             ex_is_ebreak_q          = 1'b0;
             ex_is_mret_q            = 1'b0;
             ex_illegal_q            = 1'b0;
+            ex_control_kind_q       = 3'd0;
+            ex_prediction_token_q   = 3'd0;
+            ex_predicted_kind_q     = 3'd0;
+            ex_predicted_taken_q    = 1'b0;
+            ex_predicted_next_pc_q  = 32'h0000_0004;
+            ex_fallthrough_pc_q     = 32'h0000_0004;
             ex_operand_a_q          = 64'h0000_0000_0000_0000;
             ex_operand_b_q          = 64'h0000_0000_0000_0000;
             ex_store_data_q         = 64'h0000_0000_0000_0000;
@@ -692,6 +1176,12 @@ module Core #(
             cm_exception_cause_q    = 64'd0;
             cm_exception_value_q    = 64'd0;
             cm_is_mret_q            = 1'b0;
+            cm_control_kind_q       = 3'd0;
+            cm_prediction_token_q   = 3'd0;
+            cm_predicted_kind_q     = 3'd0;
+            cm_predicted_taken_q    = 1'b0;
+            cm_predicted_next_pc_q  = 32'h0000_0004;
+            cm_fallthrough_pc_q     = 32'h0000_0004;
 
             wb_valid_q        = 1'b0;
             wb_pc_q           = 64'h0000_0000_0000_0000;
@@ -714,10 +1204,21 @@ module Core #(
             commit_mem_wdata = 64'h0000_0000_0000_0000;
             commit_mem_wmask = 8'h00;
         } else {
-            redirect_pending_q  = redirect_valid;
-            redirect_flush_wb_q = branch_redirect_valid;
-            if redirect_valid {
-                redirect_target_q = redirect_target;
+            // An EX-owned memory repair keeps its redirect transaction live
+            // while the owner waits in CM.  The completion edge below then
+            // advances that owner to WB and applies the saved frontend target.
+            // Older redirects never enter this hold case.
+            if memory_wait && redirect_pending_q && redirect_preserve_cm_q {
+                redirect_pending_q     = 1'b1;
+                redirect_preserve_cm_q = 1'b1;
+            } else {
+                redirect_event_delay_q = redirect_pending_q;
+                redirect_pending_q     = redirect_valid;
+                redirect_preserve_cm_q = redirect_preserve_cm;
+                redirect_flush_wb_q    = branch_redirect_valid;
+                if redirect_valid {
+                    redirect_target_q = redirect_target;
+                }
             }
 
             commit_valid = wb_valid_q;
@@ -761,7 +1262,10 @@ module Core #(
                 rx_stall_data_a_q = forwarded_rs1;
                 rx_stall_data_b_q = forwarded_rs2;
             } else {
-                wb_valid_q = cm_valid_q && !cm_exception_q;
+                // Any frontend/backend hold below inserts an EX bubble, so a
+                // dependency against the former EX producer expires here.
+                rx_execution_hazard_q = 1'b0;
+                wb_valid_q            = cm_valid_q && !cm_exception_q;
                 if COMMIT_PAYLOAD {
                     wb_pc_q        = cm_pc_q;
                     wb_raw_instr_q = cm_raw_instr_q;
@@ -793,12 +1297,14 @@ module Core #(
                 cm_load_size_q     = ex_load_size_q;
                 cm_load_unsigned_q = ex_load_unsigned_q;
                 cm_is_store_q      = ex_is_store_q;
-                // A current or registered redirect flushes the current EX
-                // instruction. Do not let that wrong-path memory operation
-                // toggle the cross-domain request token: the refetched target
-                // can otherwise toggle it a second time before the slower
-                // memory clock observes either edge.
-                if ex_valid_q && (ex_is_load_q || ex_is_store_q) && !redirect_valid && !redirect_pending_q {
+                // Only an older CM redirect makes the current EX memory
+                // instruction wrong-path.  A prediction-kind repair owned by
+                // this same load/store redirects younger fetch but must not
+                // suppress the architectural memory operation itself. Keeping
+                // ex_redirect_valid out of this CE also avoids routing the
+                // unrelated JALR target adder through the request token.
+                if ex_valid_q && (ex_is_load_q || ex_is_store_q) && !branch_redirect_valid && !cm_system_redirect
+                    && !redirect_pending_q {
                     data_request_sequence_q = !data_request_sequence_q;
                 }
                 cm_store_size_q      = ex_store_size_q;
@@ -833,16 +1339,22 @@ module Core #(
                 if RELOCATE_LOW_DATA && !lsu_address[31] {
                     cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
                 }
-                cm_lsu_wdata_q       = execute_store_data;
-                cm_is_csr_q          = ex_is_csr_q;
-                cm_csr_op_q          = ex_csr_op_q;
-                cm_csr_write_q       = ex_csr_write_q;
-                cm_csr_index_q       = ex_csr_index_q;
-                cm_csr_source_q      = csr_source;
-                cm_exception_q       = ex_exception;
-                cm_exception_cause_q = ex_exception_cause;
-                cm_exception_value_q = ex_exception_value;
-                cm_is_mret_q         = ex_is_mret_q;
+                cm_lsu_wdata_q         = execute_store_data;
+                cm_is_csr_q            = ex_is_csr_q;
+                cm_csr_op_q            = ex_csr_op_q;
+                cm_csr_write_q         = ex_csr_write_q;
+                cm_csr_index_q         = ex_csr_index_q;
+                cm_csr_source_q        = csr_source;
+                cm_exception_q         = ex_exception;
+                cm_exception_cause_q   = ex_exception_cause;
+                cm_exception_value_q   = ex_exception_value;
+                cm_is_mret_q           = ex_is_mret_q;
+                cm_control_kind_q      = ex_control_kind_q;
+                cm_prediction_token_q  = ex_prediction_token_q;
+                cm_predicted_kind_q    = ex_predicted_kind_q;
+                cm_predicted_taken_q   = ex_predicted_taken_q;
+                cm_predicted_next_pc_q = ex_predicted_next_pc_q;
+                cm_fallthrough_pc_q    = ex_fallthrough_pc_q;
 
                 // Register only the consumer selectors. The producer value enters
                 // cm_arithmetic_q/cm_logic_result_q on this same edge and is the
@@ -859,30 +1371,40 @@ module Core #(
                 ex_alu_op_q    = rx_alu_op_q;
                 // Decode subtraction before EX so the carry-chain input does
                 // not start behind a four-bit opcode equality comparator.
-                ex_subtract_q      = rx_alu_op_q == 4'd1;
-                ex_write_enable_q  = rx_write_enable_q;
-                ex_can_bypass_q    = rx_write_enable_q && !rx_is_load_q
+                ex_subtract_q          = rx_alu_op_q == 4'd1;
+                ex_write_enable_q      = rx_write_enable_q;
+                ex_can_bypass_q        = rx_write_enable_q && !rx_is_load_q
                     && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8)
                         || (rx_alu_op_q == 4'd9) || (rx_alu_op_q == 4'd11)) && (rx_rd_q != 5'd0);
-                ex_is_load_q       = rx_is_load_q;
-                ex_load_size_q     = rx_load_size_q;
-                ex_load_unsigned_q = rx_load_unsigned_q;
-                ex_is_store_q      = rx_is_store_q;
-                ex_store_size_q    = rx_store_size_q;
-                ex_word_op_q       = rx_word_op_q;
-                ex_is_branch_q     = rx_is_branch_q;
-                ex_branch_op_q     = rx_branch_op_q;
-                ex_link_q          = rx_is_jal_q || rx_is_jalr_q;
-                ex_is_csr_q        = rx_is_csr_q;
-                ex_csr_op_q        = rx_csr_op_q;
-                ex_csr_use_imm_q   = rx_csr_use_imm_q;
-                ex_csr_immediate_q = rx_rs1_q;
-                ex_csr_write_q     = rx_csr_write_q;
-                ex_csr_index_q     = rx_csr_index_q;
-                ex_is_ecall_q      = rx_is_ecall_q;
-                ex_is_ebreak_q     = rx_is_ebreak_q;
-                ex_is_mret_q       = rx_is_mret_q;
-                ex_illegal_q       = rx_illegal_q;
+                ex_is_load_q           = rx_is_load_q;
+                ex_load_size_q         = rx_load_size_q;
+                ex_load_unsigned_q     = rx_load_unsigned_q;
+                ex_is_store_q          = rx_is_store_q;
+                ex_store_size_q        = rx_store_size_q;
+                ex_word_op_q           = rx_word_op_q;
+                ex_is_branch_q         = rx_is_branch_q;
+                ex_branch_op_q         = rx_branch_op_q;
+                ex_link_q              = rx_is_jal_q || rx_is_jalr_q;
+                ex_is_csr_q            = rx_is_csr_q;
+                ex_csr_op_q            = rx_csr_op_q;
+                ex_csr_use_imm_q       = rx_csr_use_imm_q;
+                ex_csr_immediate_q     = rx_rs1_q;
+                ex_csr_write_q         = rx_csr_write_q;
+                ex_csr_index_q         = rx_csr_index_q;
+                ex_is_ecall_q          = rx_is_ecall_q;
+                ex_is_ebreak_q         = rx_is_ebreak_q;
+                ex_is_mret_q           = rx_is_mret_q;
+                ex_illegal_q           = rx_illegal_q;
+                ex_control_kind_q      = rx_control_kind;
+                ex_prediction_token_q  = rx_prediction_token_q;
+                ex_predicted_kind_q    = rx_predicted_kind_q;
+                ex_predicted_taken_q   = rx_predicted_taken_q;
+                ex_predicted_next_pc_q = rx_predicted_next_pc_q;
+                if rx_is_compressed_q {
+                    ex_fallthrough_pc_q = rx_pc_q + 32'd2;
+                } else {
+                    ex_fallthrough_pc_q = rx_pc_q + 32'd4;
+                }
                 if rx_is_jal_q || rx_is_jalr_q {
                     ex_operand_a_q = rx_pc_q;
                     if rx_is_compressed_q {
@@ -904,14 +1426,10 @@ module Core #(
                 ex_redirect_clear_lsb_q = rx_is_jalr_q;
 
                 if redirect_pending_q {
-                    fetch_line_q      = redirect_target_q[31:3];
-                    fetch_next_line_q = redirect_target_q[31:3] + 29'd1;
-                    fetch_parcel_q    = redirect_target_q[2:1];
-                    fetch_q.valid     = 1'b0;
-                    fd_q.valid        = 1'b0;
-                    rx_valid_q        = 1'b0;
-                    ex_valid_q        = 1'b0;
-                    cm_valid_q        = 1'b0;
+                    fd_q.valid = 1'b0;
+                    rx_valid_q = 1'b0;
+                    ex_valid_q = 1'b0;
+                    cm_valid_q = 1'b0;
                     if redirect_flush_wb_q {
                         wb_valid_q = 1'b0;
                     }
@@ -921,61 +1439,66 @@ module Core #(
                     // cycle. Kill younger work here so that delaying the CSR
                     // side effect does not let an instruction past the
                     // exception or MRET change architectural state.
-                    fetch_q.valid = 1'b0;
-                    fd_q.valid    = 1'b0;
-                    rx_valid_q    = 1'b0;
-                    ex_valid_q    = 1'b0;
-                    rx_stalled_q  = 1'b0;
+                    fd_q.valid   = 1'b0;
+                    rx_valid_q   = 1'b0;
+                    ex_valid_q   = 1'b0;
+                    rx_stalled_q = 1'b0;
+                } else if predictor_wait {
+                    // The hardware cold-start scrub and a held synchronous
+                    // lookup both keep the frontend stationary.  Older work
+                    // may drain through CM/WB, while EX receives a bubble so
+                    // no instruction is executed twice.
+                    ex_valid_q        = 1'b0;
+                    rx_stalled_q      = rx_valid_q;
+                    rx_stall_data_a_q = forwarded_rs1;
+                    rx_stall_data_b_q = forwarded_rs2;
                 } else if execution_hazard {
                     ex_valid_q        = 1'b0;
                     rx_stalled_q      = 1'b1;
                     rx_stall_data_a_q = forwarded_rs1;
                     rx_stall_data_b_q = forwarded_rs2;
                 } else {
-                    rx_stalled_q       = 1'b0;
-                    rx_valid_q         = fd_q.valid;
-                    rx_pc_q            = fd_q.pc;
-                    rx_raw_instr_q     = fd_q.raw_instruction;
-                    rx_is_compressed_q = fd_q.is_compressed;
-                    rx_rs1_q           = decode_bus.rs1;
-                    rx_rs2_q           = decode_bus.rs2;
-                    rx_rd_q            = decode_bus.rd;
-                    rx_immediate_q     = decode_bus.immediate;
-                    rx_alu_op_q        = decode_bus.alu_op;
-                    rx_use_pc_q        = decode_bus.use_pc;
-                    rx_use_immediate_q = decode_bus.use_immediate;
-                    rx_use_rs1_q       = decode_bus.use_rs1;
-                    rx_use_rs2_q       = decode_bus.use_rs2;
-                    rx_write_enable_q  = decode_bus.write_enable;
-                    rx_is_load_q       = decode_bus.is_load;
-                    rx_load_size_q     = decode_bus.load_size;
-                    rx_load_unsigned_q = decode_bus.load_unsigned;
-                    rx_is_store_q      = decode_bus.is_store;
-                    rx_store_size_q    = decode_bus.store_size;
-                    rx_word_op_q       = decode_bus.word_op;
-                    rx_is_branch_q     = decode_bus.is_branch;
-                    rx_branch_op_q     = decode_bus.branch_op;
-                    rx_is_jal_q        = decode_bus.is_jal;
-                    rx_is_jalr_q       = decode_bus.is_jalr;
-                    rx_is_csr_q        = decode_bus.is_csr;
-                    rx_csr_op_q        = decode_bus.csr_op;
-                    rx_csr_use_imm_q   = decode_bus.csr_use_imm;
-                    rx_csr_write_q     = decode_bus.csr_write;
-                    rx_csr_index_q     = decode_bus.csr_index;
-                    rx_is_ecall_q      = decode_bus.is_ecall;
-                    rx_is_ebreak_q     = decode_bus.is_ebreak;
-                    rx_is_mret_q       = decode_bus.is_mret;
-                    rx_illegal_q       = decode_bus.illegal || fd_q.illegal;
+                    rx_stalled_q           = 1'b0;
+                    rx_valid_q             = fd_q.valid;
+                    rx_pc_q                = fd_q.pc;
+                    rx_raw_instr_q         = fd_q.raw_instruction;
+                    rx_is_compressed_q     = fd_q.is_compressed;
+                    rx_rs1_q               = decode_bus.rs1;
+                    rx_rs2_q               = decode_bus.rs2;
+                    rx_rd_q                = decode_bus.rd;
+                    rx_immediate_q         = decode_bus.immediate;
+                    rx_alu_op_q            = decode_bus.alu_op;
+                    rx_use_pc_q            = decode_bus.use_pc;
+                    rx_use_immediate_q     = decode_bus.use_immediate;
+                    rx_use_rs1_q           = decode_bus.use_rs1;
+                    rx_use_rs2_q           = decode_bus.use_rs2;
+                    rx_write_enable_q      = decode_bus.write_enable;
+                    rx_is_load_q           = decode_bus.is_load;
+                    rx_load_size_q         = decode_bus.load_size;
+                    rx_load_unsigned_q     = decode_bus.load_unsigned;
+                    rx_is_store_q          = decode_bus.is_store;
+                    rx_store_size_q        = decode_bus.store_size;
+                    rx_word_op_q           = decode_bus.word_op;
+                    rx_is_branch_q         = decode_bus.is_branch;
+                    rx_branch_op_q         = decode_bus.branch_op;
+                    rx_is_jal_q            = decode_bus.is_jal;
+                    rx_is_jalr_q           = decode_bus.is_jalr;
+                    rx_is_csr_q            = decode_bus.is_csr;
+                    rx_csr_op_q            = decode_bus.csr_op;
+                    rx_csr_use_imm_q       = decode_bus.csr_use_imm;
+                    rx_csr_write_q         = decode_bus.csr_write;
+                    rx_csr_index_q         = decode_bus.csr_index;
+                    rx_is_ecall_q          = decode_bus.is_ecall;
+                    rx_is_ebreak_q         = decode_bus.is_ebreak;
+                    rx_is_mret_q           = decode_bus.is_mret;
+                    rx_illegal_q           = decode_bus.illegal || fd_q.illegal;
+                    rx_prediction_token_q  = fd_q.prediction_token;
+                    rx_predicted_kind_q    = fd_q.predicted_kind;
+                    rx_predicted_taken_q   = fd_q.predicted_taken;
+                    rx_predicted_next_pc_q = fd_q.predicted_next_pc;
+                    rx_execution_hazard_q  = decode_execution_hazard;
 
-                    fd_q    = decode_packet;
-                    fetch_q = fetch_packet;
-                    if fetch_packet.valid {
-                        if fetch_cross_line {
-                            fetch_line_q      = fetch_next_line_q;
-                            fetch_next_line_q = next_line_plus_one;
-                        }
-                        fetch_parcel_q = fetch_next_parcel;
-                    }
+                    fd_q = decode_packet;
                 }
             }
         }

@@ -452,16 +452,21 @@ fn response_value(responses: &[XvcResponseObservation], first: usize, width: usi
         })
 }
 
-const METRIC_NAMES: [&str; 6] = [
+const METRIC_NAMES: [&str; 11] = [
     "mcycle",
     "minstret",
     "dependency",
     "memory",
     "redirect",
     "frontend",
+    "conditional",
+    "direction_wrong",
+    "btb_miss",
+    "ras_fallback",
+    "repair",
 ];
 
-fn metric_values(observations: &[XvcResponseObservation]) -> Result<[u64; 6], Box<dyn Error>> {
+fn metric_values(observations: &[XvcResponseObservation]) -> Result<[u64; 11], Box<dyn Error>> {
     if observations.len() != METRIC_NAMES.len() * 64 {
         return Err(format!(
             "internal XVC metric response count is {}, expected {}",
@@ -475,7 +480,7 @@ fn metric_values(observations: &[XvcResponseObservation]) -> Result<[u64; 6], Bo
     }))
 }
 
-fn format_metrics(values: [u64; 6]) -> String {
+fn format_metrics(values: [u64; 11]) -> String {
     let mut output = METRIC_NAMES
         .into_iter()
         .zip(values)
@@ -488,7 +493,7 @@ fn format_metrics(values: [u64; 6]) -> String {
     output
 }
 
-fn validate_metrics(name: &str, values: [u64; 6]) -> Result<(), Box<dyn Error>> {
+fn validate_metrics(name: &str, values: [u64; 11]) -> Result<(), Box<dyn Error>> {
     if values[0] == 0 || values[1] == 0 || values[0] <= values[1] {
         return Err(format!(
             "{name}: invalid architectural counters: mcycle={} minstret={}",
@@ -497,7 +502,7 @@ fn validate_metrics(name: &str, values: [u64; 6]) -> Result<(), Box<dyn Error>> 
         .into());
     }
     if values[2..].iter().any(|&event| event > values[0])
-        || values[2..]
+        || values[2..6]
             .iter()
             .map(|&event| u128::from(event))
             .sum::<u128>()
@@ -509,9 +514,26 @@ fn validate_metrics(name: &str, values: [u64; 6]) -> Result<(), Box<dyn Error>> 
         )
         .into());
     }
+    // Predictor events can overlap each other and the four cycle classes, so
+    // do not add them into the cycle-class sum. The dedicated performance ELF
+    // deliberately overwrites every counter with a unique readback signature;
+    // semantic inequalities only apply to naturally accumulated runs.
+    if name != "performance"
+        && (values[6] > values[1]
+            || values[7] > values[6]
+            || values[8] > values[1]
+            || values[9] > values[1]
+            || values[10] > values[4])
+    {
+        return Err(format!(
+            "{name}: predictor event counters are inconsistent: {}",
+            format_metrics(values)
+        )
+        .into());
+    }
     if name == "performance" {
         let high_halves = values.map(|value| value >> 32);
-        let expected = [16, 8, 1, 2, 3, 4];
+        let expected = [16, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9];
         if high_halves != expected {
             return Err(format!(
                 "{name}: selector/high-bank readback mismatch: high halves {high_halves:?}, expected {expected:?}"
@@ -928,11 +950,11 @@ fn emit_test(
     push_value_bits(&mut expected, 32, expected_tohost, 64);
     session.expect_selected_bits(&expected);
     if observe_metrics {
-        // SELECT address[10:8] chooses one frozen Core counter while the low
+        // SELECT address[11:8] chooses one frozen Core counter while the low
         // byte retains the existing response-bank/bit selector. Banks five
         // and six expose the low and high halves, respectively.
-        let mut selectors = Vec::with_capacity(6 * 64);
-        for counter in 0_u32..6 {
+        let mut selectors = Vec::with_capacity(11 * 64);
+        for counter in 0_u32..11 {
             selectors.extend((0_u32..32).map(|bit| (counter << 8) | (5 << 5) | bit));
             selectors.extend((0_u32..32).map(|bit| (counter << 8) | (6 << 5) | bit));
         }
@@ -971,7 +993,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
-    let mut bitstream = project.join("build/riscv-hardware-test-125-texo.bit");
+    // Do not silently program the archived pre-predictor image.  A current
+    // hardware run must either build the predictor-qualified artifact below
+    // or name another bitstream explicitly with --bitstream.
+    let mut bitstream = project.join("build/riscv-hardware-test-125-predictor.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {
@@ -1147,8 +1172,20 @@ mod tests {
     }
 
     #[test]
-    fn metric_responses_decode_six_little_endian_counters() {
-        let expected = [0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 3, 5, 8, 13];
+    fn metric_responses_decode_eleven_little_endian_counters() {
+        let expected = [
+            0x0123_4567_89ab_cdef,
+            0xfedc_ba98_7654_3210,
+            3,
+            5,
+            8,
+            13,
+            21,
+            34,
+            55,
+            89,
+            144,
+        ];
         let mut responses = Vec::new();
         for value in expected {
             responses.extend((0..64).map(|bit| {
@@ -1164,6 +1201,17 @@ mod tests {
     }
 
     #[test]
+    fn select_frame_preserves_four_bit_counter_selector() {
+        let selector = (10_u32 << 8) | (6 << 5) | 31;
+        let encoded = frame(Opcode::Select, 0x5a, selector, 0, 0);
+        assert_eq!(
+            u32::from_le_bytes(encoded[3..7].try_into().unwrap()),
+            selector
+        );
+        assert_eq!(encoded[4] & 0x0f, 10);
+    }
+
+    #[test]
     fn physical_metric_validation_checks_selectors_and_high_bank() {
         let seeded = [
             0x0000_0010_0000_0080,
@@ -1172,14 +1220,19 @@ mod tests {
             0x0000_0002_0000_0022,
             0x0000_0003_0000_0033,
             0x0000_0004_0000_0044,
+            0x0000_0005_0000_0050,
+            0x0000_0006_0000_0060,
+            0x0000_0007_0000_0070,
+            0x0000_0008_0000_0080,
+            0x0000_0009_0000_0090,
         ];
         assert!(validate_metrics("performance", seeded).is_ok());
 
         let mut broken_high_bank = seeded;
-        broken_high_bank[5] &= 0xffff_ffff;
+        broken_high_bank[10] &= 0xffff_ffff;
         assert!(validate_metrics("performance", broken_high_bank).is_err());
 
-        let aliased = [100, 50, 10, 10, 10, 100];
+        let aliased = [100, 50, 10, 10, 10, 100, 0, 0, 0, 0, 0];
         assert!(validate_metrics("other", aliased).is_err());
     }
 }

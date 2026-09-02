@@ -1,0 +1,1536 @@
+/// Four-table TAGE direction predictor with synchronous FPGA block memories.
+///
+/// The prediction and training rules follow Seznec and Michaud's original
+/// TAGE paper (JILP vol. 8, 2006) and Seznec's TAGE cookbook (INRIA RR-9561):
+/// longest matching tagged component is the provider, the next matching
+/// component (or the bimodal table) is the alternate, weak providers use that
+/// true alternate, and mispredictions allocate in a longer
+/// history component.  History lengths and compressed-history folding live in
+/// the frontend; this module receives the four already-folded indices/tags for
+/// the selected 4/12/36/108-bit geometric history series.
+///
+/// Geometry and several bounded-hardware details are design choices for this
+/// FPGA implementation: B is 2048 x 2 bits, each tagged component is 512 x 16
+/// bits, at most one entry is allocated per update, and eight tokens retain
+/// the exact prediction-time metadata until resolution.
+///
+/// Tagged entry layout is [15] valid, [14:6] zero-extended 9-bit tag,
+/// [5:3] signed 3-bit prediction counter, [2:1] 2-bit usefulness, [0] pad.
+/// A tagged counter predicts taken when non-negative; -1 and 0 are weak.
+/// The unsigned bimodal counter predicts taken at 2 or 3.
+module TageDirectionPredictor #(
+    param SCRUB_ON_RESET: bit = 0,
+) (
+    clk  : input clock          ,
+    rst_n: input reset_async_low,
+
+    lookup_valid: input logic,
+    // lookup_token correlates the physical BTB/TAGE response. snapshot_token
+    // names the architectural prediction/training slot claimed when that
+    // response first becomes visible; canceled shadow lookups claim no slot.
+    lookup_token  : input logic<3> ,
+    snapshot_token: input logic<3> ,
+    lookup_pc     : input logic<32>,
+    lookup_index_0: input logic<9> ,
+    lookup_index_1: input logic<9> ,
+    lookup_index_2: input logic<9> ,
+    lookup_index_3: input logic<9> ,
+    lookup_tag_0  : input logic<8> ,
+    lookup_tag_1  : input logic<8> ,
+    lookup_tag_2  : input logic<9> ,
+    lookup_tag_3  : input logic<9> ,
+
+    response_accept        : input  logic   ,
+    response_cancel        : input  logic   ,
+    ready                  : output logic   ,
+    response_valid         : output logic   ,
+    response_token         : output logic<3>,
+    response_taken         : output logic   ,
+    response_hit           : output logic   ,
+    response_match_metadata: output logic<4>,
+    response_weak_metadata : output logic<4>,
+    response_pred_metadata : output logic<5>,
+
+    update_valid: input logic   ,
+    update_token: input logic<3>,
+    update_taken: input logic   ,
+
+    release_valid: input logic   ,
+    release_token: input logic<3>,
+    squash_valid : input logic   ,
+    squash_token : input logic<3>,
+    flush_slots  : input logic   ,
+) {
+    const SLOT_COUNT      : u32 = 8;
+    const BASE_ENTRY_COUNT: u32 = 2048;
+
+    // No prediction memory is reset or initialized. The base table is a
+    // simple-dual-port RAM; each tagged table is isolated in the canonical
+    // true-dual-port wrapper used by Struo and ECP5 block-RAM inference.
+    #[sv("struo_memory = \"required\"")]
+    var base_memory: logic<2> [BASE_ENTRY_COUNT];
+
+    var base_read_raw_q: logic<2> ;
+    var tag_read_raw0_q: logic<16>;
+    var tag_read_raw1_q: logic<16>;
+    var tag_read_raw2_q: logic<16>;
+    var tag_read_raw3_q: logic<16>;
+
+    var base_read_bypass_q: logic    ;
+    var base_bypass_data_q: logic<2> ;
+    var tag_read_bypass0_q: logic    ;
+    var tag_read_bypass1_q: logic    ;
+    var tag_read_bypass2_q: logic    ;
+    var tag_read_bypass3_q: logic    ;
+    var tag_bypass_data0_q: logic<16>;
+    var tag_bypass_data1_q: logic<16>;
+    var tag_bypass_data2_q: logic<16>;
+    var tag_bypass_data3_q: logic<16>;
+
+    var response_valid_q            : logic    ;
+    var response_metadata_captured_q: logic    ;
+    var lookup_token_q              : logic<3> ;
+    var lookup_base_q               : logic<11>;
+    var lookup_index0_q             : logic<9> ;
+    var lookup_index1_q             : logic<9> ;
+    var lookup_index2_q             : logic<9> ;
+    var lookup_index3_q             : logic<9> ;
+    var lookup_tag0_q               : logic<9> ;
+    var lookup_tag1_q               : logic<9> ;
+    var lookup_tag2_q               : logic<9> ;
+    var lookup_tag3_q               : logic<9> ;
+
+    var lookup_accept         : logic    ;
+    var response_base_entry   : logic<2> ;
+    var response_entry0       : logic<16>;
+    var response_entry1       : logic<16>;
+    var response_entry2       : logic<16>;
+    var response_entry3       : logic<16>;
+    var response_match0       : logic    ;
+    var response_match1       : logic    ;
+    var response_match2       : logic    ;
+    var response_match3       : logic    ;
+    var response_weak0        : logic    ;
+    var response_weak1        : logic    ;
+    var response_weak2        : logic    ;
+    var response_weak3        : logic    ;
+    var response_base_pred    : logic    ;
+    var response_pred0        : logic    ;
+    var response_pred1        : logic    ;
+    var response_pred2        : logic    ;
+    var response_pred3        : logic    ;
+    var response_match_vector : logic<4> ;
+    var response_any_match    : logic    ;
+    var response_high_match   : logic    ;
+    var response_low_pred     : logic    ;
+    var response_high_pred    : logic    ;
+    var response_low_weak     : logic    ;
+    var response_high_weak    : logic    ;
+    var response_lm_pred      : logic    ;
+    var response_low_alt_pred : logic    ;
+    var response_high_alt_pred: logic    ;
+    var response_alt_pred     : logic    ;
+    var response_hit_weak     : logic    ;
+    var response_final_pred   : logic    ;
+    var held_match_vector_q   : logic<4> ;
+    var held_weak_vector_q    : logic<4> ;
+    var held_pred_vector_q    : logic<5> ;
+    var held_any_match        : logic    ;
+    var held_high_match       : logic    ;
+    var held_low_pred         : logic    ;
+    var held_high_pred        : logic    ;
+    var held_low_weak         : logic    ;
+    var held_high_weak        : logic    ;
+    var held_lm_pred          : logic    ;
+    var held_low_alt_pred     : logic    ;
+    var held_high_alt_pred    : logic    ;
+    var held_alt_pred         : logic    ;
+    var held_hit_weak         : logic    ;
+    var held_final_pred       : logic    ;
+
+    // Prediction-time metadata.  A token may be explicitly released without
+    // training (squash), or all slots may be flushed after recovery.
+    var slot_valid_q       : logic<8>              ;
+    var slot_base_index_q  : logic<11> [SLOT_COUNT];
+    var slot_index0_q      : logic<9>  [SLOT_COUNT];
+    var slot_index1_q      : logic<9>  [SLOT_COUNT];
+    var slot_index2_q      : logic<9>  [SLOT_COUNT];
+    var slot_index3_q      : logic<9>  [SLOT_COUNT];
+    var slot_tag0_q        : logic<9>  [SLOT_COUNT];
+    var slot_tag1_q        : logic<9>  [SLOT_COUNT];
+    var slot_tag2_q        : logic<9>  [SLOT_COUNT];
+    var slot_tag3_q        : logic<9>  [SLOT_COUNT];
+    var slot_base_entry_q  : logic<2>  [SLOT_COUNT];
+    var slot_entry0_q      : logic<16> [SLOT_COUNT];
+    var slot_entry1_q      : logic<16> [SLOT_COUNT];
+    var slot_entry2_q      : logic<16> [SLOT_COUNT];
+    var slot_entry3_q      : logic<16> [SLOT_COUNT];
+    var slot_match_vector_q: logic<4>  [SLOT_COUNT];
+    var slot_weak_vector_q : logic<4>  [SLOT_COUNT];
+    var slot_pred_vector_q : logic<5>  [SLOT_COUNT];
+
+    // Struo deliberately treats only the five prediction tables as memories.
+    // Token metadata is a small FF array, so select it through a constant-index
+    // elaboration loop rather than a dynamic unpacked-array index.
+    var selected_valid       : logic    ;
+    var selected_base_index  : logic<11>;
+    var selected_index0      : logic<9> ;
+    var selected_index1      : logic<9> ;
+    var selected_index2      : logic<9> ;
+    var selected_index3      : logic<9> ;
+    var selected_tag0        : logic<9> ;
+    var selected_tag1        : logic<9> ;
+    var selected_tag2        : logic<9> ;
+    var selected_tag3        : logic<9> ;
+    var selected_base_entry  : logic<2> ;
+    var selected_entry0      : logic<16>;
+    var selected_entry1      : logic<16>;
+    var selected_entry2      : logic<16>;
+    var selected_entry3      : logic<16>;
+    var selected_provider_oh : logic<5> ;
+    var selected_alt_oh      : logic<5> ;
+    var selected_match_vector: logic<4> ;
+    var selected_weak_vector : logic<4> ;
+    var selected_pred_vector : logic<5> ;
+    var selected_lm_pred     : logic    ;
+    var selected_alt_pred    : logic    ;
+    var selected_final_pred  : logic    ;
+    var selected_hit_weak    : logic    ;
+    var selected_taken       : logic    ;
+
+    // S1 registers the resolved prediction classification together with its
+    // mutable table snapshot.  S2 can therefore perform all bank-local
+    // counter/usefulness/allocation work without the provider priority tree
+    // in the same cycle.
+    var classified_valid      : logic    ;
+    var classified_base_index : logic<11>;
+    var classified_index0     : logic<9> ;
+    var classified_index1     : logic<9> ;
+    var classified_index2     : logic<9> ;
+    var classified_index3     : logic<9> ;
+    var classified_tag0       : logic<9> ;
+    var classified_tag1       : logic<9> ;
+    var classified_tag2       : logic<9> ;
+    var classified_tag3       : logic<9> ;
+    var classified_base_entry : logic<2> ;
+    var classified_entry0     : logic<16>;
+    var classified_entry1     : logic<16>;
+    var classified_entry2     : logic<16>;
+    var classified_entry3     : logic<16>;
+    var classified_provider_oh: logic<5> ;
+    var classified_alt_oh     : logic<5> ;
+    var classified_lm_pred    : logic    ;
+    var classified_alt_pred   : logic    ;
+    var classified_final_pred : logic    ;
+    var classified_hit_weak   : logic    ;
+    var classified_taken      : logic    ;
+
+    // S0 selects one token and captures it. Resolve input timing therefore
+    // ends at ordinary FFs instead of continuing into a block-RAM write port.
+    var update_selected_valid       : logic    ;
+    var update_selected_base_index  : logic<11>;
+    var update_selected_index0      : logic<9> ;
+    var update_selected_index1      : logic<9> ;
+    var update_selected_index2      : logic<9> ;
+    var update_selected_index3      : logic<9> ;
+    var update_selected_tag0        : logic<9> ;
+    var update_selected_tag1        : logic<9> ;
+    var update_selected_tag2        : logic<9> ;
+    var update_selected_tag3        : logic<9> ;
+    var update_selected_base_entry  : logic<2> ;
+    var update_selected_entry0      : logic<16>;
+    var update_selected_entry1      : logic<16>;
+    var update_selected_entry2      : logic<16>;
+    var update_selected_entry3      : logic<16>;
+    var update_selected_match_vector: logic<4> ;
+    var update_selected_weak_vector : logic<4> ;
+    var update_selected_pred_vector : logic<5> ;
+    var allocation_lfsr_q           : logic<2> ;
+
+    var train_valid             : logic    ;
+    var train_base_entry        : logic<2> ;
+    var train_entry0            : logic<16>;
+    var train_entry1            : logic<16>;
+    var train_entry2            : logic<16>;
+    var train_entry3            : logic<16>;
+    var train_base_write        : logic    ;
+    var train_tag_write0        : logic    ;
+    var train_tag_write1        : logic    ;
+    var train_tag_write2        : logic    ;
+    var train_tag_write3        : logic    ;
+    var train_mispredict        : logic    ;
+    var train_lm_correct        : logic    ;
+    var train_allocation_attempt: logic    ;
+    var train_alloc_eligible    : logic<4> ;
+    var train_alloc_oh          : logic<4> ;
+    var train_alloc_counter     : logic<3> ;
+    var train_candidate0        : logic    ;
+    var train_candidate1        : logic    ;
+    var train_candidate2        : logic    ;
+    var train_candidate3        : logic    ;
+    var train_free0             : logic    ;
+    var train_free1             : logic    ;
+    var train_free2             : logic    ;
+    var train_free3             : logic    ;
+    var train_source_valid0     : logic    ;
+    var train_source_valid1     : logic    ;
+    var train_source_valid2     : logic    ;
+    var train_source_valid3     : logic    ;
+
+    // S1 is a registered write packet. Port-B arbitration and collision
+    // forwarding consume only this packet, never the token-selection cone.
+    var train_packet_base_write_q: logic    ;
+    var train_packet_base_addr_q : logic<11>;
+    var train_packet_base_data_q : logic<2> ;
+    var train_packet_tag_write0_q: logic    ;
+    var train_packet_tag_write1_q: logic    ;
+    var train_packet_tag_write2_q: logic    ;
+    var train_packet_tag_write3_q: logic    ;
+    var train_packet_tag_addr0_q : logic<9> ;
+    var train_packet_tag_addr1_q : logic<9> ;
+    var train_packet_tag_addr2_q : logic<9> ;
+    var train_packet_tag_addr3_q : logic<9> ;
+    var train_packet_tag_data0_q : logic<16>;
+    var train_packet_tag_data1_q : logic<16>;
+    var train_packet_tag_data2_q : logic<16>;
+    var train_packet_tag_data3_q : logic<16>;
+    // The packet registered on a lookup-accept edge is the only queued write
+    // that can affect that lookup's response. Capture the address comparison
+    // on that edge so the BRAM response cone only sees a one-bit select.
+    var train_packet_base_lookup_collision_q: logic;
+    var train_packet_tag_lookup_collision0_q: logic;
+    var train_packet_tag_lookup_collision1_q: logic;
+    var train_packet_tag_lookup_collision2_q: logic;
+    var train_packet_tag_lookup_collision3_q: logic;
+
+
+    // Port-B control.  Scrub has priority, then architectural training, then
+    // one background aging operation.  Lookup forwarding uses these final
+    // signals, so same-address read/write behavior is independent of the RAM.
+    var base_portb_write: logic    ;
+    var base_portb_addr : logic<11>;
+    var base_portb_data : logic<2> ;
+    var base_porta_addr : logic<11>;
+    var tag_porta_enable: logic    ;
+    var tag_porta_write : logic    ;
+    var tag_porta_addr0 : logic<9> ;
+    var tag_porta_addr1 : logic<9> ;
+    var tag_porta_addr2 : logic<9> ;
+    var tag_porta_addr3 : logic<9> ;
+    var tag_portb_write0: logic    ;
+    var tag_portb_write1: logic    ;
+    var tag_portb_write2: logic    ;
+    var tag_portb_write3: logic    ;
+    var tag_portb_addr0 : logic<9> ;
+    var tag_portb_addr1 : logic<9> ;
+    var tag_portb_addr2 : logic<9> ;
+    var tag_portb_addr3 : logic<9> ;
+    var tag_portb_data0 : logic<16>;
+    var tag_portb_data1 : logic<16>;
+    var tag_portb_data2 : logic<16>;
+    var tag_portb_data3 : logic<16>;
+
+    var scrub_active_q: logic    ;
+    var scrub_addr_q  : logic<11>;
+
+    var conditional_commit_count_q: logic<18>;
+    var age_active_q              : logic    ;
+    var age_address_q             : logic<9> ;
+    var age_clear_msb_q           : logic    ;
+    var age_sweep_queued_q        : logic    ;
+    var age_pending0_q            : logic    ;
+    var age_pending1_q            : logic    ;
+    var age_pending2_q            : logic    ;
+    var age_pending3_q            : logic    ;
+    var age_done0_q               : logic    ;
+    var age_done1_q               : logic    ;
+    var age_done2_q               : logic    ;
+    var age_done3_q               : logic    ;
+    var age_epoch_pulse           : logic    ;
+    var age_read_enable0          : logic    ;
+    var age_read_enable1          : logic    ;
+    var age_read_enable2          : logic    ;
+    var age_read_enable3          : logic    ;
+    var age_write_enable0         : logic    ;
+    var age_write_enable1         : logic    ;
+    var age_write_enable2         : logic    ;
+    var age_write_enable3         : logic    ;
+    var age_row_complete          : logic    ;
+    var age_read0_q               : logic<16>;
+    var age_read1_q               : logic<16>;
+    var age_read2_q               : logic<16>;
+    var age_read3_q               : logic<16>;
+    var age_write_data0           : logic<16>;
+    var age_write_data1           : logic<16>;
+    var age_write_data2           : logic<16>;
+    var age_write_data3           : logic<16>;
+
+    always_comb {
+        update_selected_valid        = 1'b0;
+        update_selected_base_index   = 11'd0;
+        update_selected_index0       = 9'd0;
+        update_selected_index1       = 9'd0;
+        update_selected_index2       = 9'd0;
+        update_selected_index3       = 9'd0;
+        update_selected_tag0         = 9'd0;
+        update_selected_tag1         = 9'd0;
+        update_selected_tag2         = 9'd0;
+        update_selected_tag3         = 9'd0;
+        update_selected_base_entry   = 2'd0;
+        update_selected_entry0       = 16'd0;
+        update_selected_entry1       = 16'd0;
+        update_selected_entry2       = 16'd0;
+        update_selected_entry3       = 16'd0;
+        update_selected_match_vector = 4'd0;
+        update_selected_weak_vector  = 4'd0;
+        update_selected_pred_vector  = 5'd0;
+        for slot in 0..SLOT_COUNT {
+            if update_token == slot as 3 {
+                update_selected_valid        = slot_valid_q[slot];
+                update_selected_base_index   = slot_base_index_q[slot];
+                update_selected_index0       = slot_index0_q[slot];
+                update_selected_index1       = slot_index1_q[slot];
+                update_selected_index2       = slot_index2_q[slot];
+                update_selected_index3       = slot_index3_q[slot];
+                update_selected_tag0         = slot_tag0_q[slot];
+                update_selected_tag1         = slot_tag1_q[slot];
+                update_selected_tag2         = slot_tag2_q[slot];
+                update_selected_tag3         = slot_tag3_q[slot];
+                update_selected_base_entry   = slot_base_entry_q[slot];
+                update_selected_entry0       = slot_entry0_q[slot];
+                update_selected_entry1       = slot_entry1_q[slot];
+                update_selected_entry2       = slot_entry2_q[slot];
+                update_selected_entry3       = slot_entry3_q[slot];
+                update_selected_match_vector = slot_match_vector_q[slot];
+                update_selected_weak_vector  = slot_weak_vector_q[slot];
+                update_selected_pred_vector  = slot_pred_vector_q[slot];
+            }
+        }
+    }
+
+    always_comb {
+        // `ready` reports cold-initialization state only.  Response storage
+        // backpressure is local: a pending response may be replaced only on
+        // the edge on which it is accepted.  Keeping response_accept out of
+        // ready also avoids a ready/accept loop in the enclosing frontend.
+        ready         = !scrub_active_q;
+        lookup_accept = lookup_valid && ready && (!response_valid_q || response_accept);
+
+        response_base_entry = base_read_raw_q;
+        if base_read_bypass_q {
+            response_base_entry = base_bypass_data_q;
+        }
+        response_entry0 = tag_read_raw0_q;
+        response_entry1 = tag_read_raw1_q;
+        response_entry2 = tag_read_raw2_q;
+        response_entry3 = tag_read_raw3_q;
+        if tag_read_bypass0_q {
+            response_entry0 = tag_bypass_data0_q;
+        }
+        if tag_read_bypass1_q {
+            response_entry1 = tag_bypass_data1_q;
+        }
+        if tag_read_bypass2_q {
+            response_entry2 = tag_bypass_data2_q;
+        }
+        if tag_read_bypass3_q {
+            response_entry3 = tag_bypass_data3_q;
+        }
+        // A request may be accepted on the same edge that S1 registers the
+        // immediately older branch's write packet. The BRAM read necessarily
+        // returned the pre-training word, so overlay that registered packet in
+        // the response cycle. This keeps training pipelined without exposing a
+        // stale prediction to the very next dynamic branch instance.
+        if train_packet_base_lookup_collision_q {
+            response_base_entry = train_packet_base_data_q;
+        }
+        if train_packet_tag_lookup_collision0_q {
+            response_entry0 = train_packet_tag_data0_q;
+        }
+        if train_packet_tag_lookup_collision1_q {
+            response_entry1 = train_packet_tag_data1_q;
+        }
+        if train_packet_tag_lookup_collision2_q {
+            response_entry2 = train_packet_tag_data2_q;
+        }
+        if train_packet_tag_lookup_collision3_q {
+            response_entry3 = train_packet_tag_data3_q;
+        }
+
+        response_base_pred = response_base_entry[1];
+        response_pred0     = !response_entry0[5];
+        response_pred1     = !response_entry1[5];
+        response_pred2     = !response_entry2[5];
+        response_pred3     = !response_entry3[5];
+        response_weak0     = (response_entry0[5:3] == 3'b111) || (response_entry0[5:3] == 3'b000);
+        response_weak1     = (response_entry1[5:3] == 3'b111) || (response_entry1[5:3] == 3'b000);
+        response_weak2     = (response_entry2[5:3] == 3'b111) || (response_entry2[5:3] == 3'b000);
+        response_weak3     = (response_entry3[5:3] == 3'b111) || (response_entry3[5:3] == 3'b000);
+
+        response_match0 = response_entry0[15] && (response_entry0[14:6] == lookup_tag0_q);
+        response_match1 = response_entry1[15] && (response_entry1[14:6] == lookup_tag1_q);
+        response_match2 = response_entry2[15] && (response_entry2[14:6] == lookup_tag2_q);
+        response_match3 = response_entry3[15] && (response_entry3[14:6] == lookup_tag3_q);
+
+        // Resolve the highest matching provider and true next-lower alternate
+        // as a balanced 2+2 tree.  A sixteen-arm match-vector case is logically
+        // equivalent, but the current Struo frontend freezes it into a serial
+        // priority-mux chain before Boolean mapping.
+        response_match_vector = {response_match3, response_match2, response_match1, response_match0};
+        response_any_match    = (response_match0 || response_match1) || (response_match2 || response_match3);
+        response_high_match   = response_match2 || response_match3;
+        response_low_pred     = response_base_pred;
+        response_low_weak     = 1'b0;
+        if response_match0 {
+            response_low_pred = response_pred0;
+            response_low_weak = response_weak0;
+        }
+        if response_match1 {
+            response_low_pred = response_pred1;
+            response_low_weak = response_weak1;
+        }
+        if response_match3 {
+            response_high_pred = response_pred3;
+            response_high_weak = response_weak3;
+        } else {
+            response_high_pred = response_pred2;
+            response_high_weak = response_weak2;
+        }
+        if response_high_match {
+            response_lm_pred  = response_high_pred;
+            response_hit_weak = response_high_weak;
+        } else {
+            response_lm_pred  = response_low_pred;
+            response_hit_weak = response_low_weak;
+        }
+        // Build the true alternate for the low and high provider pairs in
+        // parallel, then select once.  Three procedural overwrites here form
+        // a serial mux chain on the BRAM-to-next-request feedback path.
+        response_low_alt_pred = response_base_pred;
+        if response_match1 && response_match0 {
+            response_low_alt_pred = response_pred0;
+        }
+        response_high_alt_pred = response_low_pred;
+        if response_match3 && response_match2 {
+            response_high_alt_pred = response_pred2;
+        }
+        if response_high_match {
+            response_alt_pred = response_high_alt_pred;
+        } else {
+            response_alt_pred = response_low_alt_pred;
+        }
+        response_final_pred = response_lm_pred;
+        if response_any_match && response_hit_weak {
+            response_final_pred = response_alt_pred;
+        }
+
+        // Once a response has survived its first visible edge, derive it only
+        // from compact prediction-time metadata. Mutable table words may keep
+        // receiving training and aging writes while backpressure holds this
+        // response, without changing its externally visible decision.
+        held_any_match  = (held_match_vector_q[0] || held_match_vector_q[1])
+            || (held_match_vector_q[2] || held_match_vector_q[3]);
+        held_high_match = held_match_vector_q[2] || held_match_vector_q[3];
+        held_low_pred   = held_pred_vector_q[0];
+        held_low_weak   = 1'b0;
+        if held_match_vector_q[0] {
+            held_low_pred = held_pred_vector_q[1];
+            held_low_weak = held_weak_vector_q[0];
+        }
+        if held_match_vector_q[1] {
+            held_low_pred = held_pred_vector_q[2];
+            held_low_weak = held_weak_vector_q[1];
+        }
+        if held_match_vector_q[3] {
+            held_high_pred = held_pred_vector_q[4];
+            held_high_weak = held_weak_vector_q[3];
+        } else {
+            held_high_pred = held_pred_vector_q[3];
+            held_high_weak = held_weak_vector_q[2];
+        }
+        if held_high_match {
+            held_lm_pred  = held_high_pred;
+            held_hit_weak = held_high_weak;
+        } else {
+            held_lm_pred  = held_low_pred;
+            held_hit_weak = held_low_weak;
+        }
+        held_low_alt_pred = held_pred_vector_q[0];
+        if held_match_vector_q[1] && held_match_vector_q[0] {
+            held_low_alt_pred = held_pred_vector_q[1];
+        }
+        held_high_alt_pred = held_low_pred;
+        if held_match_vector_q[3] && held_match_vector_q[2] {
+            held_high_alt_pred = held_pred_vector_q[3];
+        }
+        if held_high_match {
+            held_alt_pred = held_high_alt_pred;
+        } else {
+            held_alt_pred = held_low_alt_pred;
+        }
+        held_final_pred = held_lm_pred;
+        if held_any_match && held_hit_weak {
+            held_final_pred = held_alt_pred;
+        }
+
+        response_valid          = response_valid_q && !scrub_active_q;
+        response_token          = lookup_token_q;
+        response_taken          = 1'b0;
+        response_hit            = 1'b0;
+        response_match_metadata = 4'd0;
+        response_weak_metadata  = 4'd0;
+        response_pred_metadata  = 5'd0;
+        if !scrub_active_q {
+            response_taken          = response_final_pred;
+            response_hit            = response_any_match;
+            response_match_metadata = response_match_vector;
+            response_weak_metadata  = {response_weak3, response_weak2, response_weak1, response_weak0};
+            response_pred_metadata  = {
+                response_pred3, response_pred2, response_pred1, response_pred0, response_base_pred
+            };
+            if response_metadata_captured_q {
+                response_taken          = held_final_pred;
+                response_hit            = held_any_match;
+                response_match_metadata = held_match_vector_q;
+                response_weak_metadata  = held_weak_vector_q;
+                response_pred_metadata  = held_pred_vector_q;
+            }
+        }
+    }
+
+    // Resolve-time training operates on the S0 snapshot. Provider and true
+    // alternate are one-hot, so every bank decides and updates locally rather
+    // than passing an entry through three serial code-selected case trees.
+    always_comb {
+        // Reconstruct prediction-time classification from the compact S0
+        // metadata. This moves priority and prediction muxes off the
+        // BRAM-to-token-slot register path while preserving the exact lookup
+        // decision used for training.
+        // Each provider bit is a four-input function of the match vector.  The
+        // alternate is the highest match after removing that provider.
+        selected_provider_oh[4] = selected_match_vector[3];
+        selected_provider_oh[3] = !selected_match_vector[3] && selected_match_vector[2];
+        selected_provider_oh[2] = !selected_match_vector[3] && !selected_match_vector[2] && selected_match_vector[1];
+        selected_provider_oh[1] = !selected_match_vector[3] && !selected_match_vector[2] && !selected_match_vector[1]
+            && selected_match_vector[0];
+        selected_provider_oh[0] = !(selected_match_vector[0] || selected_match_vector[1] || selected_match_vector[2]
+            || selected_match_vector[3]);
+        selected_alt_oh[4]      = 1'b0;
+        selected_alt_oh[3]      = selected_match_vector[3] && selected_match_vector[2];
+        selected_alt_oh[2]      = selected_match_vector[1] && (selected_match_vector[3] ^ selected_match_vector[2]);
+        selected_alt_oh[1]      = selected_match_vector[0]
+            && ((selected_match_vector[1] && !selected_match_vector[2] && !selected_match_vector[3])
+                || (!selected_match_vector[1] && selected_match_vector[2] && !selected_match_vector[3])
+                || (!selected_match_vector[1] && !selected_match_vector[2] && selected_match_vector[3]));
+        selected_alt_oh[0]      = !(selected_alt_oh[1] || selected_alt_oh[2] || selected_alt_oh[3]);
+
+        selected_lm_pred    = (selected_provider_oh[0] && selected_pred_vector[0])
+            || (selected_provider_oh[1] && selected_pred_vector[1])
+            || (selected_provider_oh[2] && selected_pred_vector[2])
+            || (selected_provider_oh[3] && selected_pred_vector[3])
+            || (selected_provider_oh[4] && selected_pred_vector[4]);
+        selected_alt_pred   = (selected_alt_oh[0] && selected_pred_vector[0])
+            || (selected_alt_oh[1] && selected_pred_vector[1]) || (selected_alt_oh[2] && selected_pred_vector[2])
+            || (selected_alt_oh[3] && selected_pred_vector[3]) || (selected_alt_oh[4] && selected_pred_vector[4]);
+        selected_hit_weak   = (selected_provider_oh[1] && selected_weak_vector[0])
+            || (selected_provider_oh[2] && selected_weak_vector[1])
+            || (selected_provider_oh[3] && selected_weak_vector[2])
+            || (selected_provider_oh[4] && selected_weak_vector[3]);
+        selected_final_pred = selected_lm_pred;
+        if !selected_provider_oh[0] && selected_hit_weak {
+            selected_final_pred = selected_alt_pred;
+        }
+
+        // selected_valid is suppressed throughout reset scrubbing and the
+        // following classifier register therefore guarantees that a valid
+        // training packet cannot overlap scrub.  Re-gating the full training
+        // data cone here only fans scrub_active_q into every packet payload.
+        train_valid      = classified_valid;
+        train_base_entry = classified_base_entry;
+        train_entry0     = classified_entry0;
+        train_entry1     = classified_entry1;
+        train_entry2     = classified_entry2;
+        train_entry3     = classified_entry3;
+        // S1 already absorbed any aging write that preceded this classified
+        // snapshot.  While train_valid is set, background aging is stalled;
+        // therefore only the preceding registered training packet can make
+        // this snapshot stale.  Forward it directly instead of returning
+        // through the final training/aging/scrub Port-B arbitration mux.
+        if train_packet_base_write_q && (train_packet_base_addr_q == classified_base_index) {
+            train_base_entry = train_packet_base_data_q;
+        }
+        if train_packet_tag_write0_q && (train_packet_tag_addr0_q == classified_index0) {
+            train_entry0 = train_packet_tag_data0_q;
+        }
+        if train_packet_tag_write1_q && (train_packet_tag_addr1_q == classified_index1) {
+            train_entry1 = train_packet_tag_data1_q;
+        }
+        if train_packet_tag_write2_q && (train_packet_tag_addr2_q == classified_index2) {
+            train_entry2 = train_packet_tag_data2_q;
+        }
+        if train_packet_tag_write3_q && (train_packet_tag_addr3_q == classified_index3) {
+            train_entry3 = train_packet_tag_data3_q;
+        }
+        train_base_write = 1'b0;
+        train_tag_write0 = 1'b0;
+        train_tag_write1 = 1'b0;
+        train_tag_write2 = 1'b0;
+        train_tag_write3 = 1'b0;
+
+        train_mispredict         = classified_final_pred != classified_taken;
+        train_lm_correct         = classified_lm_pred == classified_taken;
+        train_allocation_attempt = 1'b0;
+        train_alloc_eligible     = 4'd0;
+        train_alloc_oh           = 4'd0;
+        train_alloc_counter      = 3'b111;
+        if classified_taken {
+            train_alloc_counter = 3'b000;
+        }
+
+        train_candidate0     = classified_provider_oh[0];
+        train_candidate1     = classified_provider_oh[0] || classified_provider_oh[1];
+        train_candidate2     = classified_provider_oh[0] || classified_provider_oh[1] || classified_provider_oh[2];
+        train_candidate3     = !classified_provider_oh[4];
+        train_free0          = !train_entry0[15] || (train_entry0[2:1] == 2'b00);
+        train_free1          = !train_entry1[15] || (train_entry1[2:1] == 2'b00);
+        train_free2          = !train_entry2[15] || (train_entry2[2:1] == 2'b00);
+        train_free3          = !train_entry3[15] || (train_entry3[2:1] == 2'b00);
+        train_alloc_eligible = {train_candidate3, train_candidate2, train_candidate1, train_candidate0};
+        // The LFSR chooses exactly one eligible longer-history bank without
+        // consulting free bits. A free selected row allocates; a busy selected
+        // row only loses one usefulness count, with no fallback to a later free
+        // bank. Rotated priority is expressed directly in bank space, avoiding
+        // an eligible -> encoded-bank -> decoded-bank cascade.
+        case allocation_lfsr_q {
+            2'b10: {
+                train_alloc_oh[1] = train_alloc_eligible[1];
+                train_alloc_oh[2] = !train_alloc_eligible[1] && train_alloc_eligible[2];
+                train_alloc_oh[3] = !train_alloc_eligible[1] && !train_alloc_eligible[2] && train_alloc_eligible[3];
+                train_alloc_oh[0] = !train_alloc_eligible[1] && !train_alloc_eligible[2] && !train_alloc_eligible[3]
+                    && train_alloc_eligible[0];
+            }
+            2'b11: {
+                train_alloc_oh[2] = train_alloc_eligible[2];
+                train_alloc_oh[3] = !train_alloc_eligible[2] && train_alloc_eligible[3];
+                train_alloc_oh[0] = !train_alloc_eligible[2] && !train_alloc_eligible[3] && train_alloc_eligible[0];
+                train_alloc_oh[1] = !train_alloc_eligible[2] && !train_alloc_eligible[3] && !train_alloc_eligible[0]
+                    && train_alloc_eligible[1];
+            }
+            default: {
+                train_alloc_oh[0] = train_alloc_eligible[0];
+                train_alloc_oh[1] = !train_alloc_eligible[0] && train_alloc_eligible[1];
+                train_alloc_oh[2] = !train_alloc_eligible[0] && !train_alloc_eligible[1] && train_alloc_eligible[2];
+                train_alloc_oh[3] = !train_alloc_eligible[0] && !train_alloc_eligible[1] && !train_alloc_eligible[2]
+                    && train_alloc_eligible[3];
+            }
+        }
+        train_source_valid0 = train_entry0[15] && (train_entry0[14:6] == classified_tag0);
+        train_source_valid1 = train_entry1[15] && (train_entry1[14:6] == classified_tag1);
+        train_source_valid2 = train_entry2[15] && (train_entry2[14:6] == classified_tag2);
+        train_source_valid3 = train_entry3[15] && (train_entry3[14:6] == classified_tag3);
+
+        if train_valid {
+            // The provider is always trained. For a wrong weak provider, train
+            // the true alternate too. ORing the one-hot selectors suppresses
+            // duplicate writes and duplicate counter increments.
+            if classified_provider_oh[0] || (classified_hit_weak && !train_lm_correct && classified_alt_oh[0]) {
+                train_base_write = 1'b1;
+                if classified_taken {
+                    if train_base_entry != 2'b11 {
+                        train_base_entry = train_base_entry + 2'd1;
+                    }
+                } else if train_base_entry != 2'b00 {
+                    train_base_entry = train_base_entry - 2'd1;
+                }
+            }
+            if train_source_valid0
+                && (classified_provider_oh[1] || (classified_hit_weak && !train_lm_correct && classified_alt_oh[1])) {
+                train_tag_write0 = 1'b1;
+                if classified_taken {
+                    if train_entry0[5:3] != 3'b011 {
+                        train_entry0[5:3] = train_entry0[5:3] + 3'd1;
+                    }
+                } else if train_entry0[5:3] != 3'b100 {
+                    train_entry0[5:3] = train_entry0[5:3] - 3'd1;
+                }
+            }
+            if train_source_valid1
+                && (classified_provider_oh[2] || (classified_hit_weak && !train_lm_correct && classified_alt_oh[2])) {
+                train_tag_write1 = 1'b1;
+                if classified_taken {
+                    if train_entry1[5:3] != 3'b011 {
+                        train_entry1[5:3] = train_entry1[5:3] + 3'd1;
+                    }
+                } else if train_entry1[5:3] != 3'b100 {
+                    train_entry1[5:3] = train_entry1[5:3] - 3'd1;
+                }
+            }
+            if train_source_valid2
+                && (classified_provider_oh[3] || (classified_hit_weak && !train_lm_correct && classified_alt_oh[3])) {
+                train_tag_write2 = 1'b1;
+                if classified_taken {
+                    if train_entry2[5:3] != 3'b011 {
+                        train_entry2[5:3] = train_entry2[5:3] + 3'd1;
+                    }
+                } else if train_entry2[5:3] != 3'b100 {
+                    train_entry2[5:3] = train_entry2[5:3] - 3'd1;
+                }
+            }
+            if train_source_valid3
+                && (classified_provider_oh[4] || (classified_hit_weak && !train_lm_correct && classified_alt_oh[4])) {
+                train_tag_write3 = 1'b1;
+                if classified_taken {
+                    if train_entry3[5:3] != 3'b011 {
+                        train_entry3[5:3] = train_entry3[5:3] + 3'd1;
+                    }
+                } else if train_entry3[5:3] != 3'b100 {
+                    train_entry3[5:3] = train_entry3[5:3] - 3'd1;
+                }
+            }
+
+            // When provider and alternate disagree, usefulness tracks which
+            // prediction was correct. This is the standard signed evidence
+            // update: provider correct increments, provider wrong decrements.
+            if !classified_provider_oh[0] && (classified_lm_pred != classified_alt_pred) {
+                if classified_provider_oh[1] && train_source_valid0 {
+                    train_tag_write0 = 1'b1;
+                    if train_lm_correct {
+                        train_entry0[2:1] = {train_entry0[2] || train_entry0[1], train_entry0[2] || !train_entry0[1]};
+                    } else {
+                        train_entry0[2:1] = {train_entry0[2] && train_entry0[1], train_entry0[2] && !train_entry0[1]};
+                    }
+                }
+                if classified_provider_oh[2] && train_source_valid1 {
+                    train_tag_write1 = 1'b1;
+                    if train_lm_correct {
+                        train_entry1[2:1] = {train_entry1[2] || train_entry1[1], train_entry1[2] || !train_entry1[1]};
+                    } else {
+                        train_entry1[2:1] = {train_entry1[2] && train_entry1[1], train_entry1[2] && !train_entry1[1]};
+                    }
+                }
+                if classified_provider_oh[3] && train_source_valid2 {
+                    train_tag_write2 = 1'b1;
+                    if train_lm_correct {
+                        train_entry2[2:1] = {train_entry2[2] || train_entry2[1], train_entry2[2] || !train_entry2[1]};
+                    } else {
+                        train_entry2[2:1] = {train_entry2[2] && train_entry2[1], train_entry2[2] && !train_entry2[1]};
+                    }
+                }
+                if classified_provider_oh[4] && train_source_valid3 {
+                    train_tag_write3 = 1'b1;
+                    if train_lm_correct {
+                        train_entry3[2:1] = {train_entry3[2] || train_entry3[1], train_entry3[2] || !train_entry3[1]};
+                    } else {
+                        train_entry3[2:1] = {train_entry3[2] && train_entry3[1], train_entry3[2] && !train_entry3[1]};
+                    }
+                }
+            }
+
+            train_allocation_attempt = train_mispredict && train_candidate3
+                && !(classified_hit_weak && train_lm_correct);
+            if train_allocation_attempt {
+                if train_alloc_oh[0] {
+                    train_tag_write0 = 1'b1;
+                    if train_free0 {
+                        train_entry0 = {1'b1, classified_tag0, train_alloc_counter, 2'b00, 1'b0};
+                    } else if train_entry0[2:1] != 2'b00 {
+                        train_entry0[2:1] = {train_entry0[2] && train_entry0[1], train_entry0[2] && !train_entry0[1]};
+                    }
+                }
+                if train_alloc_oh[1] {
+                    train_tag_write1 = 1'b1;
+                    if train_free1 {
+                        train_entry1 = {1'b1, classified_tag1, train_alloc_counter, 2'b00, 1'b0};
+                    } else if train_entry1[2:1] != 2'b00 {
+                        train_entry1[2:1] = {train_entry1[2] && train_entry1[1], train_entry1[2] && !train_entry1[1]};
+                    }
+                }
+                if train_alloc_oh[2] {
+                    train_tag_write2 = 1'b1;
+                    if train_free2 {
+                        train_entry2 = {1'b1, classified_tag2, train_alloc_counter, 2'b00, 1'b0};
+                    } else if train_entry2[2:1] != 2'b00 {
+                        train_entry2[2:1] = {train_entry2[2] && train_entry2[1], train_entry2[2] && !train_entry2[1]};
+                    }
+                }
+                if train_alloc_oh[3] {
+                    train_tag_write3 = 1'b1;
+                    if train_free3 {
+                        train_entry3 = {1'b1, classified_tag3, train_alloc_counter, 2'b00, 1'b0};
+                    } else if train_entry3[2:1] != 2'b00 {
+                        train_entry3[2:1] = {train_entry3[2] && train_entry3[1], train_entry3[2] && !train_entry3[1]};
+                    }
+                }
+            }
+        }
+    }
+
+    // Packed entries require a read-modify-write to clear one usefulness bit.
+    // Banks progress independently on a shared row, so training in one bank
+    // does not stall aging in the other three.  A saved read is discarded only
+    // when a same-bank update writes that same row; a different-row update
+    // cannot stale the saved word.  Training always owns its bank's port.
+    always_comb {
+        age_epoch_pulse = train_valid && (conditional_commit_count_q == 18'h3ffff);
+
+        // A current S2 training classification stalls the whole background
+        // aging row.  Its registered packet owns Port B on the next cycle;
+        // pending aging reads/writes remain pending and resume afterward.
+        age_read_enable0  = age_active_q && !age_done0_q && !age_pending0_q && !train_valid
+            && !train_packet_tag_write0_q && !scrub_active_q;
+        age_read_enable1  = age_active_q && !age_done1_q && !age_pending1_q && !train_valid
+            && !train_packet_tag_write1_q && !scrub_active_q;
+        age_read_enable2  = age_active_q && !age_done2_q && !age_pending2_q && !train_valid
+            && !train_packet_tag_write2_q && !scrub_active_q;
+        age_read_enable3  = age_active_q && !age_done3_q && !age_pending3_q && !train_valid
+            && !train_packet_tag_write3_q && !scrub_active_q;
+        age_write_enable0 = age_active_q && !age_done0_q && age_pending0_q && !train_valid && !train_packet_tag_write0_q
+            && !scrub_active_q;
+        age_write_enable1 = age_active_q && !age_done1_q && age_pending1_q && !train_valid && !train_packet_tag_write1_q
+            && !scrub_active_q;
+        age_write_enable2 = age_active_q && !age_done2_q && age_pending2_q && !train_valid && !train_packet_tag_write2_q
+            && !scrub_active_q;
+        age_write_enable3 = age_active_q && !age_done3_q && age_pending3_q && !train_valid && !train_packet_tag_write3_q
+            && !scrub_active_q;
+        age_row_complete  = age_active_q && (age_done0_q || age_write_enable0) && (age_done1_q || age_write_enable1)
+            && (age_done2_q || age_write_enable2) && (age_done3_q || age_write_enable3);
+
+        age_write_data0 = age_read0_q;
+        age_write_data1 = age_read1_q;
+        age_write_data2 = age_read2_q;
+        age_write_data3 = age_read3_q;
+        if age_clear_msb_q {
+            age_write_data0[2] = 1'b0;
+            age_write_data1[2] = 1'b0;
+            age_write_data2[2] = 1'b0;
+            age_write_data3[2] = 1'b0;
+        } else {
+            age_write_data0[1] = 1'b0;
+            age_write_data1[1] = 1'b0;
+            age_write_data2[1] = 1'b0;
+            age_write_data3[1] = 1'b0;
+        }
+
+        base_portb_write = train_packet_base_write_q;
+        base_portb_addr  = train_packet_base_addr_q;
+        base_portb_data  = train_packet_base_data_q;
+        base_porta_addr  = lookup_pc[11:1];
+        tag_porta_enable = lookup_accept;
+        tag_porta_write  = 1'b0;
+        tag_porta_addr0  = lookup_index_0;
+        tag_porta_addr1  = lookup_index_1;
+        tag_porta_addr2  = lookup_index_2;
+        tag_porta_addr3  = lookup_index_3;
+
+        tag_portb_write0 = train_packet_tag_write0_q;
+        tag_portb_write1 = train_packet_tag_write1_q;
+        tag_portb_write2 = train_packet_tag_write2_q;
+        tag_portb_write3 = train_packet_tag_write3_q;
+        tag_portb_addr0  = train_packet_tag_addr0_q;
+        tag_portb_addr1  = train_packet_tag_addr1_q;
+        tag_portb_addr2  = train_packet_tag_addr2_q;
+        tag_portb_addr3  = train_packet_tag_addr3_q;
+        tag_portb_data0  = train_packet_tag_data0_q;
+        tag_portb_data1  = train_packet_tag_data1_q;
+        tag_portb_data2  = train_packet_tag_data2_q;
+        tag_portb_data3  = train_packet_tag_data3_q;
+
+        // Each bank independently selects architectural training or the
+        // shared aging row.  The wrapper keeps one syntactic address on each
+        // physical read/write port, as required by block-memory inference.
+        if !train_packet_tag_write0_q {
+            tag_portb_addr0 = age_address_q;
+            if age_write_enable0 {
+                tag_portb_write0 = 1'b1;
+                tag_portb_data0  = age_write_data0;
+            }
+        }
+        if !train_packet_tag_write1_q {
+            tag_portb_addr1 = age_address_q;
+            if age_write_enable1 {
+                tag_portb_write1 = 1'b1;
+                tag_portb_data1  = age_write_data1;
+            }
+        }
+        if !train_packet_tag_write2_q {
+            tag_portb_addr2 = age_address_q;
+            if age_write_enable2 {
+                tag_portb_write2 = 1'b1;
+                tag_portb_data2  = age_write_data2;
+            }
+        }
+        if !train_packet_tag_write3_q {
+            tag_portb_addr3 = age_address_q;
+            if age_write_enable3 {
+                tag_portb_write3 = 1'b1;
+                tag_portb_data3  = age_write_data3;
+            }
+        }
+
+        if scrub_active_q {
+            base_portb_write = 1'b1;
+            base_portb_addr  = scrub_addr_q;
+            base_portb_data  = 2'b01;
+            tag_porta_enable = scrub_addr_q <: 11'd512;
+            tag_porta_write  = scrub_addr_q <: 11'd512;
+            tag_porta_addr0  = scrub_addr_q[8:0];
+            tag_porta_addr1  = scrub_addr_q[8:0];
+            tag_porta_addr2  = scrub_addr_q[8:0];
+            tag_porta_addr3  = scrub_addr_q[8:0];
+        }
+
+    }
+
+    // The base table has one synchronous lookup read and one serialized
+    // scrub/training write. No reset touches the array itself.
+    always_ff (clk) {
+        if lookup_accept {
+            base_read_raw_q = base_memory[base_porta_addr];
+        }
+    }
+
+    always_ff (clk) {
+        if base_portb_write {
+            base_memory[base_portb_addr] = base_portb_data;
+        }
+    }
+
+    inst tagged_table0: TageTaggedTableMemory (
+        clk           : clk             ,
+        port_a_enable : tag_porta_enable,
+        port_a_write  : tag_porta_write ,
+        port_a_address: tag_porta_addr0 ,
+        port_a_data   : 16'd0           ,
+        port_a_read   : tag_read_raw0_q ,
+        port_b_enable : 1'b1            ,
+        port_b_write  : tag_portb_write0,
+        port_b_address: tag_portb_addr0 ,
+        port_b_data   : tag_portb_data0 ,
+        port_b_read   : age_read0_q     ,
+    );
+
+    inst tagged_table1: TageTaggedTableMemory (
+        clk           : clk             ,
+        port_a_enable : tag_porta_enable,
+        port_a_write  : tag_porta_write ,
+        port_a_address: tag_porta_addr1 ,
+        port_a_data   : 16'd0           ,
+        port_a_read   : tag_read_raw1_q ,
+        port_b_enable : 1'b1            ,
+        port_b_write  : tag_portb_write1,
+        port_b_address: tag_portb_addr1 ,
+        port_b_data   : tag_portb_data1 ,
+        port_b_read   : age_read1_q     ,
+    );
+
+    inst tagged_table2: TageTaggedTableMemory (
+        clk           : clk             ,
+        port_a_enable : tag_porta_enable,
+        port_a_write  : tag_porta_write ,
+        port_a_address: tag_porta_addr2 ,
+        port_a_data   : 16'd0           ,
+        port_a_read   : tag_read_raw2_q ,
+        port_b_enable : 1'b1            ,
+        port_b_write  : tag_portb_write2,
+        port_b_address: tag_portb_addr2 ,
+        port_b_data   : tag_portb_data2 ,
+        port_b_read   : age_read2_q     ,
+    );
+
+    inst tagged_table3: TageTaggedTableMemory (
+        clk           : clk             ,
+        port_a_enable : tag_porta_enable,
+        port_a_write  : tag_porta_write ,
+        port_a_address: tag_porta_addr3 ,
+        port_a_data   : 16'd0           ,
+        port_a_read   : tag_read_raw3_q ,
+        port_b_enable : 1'b1            ,
+        port_b_write  : tag_portb_write3,
+        port_b_address: tag_portb_addr3 ,
+        port_b_data   : tag_portb_data3 ,
+        port_b_read   : age_read3_q     ,
+    );
+
+    // Bypass metadata is ordinary FF state, not part of either BRAM port.
+    // Resetting it prevents an uninitialized collision-select bit while the
+    // memory read destinations themselves retain the canonical no-reset form.
+    always_ff (clk, rst_n) {
+        if_reset {
+            base_read_bypass_q = 1'b0;
+            base_bypass_data_q = 2'd0;
+            tag_read_bypass0_q = 1'b0;
+            tag_read_bypass1_q = 1'b0;
+            tag_read_bypass2_q = 1'b0;
+            tag_read_bypass3_q = 1'b0;
+            tag_bypass_data0_q = 16'd0;
+            tag_bypass_data1_q = 16'd0;
+            tag_bypass_data2_q = 16'd0;
+            tag_bypass_data3_q = 16'd0;
+        } else if lookup_accept {
+            base_read_bypass_q = base_portb_write && (base_portb_addr == lookup_pc[11:1]);
+            base_bypass_data_q = base_portb_data;
+            tag_read_bypass0_q = tag_portb_write0 && (tag_portb_addr0 == lookup_index_0);
+            tag_read_bypass1_q = tag_portb_write1 && (tag_portb_addr1 == lookup_index_1);
+            tag_read_bypass2_q = tag_portb_write2 && (tag_portb_addr2 == lookup_index_2);
+            tag_read_bypass3_q = tag_portb_write3 && (tag_portb_addr3 == lookup_index_3);
+            tag_bypass_data0_q = tag_portb_data0;
+            tag_bypass_data1_q = tag_portb_data1;
+            tag_bypass_data2_q = tag_portb_data2;
+            tag_bypass_data3_q = tag_portb_data3;
+        }
+    }
+
+    // Slot payload is isolated from control state. Constant reset values avoid
+    // Struo's non-constant-reset fallback; slot_valid_q remains the sole
+    // architectural validity mask.
+    always_ff (clk, rst_n) {
+        if_reset {
+            for slot in 0..SLOT_COUNT {
+                slot_base_index_q[slot]   = 11'd0;
+                slot_index0_q[slot]       = 9'd0;
+                slot_index1_q[slot]       = 9'd0;
+                slot_index2_q[slot]       = 9'd0;
+                slot_index3_q[slot]       = 9'd0;
+                slot_tag0_q[slot]         = 9'd0;
+                slot_tag1_q[slot]         = 9'd0;
+                slot_tag2_q[slot]         = 9'd0;
+                slot_tag3_q[slot]         = 9'd0;
+                slot_base_entry_q[slot]   = 2'd0;
+                slot_entry0_q[slot]       = 16'd0;
+                slot_entry1_q[slot]       = 16'd0;
+                slot_entry2_q[slot]       = 16'd0;
+                slot_entry3_q[slot]       = 16'd0;
+                slot_match_vector_q[slot] = 4'd0;
+                slot_weak_vector_q[slot]  = 4'd0;
+                slot_pred_vector_q[slot]  = 5'd0;
+            }
+        } else {
+            for slot in 0..SLOT_COUNT {
+                // Propagate every completed physical write into all live snapshots.
+                // This survives arbitrary A/B/A interleaving across eight tokens.
+                if slot_valid_q[slot] && base_portb_write && (slot_base_index_q[slot] == base_portb_addr) {
+                    slot_base_entry_q[slot] = base_portb_data;
+                }
+                if slot_valid_q[slot] && tag_portb_write0 && (slot_index0_q[slot] == tag_portb_addr0) {
+                    slot_entry0_q[slot] = tag_portb_data0;
+                }
+                if slot_valid_q[slot] && tag_portb_write1 && (slot_index1_q[slot] == tag_portb_addr1) {
+                    slot_entry1_q[slot] = tag_portb_data1;
+                }
+                if slot_valid_q[slot] && tag_portb_write2 && (slot_index2_q[slot] == tag_portb_addr2) {
+                    slot_entry2_q[slot] = tag_portb_data2;
+                }
+                if slot_valid_q[slot] && tag_portb_write3 && (slot_index3_q[slot] == tag_portb_addr3) {
+                    slot_entry3_q[slot] = tag_portb_data3;
+                }
+
+                // Capture at the response's first visible edge. Immutable compact
+                // metadata records the lookup decision; mutable raw words observe
+                // a same-edge physical write after their response values so the
+                // newest architectural/aging state wins.
+                if response_valid_q && !response_metadata_captured_q && !response_cancel
+                    && (snapshot_token == slot as 3) {
+                    slot_base_index_q[slot] = lookup_base_q;
+                    slot_index0_q[slot]     = lookup_index0_q;
+                    slot_index1_q[slot]     = lookup_index1_q;
+                    slot_index2_q[slot]     = lookup_index2_q;
+                    slot_index3_q[slot]     = lookup_index3_q;
+                    slot_tag0_q[slot]       = lookup_tag0_q;
+                    slot_tag1_q[slot]       = lookup_tag1_q;
+                    slot_tag2_q[slot]       = lookup_tag2_q;
+                    slot_tag3_q[slot]       = lookup_tag3_q;
+                    slot_base_entry_q[slot] = response_base_entry;
+                    slot_entry0_q[slot]     = response_entry0;
+                    slot_entry1_q[slot]     = response_entry1;
+                    slot_entry2_q[slot]     = response_entry2;
+                    slot_entry3_q[slot]     = response_entry3;
+                    if base_portb_write && (base_portb_addr == lookup_base_q) {
+                        slot_base_entry_q[slot] = base_portb_data;
+                    }
+                    if tag_portb_write0 && (tag_portb_addr0 == lookup_index0_q) {
+                        slot_entry0_q[slot] = tag_portb_data0;
+                    }
+                    if tag_portb_write1 && (tag_portb_addr1 == lookup_index1_q) {
+                        slot_entry1_q[slot] = tag_portb_data1;
+                    }
+                    if tag_portb_write2 && (tag_portb_addr2 == lookup_index2_q) {
+                        slot_entry2_q[slot] = tag_portb_data2;
+                    }
+                    if tag_portb_write3 && (tag_portb_addr3 == lookup_index3_q) {
+                        slot_entry3_q[slot] = tag_portb_data3;
+                    }
+                    slot_match_vector_q[slot] = response_match_vector;
+                    slot_weak_vector_q[slot]  = {response_weak3, response_weak2, response_weak1, response_weak0};
+                    slot_pred_vector_q[slot]  = {
+                        response_pred3, response_pred2, response_pred1, response_pred0, response_base_pred
+                    };
+                }
+            }
+        }
+    }
+
+    #[allow(missing_reset_statement)]
+    always_ff (clk, rst_n) {
+        if_reset {
+            response_valid_q                     = 1'b0;
+            response_metadata_captured_q         = 1'b0;
+            lookup_token_q                       = 3'd0;
+            lookup_base_q                        = 11'd0;
+            lookup_index0_q                      = 9'd0;
+            lookup_index1_q                      = 9'd0;
+            lookup_index2_q                      = 9'd0;
+            lookup_index3_q                      = 9'd0;
+            lookup_tag0_q                        = 9'd0;
+            lookup_tag1_q                        = 9'd0;
+            lookup_tag2_q                        = 9'd0;
+            lookup_tag3_q                        = 9'd0;
+            held_match_vector_q                  = 4'd0;
+            held_weak_vector_q                   = 4'd0;
+            held_pred_vector_q                   = 5'd0;
+            selected_valid                       = 1'b0;
+            selected_base_index                  = 11'd0;
+            selected_index0                      = 9'd0;
+            selected_index1                      = 9'd0;
+            selected_index2                      = 9'd0;
+            selected_index3                      = 9'd0;
+            selected_tag0                        = 9'd0;
+            selected_tag1                        = 9'd0;
+            selected_tag2                        = 9'd0;
+            selected_tag3                        = 9'd0;
+            selected_base_entry                  = 2'd0;
+            selected_entry0                      = 16'd0;
+            selected_entry1                      = 16'd0;
+            selected_entry2                      = 16'd0;
+            selected_entry3                      = 16'd0;
+            selected_match_vector                = 4'd0;
+            selected_weak_vector                 = 4'd0;
+            selected_pred_vector                 = 5'd0;
+            selected_taken                       = 1'b0;
+            classified_valid                     = 1'b0;
+            classified_base_index                = 11'd0;
+            classified_index0                    = 9'd0;
+            classified_index1                    = 9'd0;
+            classified_index2                    = 9'd0;
+            classified_index3                    = 9'd0;
+            classified_tag0                      = 9'd0;
+            classified_tag1                      = 9'd0;
+            classified_tag2                      = 9'd0;
+            classified_tag3                      = 9'd0;
+            classified_base_entry                = 2'd0;
+            classified_entry0                    = 16'd0;
+            classified_entry1                    = 16'd0;
+            classified_entry2                    = 16'd0;
+            classified_entry3                    = 16'd0;
+            classified_provider_oh               = 5'b00001;
+            classified_alt_oh                    = 5'b00001;
+            classified_lm_pred                   = 1'b0;
+            classified_alt_pred                  = 1'b0;
+            classified_final_pred                = 1'b0;
+            classified_hit_weak                  = 1'b0;
+            classified_taken                     = 1'b0;
+            train_packet_base_write_q            = 1'b0;
+            train_packet_base_addr_q             = 11'd0;
+            train_packet_base_data_q             = 2'd0;
+            train_packet_tag_write0_q            = 1'b0;
+            train_packet_tag_write1_q            = 1'b0;
+            train_packet_tag_write2_q            = 1'b0;
+            train_packet_tag_write3_q            = 1'b0;
+            train_packet_tag_addr0_q             = 9'd0;
+            train_packet_tag_addr1_q             = 9'd0;
+            train_packet_tag_addr2_q             = 9'd0;
+            train_packet_tag_addr3_q             = 9'd0;
+            train_packet_tag_data0_q             = 16'd0;
+            train_packet_tag_data1_q             = 16'd0;
+            train_packet_tag_data2_q             = 16'd0;
+            train_packet_tag_data3_q             = 16'd0;
+            train_packet_base_lookup_collision_q = 1'b0;
+            train_packet_tag_lookup_collision0_q = 1'b0;
+            train_packet_tag_lookup_collision1_q = 1'b0;
+            train_packet_tag_lookup_collision2_q = 1'b0;
+            train_packet_tag_lookup_collision3_q = 1'b0;
+            allocation_lfsr_q                    = 2'b01;
+            conditional_commit_count_q           = 18'd0;
+            age_active_q                         = 1'b0;
+            age_address_q                        = 9'd0;
+            age_clear_msb_q                      = 1'b1;
+            age_sweep_queued_q                   = 1'b0;
+            age_pending0_q                       = 1'b0;
+            age_pending1_q                       = 1'b0;
+            age_pending2_q                       = 1'b0;
+            age_pending3_q                       = 1'b0;
+            age_done0_q                          = 1'b0;
+            age_done1_q                          = 1'b0;
+            age_done2_q                          = 1'b0;
+            age_done3_q                          = 1'b0;
+            scrub_active_q                       = 1'b0;
+            scrub_addr_q                         = 11'd0;
+            if SCRUB_ON_RESET {
+                scrub_active_q = 1'b1;
+            }
+            // The packed assignment bypasses Celox's unpacked-array same-edge
+            // bulk-write limitation. Payload reset lives in its isolated
+            // constant-reset block so Struo does not infer nonconstant reset.
+            slot_valid_q = 8'd0;
+        } else {
+            // S0: capture the exact prediction-time token snapshot before its
+            // same-edge release or a recovery flush clears slot validity.
+            selected_valid = update_valid && update_selected_valid && !scrub_active_q;
+            if update_valid && update_selected_valid && !scrub_active_q {
+                selected_base_index = update_selected_base_index;
+                selected_index0     = update_selected_index0;
+                selected_index1     = update_selected_index1;
+                selected_index2     = update_selected_index2;
+                selected_index3     = update_selected_index3;
+                selected_tag0       = update_selected_tag0;
+                selected_tag1       = update_selected_tag1;
+                selected_tag2       = update_selected_tag2;
+                selected_tag3       = update_selected_tag3;
+                selected_base_entry = update_selected_base_entry;
+                selected_entry0     = update_selected_entry0;
+                selected_entry1     = update_selected_entry1;
+                selected_entry2     = update_selected_entry2;
+                selected_entry3     = update_selected_entry3;
+                // The packet already resident in S1 writes on this edge. Apply
+                // it to the retiring token capture as well as to live slots.
+                if base_portb_write && (base_portb_addr == update_selected_base_index) {
+                    selected_base_entry = base_portb_data;
+                }
+                if tag_portb_write0 && (tag_portb_addr0 == update_selected_index0) {
+                    selected_entry0 = tag_portb_data0;
+                }
+                if tag_portb_write1 && (tag_portb_addr1 == update_selected_index1) {
+                    selected_entry1 = tag_portb_data1;
+                }
+                if tag_portb_write2 && (tag_portb_addr2 == update_selected_index2) {
+                    selected_entry2 = tag_portb_data2;
+                }
+                if tag_portb_write3 && (tag_portb_addr3 == update_selected_index3) {
+                    selected_entry3 = tag_portb_data3;
+                }
+                selected_match_vector = update_selected_match_vector;
+                selected_weak_vector  = update_selected_weak_vector;
+                selected_pred_vector  = update_selected_pred_vector;
+                selected_taken        = update_taken;
+            }
+
+            // S1: register classification separately from table mutation.
+            // The packet already resident in S2 writes on this edge, so its
+            // data is overlaid onto the captured snapshot. This is the
+            // forwarding point that preserves A/A and arbitrary A/B/A update
+            // sequences with one accepted training update every clock.
+            classified_valid = selected_valid;
+            if selected_valid {
+                classified_base_index = selected_base_index;
+                classified_index0     = selected_index0;
+                classified_index1     = selected_index1;
+                classified_index2     = selected_index2;
+                classified_index3     = selected_index3;
+                classified_tag0       = selected_tag0;
+                classified_tag1       = selected_tag1;
+                classified_tag2       = selected_tag2;
+                classified_tag3       = selected_tag3;
+                classified_base_entry = selected_base_entry;
+                classified_entry0     = selected_entry0;
+                classified_entry1     = selected_entry1;
+                classified_entry2     = selected_entry2;
+                classified_entry3     = selected_entry3;
+                if base_portb_write && (base_portb_addr == selected_base_index) {
+                    classified_base_entry = base_portb_data;
+                }
+                if tag_portb_write0 && (tag_portb_addr0 == selected_index0) {
+                    classified_entry0 = tag_portb_data0;
+                }
+                if tag_portb_write1 && (tag_portb_addr1 == selected_index1) {
+                    classified_entry1 = tag_portb_data1;
+                }
+                if tag_portb_write2 && (tag_portb_addr2 == selected_index2) {
+                    classified_entry2 = tag_portb_data2;
+                }
+                if tag_portb_write3 && (tag_portb_addr3 == selected_index3) {
+                    classified_entry3 = tag_portb_data3;
+                }
+                classified_provider_oh = selected_provider_oh;
+                classified_alt_oh      = selected_alt_oh;
+                classified_lm_pred     = selected_lm_pred;
+                classified_alt_pred    = selected_alt_pred;
+                classified_final_pred  = selected_final_pred;
+                classified_hit_weak    = selected_hit_weak;
+                classified_taken       = selected_taken;
+            }
+
+            // S2: every cycle produces an independent registered write packet.
+            // A bubble clears only valid bits; payload may retain don't-care data.
+            train_packet_base_write_q            = train_valid && train_base_write;
+            train_packet_tag_write0_q            = train_valid && train_tag_write0;
+            train_packet_tag_write1_q            = train_valid && train_tag_write1;
+            train_packet_tag_write2_q            = train_valid && train_tag_write2;
+            train_packet_tag_write3_q            = train_valid && train_tag_write3;
+            train_packet_base_lookup_collision_q = train_valid && train_base_write && lookup_accept
+                && (classified_base_index == lookup_pc[11:1]);
+            train_packet_tag_lookup_collision0_q = train_valid && train_tag_write0 && lookup_accept
+                && (classified_index0 == lookup_index_0);
+            train_packet_tag_lookup_collision1_q = train_valid && train_tag_write1 && lookup_accept
+                && (classified_index1 == lookup_index_1);
+            train_packet_tag_lookup_collision2_q = train_valid && train_tag_write2 && lookup_accept
+                && (classified_index2 == lookup_index_2);
+            train_packet_tag_lookup_collision3_q = train_valid && train_tag_write3 && lookup_accept
+                && (classified_index3 == lookup_index_3);
+            if train_valid {
+                train_packet_base_addr_q = classified_base_index;
+                train_packet_base_data_q = train_base_entry;
+                train_packet_tag_addr0_q = classified_index0;
+                train_packet_tag_addr1_q = classified_index1;
+                train_packet_tag_addr2_q = classified_index2;
+                train_packet_tag_addr3_q = classified_index3;
+                train_packet_tag_data0_q = train_entry0;
+                train_packet_tag_data1_q = train_entry1;
+                train_packet_tag_data2_q = train_entry2;
+                train_packet_tag_data3_q = train_entry3;
+            }
+
+            if response_accept {
+                response_valid_q = 1'b0;
+            }
+            if response_valid_q && !response_metadata_captured_q && !response_cancel {
+                response_metadata_captured_q = 1'b1;
+                held_match_vector_q          = response_match_vector;
+                held_weak_vector_q           = {response_weak3, response_weak2, response_weak1, response_weak0};
+                held_pred_vector_q           = {
+                    response_pred3, response_pred2, response_pred1, response_pred0, response_base_pred
+                };
+            }
+            if lookup_accept {
+                response_valid_q             = 1'b1;
+                response_metadata_captured_q = 1'b0;
+                lookup_token_q               = lookup_token;
+                lookup_base_q                = lookup_pc[11:1];
+                lookup_index0_q              = lookup_index_0;
+                lookup_index1_q              = lookup_index_1;
+                lookup_index2_q              = lookup_index_2;
+                lookup_index3_q              = lookup_index_3;
+                lookup_tag0_q                = {1'b0, lookup_tag_0};
+                lookup_tag1_q                = {1'b0, lookup_tag_1};
+                lookup_tag2_q                = lookup_tag_2;
+                lookup_tag3_q                = lookup_tag_3;
+            }
+
+            for slot in 0..SLOT_COUNT {
+                if response_valid_q && !response_metadata_captured_q && !response_cancel
+                    && (snapshot_token == slot as 3) {
+                    slot_valid_q[slot] = 1'b1;
+                }
+                if release_valid && (release_token == slot as 3) {
+                    slot_valid_q[slot] = 1'b0;
+                }
+                if squash_valid && (squash_token == slot as 3) {
+                    slot_valid_q[slot] = 1'b0;
+                }
+            }
+            if flush_slots {
+                slot_valid_q = 8'd0;
+            }
+
+            if train_valid {
+                if train_allocation_attempt {
+                    // x^2 + x + 1, cycling 01 -> 11 -> 10 -> 01.
+                    allocation_lfsr_q = {allocation_lfsr_q[0], allocation_lfsr_q[1] ^ allocation_lfsr_q[0]};
+                }
+
+                if conditional_commit_count_q == 18'h3ffff {
+                    conditional_commit_count_q = 18'd0;
+                } else {
+                    conditional_commit_count_q = conditional_commit_count_q + 18'd1;
+                }
+            }
+
+            if !age_active_q {
+                if age_epoch_pulse {
+                    age_active_q       = 1'b1;
+                    age_address_q      = 9'd0;
+                    age_sweep_queued_q = 1'b0;
+                    age_pending0_q     = 1'b0;
+                    age_pending1_q     = 1'b0;
+                    age_pending2_q     = 1'b0;
+                    age_pending3_q     = 1'b0;
+                    age_done0_q        = 1'b0;
+                    age_done1_q        = 1'b0;
+                    age_done2_q        = 1'b0;
+                    age_done3_q        = 1'b0;
+                }
+            } else if age_row_complete {
+                age_pending0_q = 1'b0;
+                age_pending1_q = 1'b0;
+                age_pending2_q = 1'b0;
+                age_pending3_q = 1'b0;
+                age_done0_q    = 1'b0;
+                age_done1_q    = 1'b0;
+                age_done2_q    = 1'b0;
+                age_done3_q    = 1'b0;
+                if age_address_q == 9'd511 {
+                    age_address_q   = 9'd0;
+                    age_clear_msb_q = !age_clear_msb_q;
+                    if age_sweep_queued_q || age_epoch_pulse {
+                        age_active_q       = 1'b1;
+                        age_sweep_queued_q = 1'b0;
+                    } else {
+                        age_active_q = 1'b0;
+                    }
+                } else {
+                    age_address_q = age_address_q + 9'd1;
+                    if age_epoch_pulse {
+                        age_sweep_queued_q = 1'b1;
+                    }
+                }
+            } else {
+                // A train to the saved row invalidates only that bank's RMW
+                // data.  A train elsewhere leaves the saved row untouched.
+                if train_packet_tag_write0_q && age_pending0_q && (train_packet_tag_addr0_q == age_address_q) {
+                    age_pending0_q = 1'b0;
+                } else if age_write_enable0 {
+                    age_pending0_q = 1'b0;
+                    age_done0_q    = 1'b1;
+                } else if age_read_enable0 {
+                    age_pending0_q = 1'b1;
+                }
+                if train_packet_tag_write1_q && age_pending1_q && (train_packet_tag_addr1_q == age_address_q) {
+                    age_pending1_q = 1'b0;
+                } else if age_write_enable1 {
+                    age_pending1_q = 1'b0;
+                    age_done1_q    = 1'b1;
+                } else if age_read_enable1 {
+                    age_pending1_q = 1'b1;
+                }
+                if train_packet_tag_write2_q && age_pending2_q && (train_packet_tag_addr2_q == age_address_q) {
+                    age_pending2_q = 1'b0;
+                } else if age_write_enable2 {
+                    age_pending2_q = 1'b0;
+                    age_done2_q    = 1'b1;
+                } else if age_read_enable2 {
+                    age_pending2_q = 1'b1;
+                }
+                if train_packet_tag_write3_q && age_pending3_q && (train_packet_tag_addr3_q == age_address_q) {
+                    age_pending3_q = 1'b0;
+                } else if age_write_enable3 {
+                    age_pending3_q = 1'b0;
+                    age_done3_q    = 1'b1;
+                } else if age_read_enable3 {
+                    age_pending3_q = 1'b1;
+                }
+                if age_epoch_pulse {
+                    // One sticky bit coalesces pathological sweep debt; normal
+                    // operation is separated by 2^18 conditional commits.
+                    age_sweep_queued_q = 1'b1;
+                }
+            }
+
+            if scrub_active_q {
+                if scrub_addr_q == 11'd2047 {
+                    scrub_active_q = 1'b0;
+                    scrub_addr_q   = 11'd0;
+                } else {
+                    scrub_addr_q = scrub_addr_q + 11'd1;
+                }
+            }
+        }
+    }
+}

@@ -30,7 +30,7 @@ module HardwareTestTop (
     var command_frame_low  : 'cpu logic<64>;
     var command_frame_high : 'cpu logic<64>;
     var response_selector_q: 'cpu logic<8> ;
-    var counter_selector_q : 'cpu logic<3> ;
+    var counter_selector_q : 'cpu logic<4> ;
     var response_bank      : 'cpu logic<32>;
     var response_mux_16    : 'cpu logic<16>;
     var response_mux_8     : 'cpu logic<8> ;
@@ -144,9 +144,10 @@ module HardwareTestTop (
     }
 
     inst core: Core #(
-        COMMIT_PAYLOAD   : 0,
-        SYNC_DATA_MEMORY : 1,
-        RELOCATE_LOW_DATA: 1,
+        COMMIT_PAYLOAD        : 0,
+        SYNC_DATA_MEMORY      : 1,
+        RELOCATE_LOW_DATA     : 1,
+        SCRUB_BRANCH_PREDICTOR: 1,
     ) (
         clk                   : clk_cpu                ,
         rst_n                 : cpu_rst_n              ,
@@ -264,7 +265,7 @@ module HardwareTestTop (
             command_error_q      = 1'b0;
             last_sequence_q      = 8'h00;
             response_selector_q  = 8'd0;
-            counter_selector_q   = 3'd0;
+            counter_selector_q   = 4'd0;
             activity_q           = 24'h000000;
             memory_debug_write_q = 2'd0;
             memory_debug_addr_q  = 32'h0000_0000;
@@ -352,9 +353,10 @@ module HardwareTestTop (
                         }
                         // SELECT changes the stable ER1 response bit without
                         // disturbing the completed transaction sequence.
+                        // Address[11:8] selects one of eleven frozen counters.
                         4'd4: {
                             response_selector_q = command_frame_low[31:24];
-                            counter_selector_q  = command_frame_low[34:32];
+                            counter_selector_q  = command_frame_low[35:32];
                         }
                         default: command_error_q = 1'b1;
                     }

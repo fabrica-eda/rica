@@ -6,13 +6,17 @@ use std::path::Path;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 12] = [
+const CORE_SOURCES: [&str; 16] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
     "Decoder.veryl",
     "PerformanceCounter64.veryl",
     "PerformanceEventCounters4.veryl",
+    "BranchTargetBuffer.veryl",
+    "TageTaggedTableMemory.veryl",
+    "TageDirectionPredictor.veryl",
+    "BranchPredictor.veryl",
     "CsrFile.veryl",
     "ExecuteUnit.veryl",
     "ShiftUnit.veryl",

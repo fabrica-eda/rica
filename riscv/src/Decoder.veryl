@@ -16,7 +16,20 @@ module Decoder (
     var legal_memory        : logic    ;
     var legal_integer       : logic    ;
     var legal_system        : logic    ;
+    var csr_address_known   : logic    ;
     var csr_address_writable: logic    ;
+    var csr_write_requested : logic    ;
+    var csr_known_group0    : logic    ;
+    var csr_known_group1    : logic    ;
+    var csr_known_group2    : logic    ;
+    var csr_known_group3    : logic    ;
+    var csr_writable_group0 : logic    ;
+    var csr_writable_group1 : logic    ;
+    var csr_writable_group2 : logic    ;
+    var use_rs1_group0      : logic    ;
+    var use_rs1_group1      : logic    ;
+    var use_rs1_group2      : logic    ;
+    var use_rs1_csr         : logic    ;
 
     always_comb {
         opcode = decode.instr[6:0];
@@ -111,9 +124,27 @@ module Decoder (
             }
             default: {}
         }
-        decode.is_ecall  = 1'b0;
-        decode.is_ebreak = 1'b0;
-        decode.is_mret   = 1'b0;
+        // Legality needs only membership, not the encoded CSR index. Keep it
+        // off the 16-arm index mux by balancing four groups of address compares.
+        csr_known_group0     = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h301)
+            || (decode.instr[31:20] == 12'h305) || (decode.instr[31:20] == 12'h340);
+        csr_known_group1     = (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h342)
+            || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf11);
+        csr_known_group2     = (decode.instr[31:20] == 12'hf12) || (decode.instr[31:20] == 12'hf13)
+            || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb00);
+        csr_known_group3     = (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02)
+            || (decode.instr[31:20] == 12'hc02) || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
+        csr_address_known    = (csr_known_group0 || csr_known_group1) || (csr_known_group2 || csr_known_group3);
+        csr_writable_group0  = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
+            || (decode.instr[31:20] == 12'h340) || (decode.instr[31:20] == 12'h341);
+        csr_writable_group1  = (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343)
+            || (decode.instr[31:20] == 12'hb00) || (decode.instr[31:20] == 12'hb02);
+        csr_writable_group2  = (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
+        csr_address_writable = (csr_writable_group0 || csr_writable_group1) || csr_writable_group2;
+        csr_write_requested  = (funct3[1:0] == 2'b01) || ((funct3[1:0] != 2'b00) && (decode.rs1 != 5'd0));
+        decode.is_ecall      = 1'b0;
+        decode.is_ebreak     = 1'b0;
+        decode.is_mret       = 1'b0;
         // Every unsupported or reserved encoding raises an illegal-instruction
         // exception instead of silently retiring or stopping the core.
         decode.illegal = 1'b1;
@@ -512,6 +543,17 @@ module Decoder (
         // do not synthesize them from the large result-selection case above.
         // Unsupported encodings may conservatively claim an operand because
         // `illegal` prevents them from changing architectural state.
+        use_rs1_group0       = (opcode == 7'b1100111) // JALR
+            || (opcode == 7'b1100011) // branch
+            || (opcode == 7'b0000011) // load
+             || (opcode == 7'b0100011); // store
+        use_rs1_group1       = (opcode == 7'b0010011) // OP-IMM
+            || (opcode == 7'b0110011) // OP
+            || (opcode == 7'b0011011) // OP-IMM-32
+             || (opcode == 7'b0111011); // OP-32
+        use_rs1_csr          = (opcode == 7'b1110011) && !funct3[2] && (funct3[1:0] != 2'b00);
+        use_rs1_group2       = use_rs1_csr;
+        decode.use_rs1       = (use_rs1_group0 || use_rs1_group1) || use_rs1_group2;
         decode.use_rs2       = (opcode == 7'b1100011) // branch
             || (opcode == 7'b0100011) // store
             || (opcode == 7'b0110011) // OP
@@ -525,57 +567,6 @@ module Decoder (
         // Generate legality once, independently of the control payload case.
         // This maps as parallel opcode/funct matching rather than a chain of
         // priority updates to one `illegal` bit.
-        encoding_legal = 1'b0;
-        case opcode {
-            7'b0110111, 7'b0010111, 7'b1101111: encoding_legal = 1'b1;
-            7'b1100111                        : encoding_legal = funct3 == 3'b000;
-            7'b1100011                        : encoding_legal = (funct3 == 3'b000) || (funct3 == 3'b001)
-                || (funct3 == 3'b100) || (funct3 == 3'b101) || (funct3 == 3'b110) || (funct3 == 3'b111);
-            7'b0000011                        : encoding_legal = funct3 != 3'b111;
-            7'b0100011                        : encoding_legal = !funct3[2];
-            7'b0001111                        : encoding_legal = (funct3 == 3'b000)
-                || ((funct3 == 3'b001) && (decode.instr[31:15] == 17'd0) && (decode.instr[11:7] == 5'd0));
-            7'b1110011                        : {
-                if funct3 == 3'b000 {
-                    encoding_legal = (decode.instr == 32'h0000_0073) || (decode.instr == 32'h0010_0073)
-                        || (decode.instr == 32'h3020_0073);
-                } else if (funct3 == 3'b001) || (funct3 == 3'b010) || (funct3 == 3'b011) || (funct3 == 3'b101)
-                    || (funct3 == 3'b110) || (funct3 == 3'b111) {
-                    encoding_legal = (decode.csr_index != 4'd0) && (!decode.csr_write || csr_address_writable);
-                }
-            }
-            7'b0010011: {
-                encoding_legal = (funct3 == 3'b000) || (funct3 == 3'b010) || (funct3 == 3'b011) || (funct3 == 3'b100)
-                    || (funct3 == 3'b110) || (funct3 == 3'b111);
-                if funct3 == 3'b001 {
-                    encoding_legal = decode.instr[31:26] == 6'b000000;
-                } else if funct3 == 3'b101 {
-                    encoding_legal = (decode.instr[31:26] == 6'b000000) || (decode.instr[31:26] == 6'b010000);
-                }
-            }
-            7'b0110011: {
-                encoding_legal = funct7 == 7'b0000000;
-                if (funct3 == 3'b000) || (funct3 == 3'b101) {
-                    encoding_legal = (funct7 == 7'b0000000) || (funct7 == 7'b0100000);
-                }
-            }
-            7'b0011011: {
-                encoding_legal = funct3 == 3'b000;
-                if funct3 == 3'b001 {
-                    encoding_legal = funct7 == 7'b0000000;
-                } else if funct3 == 3'b101 {
-                    encoding_legal = (funct7 == 7'b0000000) || (funct7 == 7'b0100000);
-                }
-            }
-            7'b0111011: {
-                if (funct3 == 3'b000) || (funct3 == 3'b101) {
-                    encoding_legal = (funct7 == 7'b0000000) || (funct7 == 7'b0100000);
-                } else if funct3 == 3'b001 {
-                    encoding_legal = funct7 == 7'b0000000;
-                }
-            }
-            default: {}
-        }
         legal_u_jump   = (opcode == 7'b0110111) || (opcode == 7'b0010111) || (opcode == 7'b1101111);
         legal_control  = ((opcode == 7'b1100111) && (funct3 == 3'b000))
             || ((opcode == 7'b1100011) && (funct3[2] || !funct3[1]));
@@ -600,8 +591,8 @@ module Decoder (
                 && (((funct3 == 3'b000)
                         && ((decode.instr == 32'h0000_0073) || (decode.instr == 32'h0010_0073)
                             || (decode.instr == 32'h3020_0073)))
-                    || ((funct3[1:0] != 2'b00) && (decode.csr_index != 4'd0)
-                        && (!decode.csr_write || csr_address_writable))));
+                    || ((funct3[1:0] != 2'b00) && csr_address_known
+                        && (!csr_write_requested || csr_address_writable))));
         encoding_legal = ((legal_u_jump || legal_control) || (legal_memory || legal_integer)) || legal_system;
         decode.illegal = !encoding_legal;
     }

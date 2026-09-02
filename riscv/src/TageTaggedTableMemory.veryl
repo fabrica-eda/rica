@@ -1,0 +1,45 @@
+/// Canonical true-dual-port storage for one 512-entry TAGE tagged table.
+///
+/// The one-iteration generate block is deliberate: Veryl otherwise rejects a
+/// memory written from two procedural blocks, while ECP5 block RAM and Struo
+/// require each independent synchronous port to retain its own process.  Both
+/// ports use the same enable/write/read form so memory inference never depends
+/// on a reset branch or on read-during-write behavior.
+module TageTaggedTableMemory (
+    clk           : input  clock    ,
+    port_a_enable : input  logic    ,
+    port_a_write  : input  logic    ,
+    port_a_address: input  logic<9> ,
+    port_a_data   : input  logic<16>,
+    port_a_read   : output logic<16>,
+    port_b_enable : input  logic    ,
+    port_b_write  : input  logic    ,
+    port_b_address: input  logic<9> ,
+    port_b_data   : input  logic<16>,
+    port_b_read   : output logic<16>,
+) {
+    for instance in 0..1 :g_memory {
+        #[sv("struo_memory = \"required\"")]
+        var memory: logic<16> [512];
+
+        always_ff (clk) {
+            if port_a_enable {
+                if port_a_write {
+                    memory[port_a_address] = port_a_data;
+                } else {
+                    port_a_read = memory[port_a_address];
+                }
+            }
+        }
+
+        always_ff (clk) {
+            if port_b_enable {
+                if port_b_write {
+                    memory[port_b_address] = port_b_data;
+                } else {
+                    port_b_read = memory[port_b_address];
+                }
+            }
+        }
+    }
+}

@@ -648,12 +648,12 @@ fn $function(
     if $read_value(simulator, "halted") != 0 || $read_value(simulator, "debug_x31") != 0x55 {
         return Err(format!("{label}: final architectural signature is invalid").into());
     }
-    let mut counters = [0_u64; 6];
+    let mut counters = [0_u64; 11];
     for (index, counter) in counters.iter_mut().enumerate() {
         simulator.modify(|io| io.set(debug_counter_index, index as u8))?;
         *counter = $read_value(simulator, "debug_counter_data");
     }
-    let classified_cycles = counters[2..].iter().sum::<u64>();
+    let classified_cycles = counters[2..6].iter().sum::<u64>();
     if counters[0] == 0
         || counters[1] < expected.len() as u64
         || counters[1] > counters[0]
@@ -662,10 +662,16 @@ fn $function(
         || counters[4] == 0
         || counters[5] == 0
         || classified_cycles > counters[0]
+        || counters[6] > counters[1]
+        || counters[7] > counters[6]
+        || counters[8] > counters[1]
+        || counters[9] > counters[1]
+        || counters[10] > counters[4]
     {
         return Err(format!(
-            "{label}: invalid performance counters: mcycle={} minstret={} dependency={} memory={} redirect={} frontend={}",
-            counters[0], counters[1], counters[2], counters[3], counters[4], counters[5]
+            "{label}: invalid performance counters: mcycle={} minstret={} dependency={} memory={} redirect={} frontend={} conditional={} direction_wrong={} btb_miss={} ras_fallback={} repair={}",
+            counters[0], counters[1], counters[2], counters[3], counters[4], counters[5],
+            counters[6], counters[7], counters[8], counters[9], counters[10]
         )
         .into());
     }
@@ -1450,7 +1456,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let mut post_map = ecp5_simulator(&mapped)?.build_native()?;
+    let post_map_frontend_started = Instant::now();
+    let post_map_builder = ecp5_simulator(&mapped)?;
+    println!(
+        "Celox post-map frontend completed in {:?}",
+        post_map_frontend_started.elapsed()
+    );
+    let post_map_native_started = Instant::now();
+    let mut post_map = post_map_builder.build_native()?;
+    println!(
+        "Celox post-map native build completed in {:?}",
+        post_map_native_started.elapsed()
+    );
     verify_post_map(&mut post_map, "Celox post-map simulation")?;
     println!(
         "Struo: {} nodes, {} registers, {} ECP5 cells; equivalence passed",

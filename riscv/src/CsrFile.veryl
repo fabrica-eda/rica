@@ -22,21 +22,45 @@ module CsrFile (
     var mcycle_value  : logic<64>;
     var minstret_value: logic<64>;
 
-    // The two custom machine CSRs at 0x7c0/0x7c1 select and access one of
-    // four implementation-defined pipeline-event counters without consuming
-    // four entries in the compact CSR index. Selectors are: 0 dependency,
-    // 1 data-memory wait, 2 redirect/flush, and 3 empty fetch/decode front end.
-    var stall_selector_q      : logic<2>     ;
-    var event_counter_value   : logic<64> [4];
-    var selected_counter_value: logic<64>    ;
-    var counter_write_value   : logic<64>    ;
-    var event_dependency_q    : logic        ;
-    var event_memory_wait_q   : logic        ;
-    var event_redirect_q      : logic        ;
-    var event_frontend_empty_q: logic        ;
-    var event_freeze_q        : logic        ;
-    var event_increment_valid : logic        ;
-    var event_increment_index : logic<2>     ;
+    // The two custom machine CSRs at 0x7c0/0x7c1 select and access one of nine
+    // implementation-defined event counters without consuming nine entries
+    // in the compact CSR index. Selectors 0..3 are mutually exclusive
+    // pipeline-cycle classes; selectors 4..8 are independent predictor events.
+    var stall_selector_q       : logic<4>     ;
+    var event_counter_value    : logic<64> [4];
+    var predictor_counter_value: logic<64> [5];
+    var selected_stall_counter : logic<64>    ;
+    var selected_counter_value : logic<64>    ;
+    var counter_write_value    : logic<64>    ;
+    // Struo currently lowers a many-arm case as a priority mux chain.  Spell
+    // both read muxes as explicit binary trees so their physical depth grows
+    // with the selector width rather than the number of CSR values.
+    var stall_mux_level0                   : logic<64> [8];
+    var stall_mux_level1                   : logic<64> [4];
+    var stall_mux_level2                   : logic<64> [2];
+    var csr_mux_level0                     : logic<64> [8];
+    var csr_mux_level1                     : logic<64> [4];
+    var csr_mux_level2                     : logic<64> [2];
+    var mstatus_read_value                 : logic<64>    ;
+    var event_dependency_q                 : logic        ;
+    var event_memory_wait_q                : logic        ;
+    var event_redirect_q                   : logic        ;
+    var event_frontend_empty_q             : logic        ;
+    var predictor_conditional_q            : logic        ;
+    var predictor_direction_wrong_q        : logic        ;
+    var predictor_btb_miss_q               : logic        ;
+    var predictor_ras_fallback_q           : logic        ;
+    var predictor_repair_q                 : logic        ;
+    var event_freeze_q                     : logic        ;
+    var event_write_q                      : logic        ;
+    var event_write_index_q                : logic<4>     ;
+    var event_increment_valid              : logic        ;
+    var event_increment_index              : logic<2>     ;
+    var predictor_conditional_increment    : logic        ;
+    var predictor_direction_wrong_increment: logic        ;
+    var predictor_btb_miss_increment       : logic        ;
+    var predictor_ras_fallback_increment   : logic        ;
+    var predictor_repair_increment         : logic        ;
 
     inst mcycle_counter: PerformanceCounter64 (
         clk         : clk                                                                     ,
@@ -59,39 +83,147 @@ module CsrFile (
     );
 
     inst event_counters: PerformanceEventCounters4 (
-        clk            : clk                                                                     ,
-        rst_n          : rst_n                                                                   ,
-        write_enable   : csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3),
-        write_index    : stall_selector_q                                                        ,
-        write_value    : counter_write_value                                                     ,
-        increment_valid: event_increment_valid                                                   ,
-        increment_index: event_increment_index                                                   ,
-        freeze         : event_freeze_q                                                          ,
-        value          : event_counter_value                                                     ,
+        clk         : clk  ,
+        rst_n       : rst_n,
+        write_enable: csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
+            && (stall_selector_q <: 4'd4),
+        write_index    : stall_selector_q[1:0],
+        write_value    : counter_write_value  ,
+        increment_valid: event_increment_valid,
+        increment_index: event_increment_index,
+        freeze         : event_freeze_q       ,
+        value          : event_counter_value  ,
+    );
+
+    inst predictor_conditional_counter: PerformanceCounter64 (
+        clk         : clk  ,
+        rst_n       : rst_n,
+        write_enable: csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
+            && (stall_selector_q == 4'd4),
+        write_value: counter_write_value            ,
+        increment  : predictor_conditional_increment,
+        freeze     : event_freeze_q                 ,
+        value      : predictor_counter_value[0]     ,
+    );
+
+    inst predictor_direction_wrong_counter: PerformanceCounter64 (
+        clk         : clk  ,
+        rst_n       : rst_n,
+        write_enable: csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
+            && (stall_selector_q == 4'd5),
+        write_value: counter_write_value                ,
+        increment  : predictor_direction_wrong_increment,
+        freeze     : event_freeze_q                     ,
+        value      : predictor_counter_value[1]         ,
+    );
+
+    inst predictor_btb_miss_counter: PerformanceCounter64 (
+        clk         : clk  ,
+        rst_n       : rst_n,
+        write_enable: csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
+            && (stall_selector_q == 4'd6),
+        write_value: counter_write_value         ,
+        increment  : predictor_btb_miss_increment,
+        freeze     : event_freeze_q              ,
+        value      : predictor_counter_value[2]  ,
+    );
+
+    inst predictor_ras_fallback_counter: PerformanceCounter64 (
+        clk         : clk  ,
+        rst_n       : rst_n,
+        write_enable: csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
+            && (stall_selector_q == 4'd7),
+        write_value: counter_write_value             ,
+        increment  : predictor_ras_fallback_increment,
+        freeze     : event_freeze_q                  ,
+        value      : predictor_counter_value[3]      ,
+    );
+
+    inst predictor_repair_counter: PerformanceCounter64 (
+        clk         : clk  ,
+        rst_n       : rst_n,
+        write_enable: csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
+            && (stall_selector_q == 4'd8),
+        write_value: counter_write_value       ,
+        increment  : predictor_repair_increment,
+        freeze     : event_freeze_q            ,
+        value      : predictor_counter_value[4],
     );
 
     always_comb {
-        event_increment_valid = event_dependency_q || event_memory_wait_q || event_redirect_q || event_frontend_empty_q;
+        // The inputs were sampled together before this boundary. Apply the
+        // pipeline controller's priority here exactly once; a lower-priority
+        // event must neither select nor increment its counter when predicates
+        // overlap in the original cycle.
+        event_increment_valid = 1'b0;
         event_increment_index = 2'd0;
         if event_memory_wait_q {
             event_increment_index = 2'd1;
+            event_increment_valid = !(event_write_q && (event_write_index_q == 4'd1));
         } else if event_redirect_q {
             event_increment_index = 2'd2;
+            event_increment_valid = !(event_write_q && (event_write_index_q == 4'd2));
+        } else if event_dependency_q {
+            event_increment_index = 2'd0;
+            event_increment_valid = !(event_write_q && (event_write_index_q == 4'd0));
         } else if event_frontend_empty_q {
             event_increment_index = 2'd3;
+            event_increment_valid = !(event_write_q && (event_write_index_q == 4'd3));
+        }
+        predictor_conditional_increment     = predictor_conditional_q
+            && !(event_write_q && (event_write_index_q == 4'd4));
+        predictor_direction_wrong_increment = predictor_direction_wrong_q
+            && !(event_write_q && (event_write_index_q == 4'd5));
+        predictor_btb_miss_increment        = predictor_btb_miss_q && !(event_write_q && (event_write_index_q == 4'd6));
+        predictor_ras_fallback_increment    = predictor_ras_fallback_q
+            && !(event_write_q && (event_write_index_q == 4'd7));
+        predictor_repair_increment          = predictor_repair_q && !(event_write_q && (event_write_index_q == 4'd8));
+
+        if stall_selector_q[0] {
+            stall_mux_level0[0] = event_counter_value[1];
+            stall_mux_level0[1] = event_counter_value[3];
+            stall_mux_level0[2] = predictor_counter_value[1];
+            stall_mux_level0[3] = predictor_counter_value[3];
+            stall_mux_level0[4] = 64'd0;
+        } else {
+            stall_mux_level0[0] = event_counter_value[0];
+            stall_mux_level0[1] = event_counter_value[2];
+            stall_mux_level0[2] = predictor_counter_value[0];
+            stall_mux_level0[3] = predictor_counter_value[2];
+            stall_mux_level0[4] = predictor_counter_value[4];
+        }
+        stall_mux_level0[5] = 64'd0;
+        stall_mux_level0[6] = 64'd0;
+        stall_mux_level0[7] = 64'd0;
+        if stall_selector_q[1] {
+            stall_mux_level1[0] = stall_mux_level0[1];
+            stall_mux_level1[1] = stall_mux_level0[3];
+            stall_mux_level1[2] = stall_mux_level0[5];
+            stall_mux_level1[3] = stall_mux_level0[7];
+        } else {
+            stall_mux_level1[0] = stall_mux_level0[0];
+            stall_mux_level1[1] = stall_mux_level0[2];
+            stall_mux_level1[2] = stall_mux_level0[4];
+            stall_mux_level1[3] = stall_mux_level0[6];
+        }
+        if stall_selector_q[2] {
+            stall_mux_level2[0] = stall_mux_level1[1];
+            stall_mux_level2[1] = stall_mux_level1[3];
+        } else {
+            stall_mux_level2[0] = stall_mux_level1[0];
+            stall_mux_level2[1] = stall_mux_level1[2];
+        }
+        if stall_selector_q[3] {
+            selected_stall_counter = stall_mux_level2[1];
+        } else {
+            selected_stall_counter = stall_mux_level2[0];
         }
 
-        case csr.write_index {
-            4'd12  : selected_counter_value = mcycle_value;
-            4'd13  : selected_counter_value = minstret_value;
-            default: {
-                case stall_selector_q {
-                    2'd0   : selected_counter_value = event_counter_value[0];
-                    2'd1   : selected_counter_value = event_counter_value[1];
-                    2'd2   : selected_counter_value = event_counter_value[2];
-                    default: selected_counter_value = event_counter_value[3];
-                }
-            }
+        selected_counter_value = selected_stall_counter;
+        if csr.write_index == 4'd12 {
+            selected_counter_value = mcycle_value;
+        } else if csr.write_index == 4'd13 {
+            selected_counter_value = minstret_value;
         }
         if csr.write_op == 2'd1 {
             counter_write_value = selected_counter_value | csr.write_source;
@@ -101,51 +233,54 @@ module CsrFile (
             counter_write_value = csr.write_source;
         }
 
-        csr.read_data = 64'h0000_0000_0000_0000;
-        case csr.index {
-            4'd1: {
-                csr.read_data[3]     = mstatus_q[0];
-                csr.read_data[7]     = mstatus_q[1];
-                csr.read_data[12:11] = mstatus_q[3:2];
-            }
-            // RV64 with the base integer and compressed ISAs. MISA is
-            // read-only because both extensions are fixed in this core.
-            4'd2: {
-                csr.read_data = 64'h8000_0000_0000_0104;
-            }
-            4'd3: csr.read_data = {32'd0, mtvec_q, 2'b00};
-            4'd4: csr.read_data = mscratch_q;
-            4'd5: csr.read_data = {32'd0, mepc_q, 1'b0};
-            4'd6: csr.read_data = {60'd0, mcause_q};
-            4'd7: csr.read_data = {32'd0, mtval_q};
+        mstatus_read_value        = 64'd0;
+        mstatus_read_value[3]     = mstatus_q[0];
+        mstatus_read_value[7]     = mstatus_q[1];
+        mstatus_read_value[12:11] = mstatus_q[3:2];
+
+        if csr.index[0] {
+            csr_mux_level0[0] = mstatus_read_value;
+            csr_mux_level0[1] = {32'd0, mtvec_q, 2'b00};
+            csr_mux_level0[2] = {32'd0, mepc_q, 1'b0};
+            csr_mux_level0[3] = {32'd0, mtval_q};
+            csr_mux_level0[4] = 64'd0;
+            csr_mux_level0[5] = 64'd0;
+            csr_mux_level0[6] = minstret_value;
+            csr_mux_level0[7] = selected_stall_counter;
+        } else {
+            csr_mux_level0[0] = 64'd0;
+            // RV64 with fixed base-integer and compressed extensions.
+            csr_mux_level0[1] = 64'h8000_0000_0000_0104;
+            csr_mux_level0[2] = mscratch_q;
+            csr_mux_level0[3] = {60'd0, mcause_q};
             // Standard read-only machine identity CSRs for hart zero.
-            4'd8: {
-                csr.read_data = 64'd0;
-            }
-            4'd9: {
-                csr.read_data = 64'd0;
-            }
-            4'd10: {
-                csr.read_data = 64'd0;
-            }
-            4'd11: {
-                csr.read_data = 64'd0;
-            }
-            // mcycle/cycle and minstret/instret share storage indices. The
-            // decoder retains the architectural address long enough to reject
-            // writes to the user-visible read-only aliases.
-            4'd12: csr.read_data = mcycle_value;
-            4'd13: csr.read_data = minstret_value;
-            4'd14: csr.read_data = {62'd0, stall_selector_q};
-            4'd15: {
-                case stall_selector_q {
-                    2'd0   : csr.read_data = event_counter_value[0];
-                    2'd1   : csr.read_data = event_counter_value[1];
-                    2'd2   : csr.read_data = event_counter_value[2];
-                    default: csr.read_data = event_counter_value[3];
-                }
-            }
-            default: {}
+            csr_mux_level0[4] = 64'd0;
+            csr_mux_level0[5] = 64'd0;
+            csr_mux_level0[6] = mcycle_value;
+            csr_mux_level0[7] = {60'd0, stall_selector_q};
+        }
+        if csr.index[1] {
+            csr_mux_level1[0] = csr_mux_level0[1];
+            csr_mux_level1[1] = csr_mux_level0[3];
+            csr_mux_level1[2] = csr_mux_level0[5];
+            csr_mux_level1[3] = csr_mux_level0[7];
+        } else {
+            csr_mux_level1[0] = csr_mux_level0[0];
+            csr_mux_level1[1] = csr_mux_level0[2];
+            csr_mux_level1[2] = csr_mux_level0[4];
+            csr_mux_level1[3] = csr_mux_level0[6];
+        }
+        if csr.index[2] {
+            csr_mux_level2[0] = csr_mux_level1[1];
+            csr_mux_level2[1] = csr_mux_level1[3];
+        } else {
+            csr_mux_level2[0] = csr_mux_level1[0];
+            csr_mux_level2[1] = csr_mux_level1[2];
+        }
+        if csr.index[3] {
+            csr.read_data = csr_mux_level2[1];
+        } else {
+            csr.read_data = csr_mux_level2[0];
         }
 
         // Only direct-mode synchronous traps exist today. C makes IALIGN 16
@@ -157,50 +292,67 @@ module CsrFile (
         // The board debug transport can sample all performance counters
         // without injecting CSR instructions into the running program.
         case csr.debug_counter_index {
-            3'd0   : csr.debug_counter_data = mcycle_value;
-            3'd1   : csr.debug_counter_data = minstret_value;
-            3'd2   : csr.debug_counter_data = event_counter_value[0];
-            3'd3   : csr.debug_counter_data = event_counter_value[1];
-            3'd4   : csr.debug_counter_data = event_counter_value[2];
-            3'd5   : csr.debug_counter_data = event_counter_value[3];
+            4'd0   : csr.debug_counter_data = mcycle_value;
+            4'd1   : csr.debug_counter_data = minstret_value;
+            4'd2   : csr.debug_counter_data = event_counter_value[0];
+            4'd3   : csr.debug_counter_data = event_counter_value[1];
+            4'd4   : csr.debug_counter_data = event_counter_value[2];
+            4'd5   : csr.debug_counter_data = event_counter_value[3];
+            4'd6   : csr.debug_counter_data = predictor_counter_value[0];
+            4'd7   : csr.debug_counter_data = predictor_counter_value[1];
+            4'd8   : csr.debug_counter_data = predictor_counter_value[2];
+            4'd9   : csr.debug_counter_data = predictor_counter_value[3];
+            4'd10  : csr.debug_counter_data = predictor_counter_value[4];
             default: csr.debug_counter_data = 64'd0;
         }
     }
 
     always_ff (clk, rst_n) {
         if_reset {
-            event_dependency_q     = 1'b0;
-            event_memory_wait_q    = 1'b0;
-            event_redirect_q       = 1'b0;
-            event_frontend_empty_q = 1'b0;
-            event_freeze_q         = 1'b0;
+            event_dependency_q          = 1'b0;
+            event_memory_wait_q         = 1'b0;
+            event_redirect_q            = 1'b0;
+            event_frontend_empty_q      = 1'b0;
+            predictor_conditional_q     = 1'b0;
+            predictor_direction_wrong_q = 1'b0;
+            predictor_btb_miss_q        = 1'b0;
+            predictor_ras_fallback_q    = 1'b0;
+            predictor_repair_q          = 1'b0;
+            event_freeze_q              = 1'b0;
+            event_write_q               = 1'b0;
+            event_write_index_q         = 4'd0;
         } else {
             // Isolate the late pipeline-control predicates from the 32-way
             // counter CE cones. Events are counted one cycle later. When a
             // hardware result freezes the bank, delay the event-counter
             // freeze once so the terminal cycle's pending event is included.
-            event_freeze_q = csr.counter_freeze;
+            event_freeze_q      = csr.counter_freeze;
+            event_write_q       = csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3);
+            event_write_index_q = stall_selector_q;
             if csr.counter_freeze {
-                event_dependency_q     = 1'b0;
-                event_memory_wait_q    = 1'b0;
-                event_redirect_q       = 1'b0;
-                event_frontend_empty_q = 1'b0;
+                event_dependency_q          = 1'b0;
+                event_memory_wait_q         = 1'b0;
+                event_redirect_q            = 1'b0;
+                event_frontend_empty_q      = 1'b0;
+                predictor_conditional_q     = 1'b0;
+                predictor_direction_wrong_q = 1'b0;
+                predictor_btb_miss_q        = 1'b0;
+                predictor_ras_fallback_q    = 1'b0;
+                predictor_repair_q          = 1'b0;
             } else {
-                // Match the architectural counter's write priority: an event
-                // coincident with a write to that selected counter is dropped,
-                // rather than resurfacing from the event pipeline next cycle.
-                event_dependency_q     = csr.stall_dependency
-                    && !(csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
-                        && (stall_selector_q == 2'd0));
-                event_memory_wait_q    = csr.stall_memory_wait
-                    && !(csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
-                        && (stall_selector_q == 2'd1));
-                event_redirect_q       = csr.stall_redirect
-                    && !(csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
-                        && (stall_selector_q == 2'd2));
-                event_frontend_empty_q = csr.stall_frontend_empty
-                    && !(csr.write_enable && (csr.write_index == 4'd15) && (csr.write_op != 2'd3)
-                        && (stall_selector_q == 2'd3));
+                // Capture late pipeline events directly.  The independent
+                // write marker above delays the same-counter suppression by
+                // the same cycle, preserving write priority without putting
+                // CSR decode/select logic on every event FF's D path.
+                event_dependency_q          = csr.stall_dependency;
+                event_memory_wait_q         = csr.stall_memory_wait;
+                event_redirect_q            = csr.stall_redirect;
+                event_frontend_empty_q      = csr.stall_frontend_empty;
+                predictor_conditional_q     = csr.predictor_conditional_resolved;
+                predictor_direction_wrong_q = csr.predictor_direction_wrong;
+                predictor_btb_miss_q        = csr.predictor_btb_miss;
+                predictor_ras_fallback_q    = csr.predictor_ras_fallback;
+                predictor_repair_q          = csr.predictor_repair;
             }
         }
     }
@@ -312,14 +464,14 @@ module CsrFile (
 
     always_ff (clk, rst_n) {
         if_reset {
-            stall_selector_q = 2'd0;
+            stall_selector_q = 4'd0;
         } else if csr.write_enable && (csr.write_index == 4'd14) && (csr.write_op != 2'd3) {
             if csr.write_op == 2'd0 {
-                stall_selector_q = csr.write_source[1:0];
+                stall_selector_q = csr.write_source[3:0];
             } else if csr.write_op == 2'd1 {
-                stall_selector_q = stall_selector_q | csr.write_source[1:0];
+                stall_selector_q = stall_selector_q | csr.write_source[3:0];
             } else {
-                stall_selector_q = stall_selector_q & ~csr.write_source[1:0];
+                stall_selector_q = stall_selector_q & ~csr.write_source[3:0];
             }
         }
     }

@@ -68,48 +68,78 @@ fn decode(simulator: &mut Simulator<NativeBackend>, instruction: u32) -> (u8, bo
 }
 
 #[test]
-fn counter_aliases_share_storage_but_only_machine_addresses_are_writable() {
+fn every_implemented_csr_has_exact_write_legality_for_all_six_forms() {
     let mut simulator = decoder();
-    for (address, index, writable) in [
+    const IMPLEMENTED: [(u16, u8, bool); 17] = [
+        (0x300, 1, true),   // mstatus
+        (0x301, 2, false),  // misa
+        (0x305, 3, true),   // mtvec
+        (0x340, 4, true),   // mscratch
+        (0x341, 5, true),   // mepc
+        (0x342, 6, true),   // mcause
+        (0x343, 7, true),   // mtval
+        (0xf11, 8, false),  // mvendorid
+        (0xf12, 9, false),  // marchid
+        (0xf13, 10, false), // mimpid
+        (0xf14, 11, false), // mhartid
         (0xb00, 12, true),  // mcycle
-        (0xc00, 12, false), // cycle
+        (0xc00, 12, false), // cycle: read-only alias of mcycle
         (0xb02, 13, true),  // minstret
-        (0xc02, 13, false), // instret
+        (0xc02, 13, false), // instret: read-only alias of minstret
         (0x7c0, 14, true),  // mstallsel
         (0x7c1, 15, true),  // mstalldata
-        (0x301, 2, false),  // misa
-        (0xf14, 11, false), // mhartid
-    ] {
-        // CSRRS with x0 is a pure read and is legal for every implemented CSR.
-        let (read_index, read_write, read_illegal) =
-            decode(&mut simulator, csr_instruction(address, 0b010, 0, 1));
-        assert_eq!(
-            read_index, index,
-            "wrong compact index for CSR {address:#05x}"
-        );
-        assert!(
-            !read_write,
-            "pure read marked as a write for CSR {address:#05x}"
-        );
-        assert!(!read_illegal, "pure read rejected for CSR {address:#05x}");
+    ];
+    const CSR_FORMS: [u8; 6] = [0b001, 0b010, 0b011, 0b101, 0b110, 0b111];
 
-        // CSRRW writes even with rd=x0, and legality follows the architectural
-        // address rather than the shared four-bit storage index.
-        let (write_index, write, write_illegal) =
-            decode(&mut simulator, csr_instruction(address, 0b001, 1, 0));
-        assert_eq!(
-            write_index, index,
-            "wrong write index for CSR {address:#05x}"
-        );
-        assert!(write, "CSRRW not marked as a write for CSR {address:#05x}");
-        assert_eq!(
-            write_illegal, !writable,
-            "wrong write legality for CSR {address:#05x}"
-        );
+    for (address, expected_index, writable) in IMPLEMENTED {
+        for funct3 in CSR_FORMS {
+            for source in [0_u8, 0x1f] {
+                let write_requested = matches!(funct3, 0b001 | 0b101) || source != 0;
+                let (index, csr_write, illegal) =
+                    decode(&mut simulator, csr_instruction(address, funct3, source, 1));
+                let context =
+                    format!("CSR {address:#05x}, funct3={funct3:03b}, source={source:#04x}");
+
+                assert_eq!(index, expected_index, "wrong compact index for {context}");
+                assert_eq!(
+                    csr_write, write_requested,
+                    "wrong csr_write indication for {context}"
+                );
+                assert_eq!(
+                    illegal,
+                    write_requested && !writable,
+                    "wrong legality for {context}"
+                );
+            }
+        }
     }
+}
 
-    let (index, write, illegal) = decode(&mut simulator, csr_instruction(0x7ff, 0b010, 0, 1));
-    assert_eq!(index, 0);
-    assert!(!write);
-    assert!(illegal, "unsupported custom CSR was accepted");
+#[test]
+fn unknown_csrs_are_illegal_for_reads_and_writes_without_aliasing_an_index() {
+    let mut simulator = decoder();
+    const CSR_FORMS: [u8; 6] = [0b001, 0b010, 0b011, 0b101, 0b110, 0b111];
+
+    for address in [0x000_u16, 0x302, 0x344, 0x7ff, 0xb01, 0xc01, 0xfff] {
+        for funct3 in CSR_FORMS {
+            for source in [0_u8, 0x1f] {
+                let write_requested = matches!(funct3, 0b001 | 0b101) || source != 0;
+                let (index, csr_write, illegal) =
+                    decode(&mut simulator, csr_instruction(address, funct3, source, 1));
+                let context = format!(
+                    "unknown CSR {address:#05x}, funct3={funct3:03b}, source={source:#04x}"
+                );
+
+                assert_eq!(
+                    index, 0,
+                    "unknown address aliased compact storage for {context}"
+                );
+                assert_eq!(
+                    csr_write, write_requested,
+                    "wrong csr_write indication for {context}"
+                );
+                assert!(illegal, "unsupported address was accepted for {context}");
+            }
+        }
+    }
 }
