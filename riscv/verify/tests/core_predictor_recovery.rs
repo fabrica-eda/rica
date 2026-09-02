@@ -464,8 +464,10 @@ fn learned_taken_cancel_holds_redirect_target_and_skips_fallthrough() {
                 !cycle.predictor_request_accept,
                 "a request entered on the shadow-cancellation edge",
             );
+            if !cancellation_seen {
+                target_commits_at_cancel = target_commits;
+            }
             cancellation_seen = true;
-            target_commits_at_cancel = target_commits;
             expect_target_request = true;
         }
 

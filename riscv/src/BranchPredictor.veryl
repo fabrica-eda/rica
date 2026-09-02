@@ -1,9 +1,10 @@
 /// One-request-per-clock RV64C-aware branch prediction frontend.
 ///
-/// The BTB and all five TAGE memories perform their synchronous read at the
-/// fetch acceptance edge.  The following edge captures only compact TAGE
-/// match/weak/prediction metadata plus the aligned BTB/RAS/request packet.
-/// Provider and next-PC selection are then derived from those registers.
+/// The fetch-side request first enters a one-entry ingress register.  The BTB
+/// and all five TAGE memories perform their synchronous read at the following
+/// issue edge.  The next edge captures only compact TAGE match/weak/prediction
+/// metadata plus the aligned BTB/RAS/request packet.  Provider and next-PC
+/// selection are then derived from those registers.
 /// Conditional history is applied once on the next edge; registered NT
 /// previews let a new sequential lookup launch every clock while that effect
 /// is pending, and a registered taken result cancels the launched shadow.
@@ -100,6 +101,9 @@ module BranchPredictor #(
     var decision_fast_miss            : logic    ;
     var fast_miss_accept              : logic    ;
     var output_ready                  : logic    ;
+    var issue_ready                   : logic    ;
+    var ingress_ready                 : logic    ;
+    var ingress_accept                : logic    ;
     var request_fire                  : logic    ;
     var selected_response_valid       : logic    ;
     var selected_response_token       : logic<3> ;
@@ -132,6 +136,13 @@ module BranchPredictor #(
     var output_btb_hit_q              : logic    ;
     var output_tage_hit_q             : logic    ;
     var output_ras_fallback_q         : logic    ;
+
+    // The external fetch request is decoupled from the synchronous table
+    // issue edge by one elastic entry.  In addition to the architectural
+    // packet, retain the folded-history snapshot and its not-taken successor
+    // in the same transaction.  The speculative frontier may advance while
+    // this entry waits behind a table response; recomputing these folds at
+    // issue time would therefore associate a request with the wrong history.
 
     // Use independent provider cones for scalar control, the 32-bit next-PC
     // mux, and history feedback.  This prevents one selected-direction net
@@ -209,14 +220,38 @@ module BranchPredictor #(
         bank2: logic<8>,
         bank3: logic<8>,
     }
-    var speculative_history_q: logic  <108>;
-    var committed_history_q  : logic  <108>;
-    var speculative_index_q  : Fold9x4     ;
-    var committed_index_q    : Fold9x4     ;
-    var speculative_tag_a_q  : Fold9x4     ;
-    var committed_tag_a_q    : Fold9x4     ;
-    var speculative_tag_b_q  : Fold8x4     ;
-    var committed_tag_b_q    : Fold8x4     ;
+    struct LookupRequest {
+        pc            : logic  <32>,
+        fallthrough   : logic  <32>,
+        is_conditional: logic      ,
+        token         : logic  <3> ,
+        index_fold    : Fold9x4    ,
+        tag_a_fold    : Fold9x4    ,
+        tag_b_fold    : Fold8x4    ,
+        index_nt      : Fold9x4    ,
+        tag_a_nt      : Fold9x4    ,
+        tag_b_nt      : Fold8x4    ,
+    }
+    var ingress_valid_q      : logic             ;
+    var ingress_q            : LookupRequest     ;
+    var issue_pc             : logic        <32> ;
+    var issue_fallthrough    : logic        <32> ;
+    var issue_is_conditional : logic             ;
+    var issue_token          : logic        <3>  ;
+    var issue_index_fold     : Fold9x4           ;
+    var issue_tag_a_fold     : Fold9x4           ;
+    var issue_tag_b_fold     : Fold8x4           ;
+    var issue_index_nt       : Fold9x4           ;
+    var issue_tag_a_nt       : Fold9x4           ;
+    var issue_tag_b_nt       : Fold8x4           ;
+    var speculative_history_q: logic        <108>;
+    var committed_history_q  : logic        <108>;
+    var speculative_index_q  : Fold9x4           ;
+    var committed_index_q    : Fold9x4           ;
+    var speculative_tag_a_q  : Fold9x4           ;
+    var committed_tag_a_q    : Fold9x4           ;
+    var speculative_tag_b_q  : Fold8x4           ;
+    var committed_tag_b_q    : Fold8x4           ;
 
     var speculative_history_next : logic  <108>;
     var committed_history_next   : logic  <108>;
@@ -292,8 +327,8 @@ module BranchPredictor #(
         rst_n           : rst_n                        ,
         ready           : btb_ready                    ,
         lookup_valid    : request_fire                 ,
-        lookup_token    : lookup_sequence_q            ,
-        lookup_pc       : request_pc                   ,
+        lookup_token    : issue_token                  ,
+        lookup_pc       : issue_pc                     ,
         response_accept : table_response_accept        ,
         response_cancel : table_response_cancel        ,
         rollback_valid  : decision_replacement_rollback,
@@ -325,9 +360,9 @@ module BranchPredictor #(
         rst_n                  : rst_n                       ,
         ready                  : tage_ready                  ,
         lookup_valid           : request_fire                ,
-        lookup_token           : lookup_sequence_q           ,
+        lookup_token           : issue_token                 ,
         snapshot_token         : allocation_token_q          ,
-        lookup_pc              : request_pc                  ,
+        lookup_pc              : issue_pc                    ,
         lookup_index_0         : tage_lookup_index_0         ,
         lookup_index_1         : tage_lookup_index_1         ,
         lookup_index_2         : tage_lookup_index_2         ,
@@ -517,11 +552,23 @@ module BranchPredictor #(
         // held response may be replaced only when the consumer accepts it;
         // recovery/discard clears the old response without admitting a lookup
         // hashed from the pre-recovery speculative state on that same edge.
-        request_ready  = btb_ready && tage_ready && !recover_valid && !discard_all
-            && !(output_valid_q && output_taken_q)
+        //
+        // `issue_ready` is deliberately separate from the public request
+        // handshake.  The one-entry ingress can absorb a fetch request while
+        // the table response is held, then issue it once the table pair is
+        // available.  When an ingress entry issues on this edge, it is also
+        // legal to enqueue the next request on the same edge.
+        issue_ready   = btb_ready && tage_ready && !recover_valid && !discard_all && !(output_valid_q && output_taken_q)
             && ((!btb_response_valid && !tage_response_valid) || raw_response_capture);
-        request_fire   = request_valid && request_ready;
-        request_accept = request_fire;
+        request_fire  = ingress_valid_q && issue_ready;
+        ingress_ready = !ingress_valid_q || request_fire;
+        // Keep reset-scrub behavior identical to the pre-ingress interface:
+        // requests are not acknowledged until both table memories are ready.
+        // The S0 entry hides normal response backpressure, not initialization.
+        request_ready  = btb_ready && tage_ready && ingress_ready && !recover_valid && !discard_all
+            && !(output_valid_q && output_taken_q);
+        ingress_accept = request_valid && request_ready;
+        request_accept = ingress_accept;
         // The table token only proves that the BTB and TAGE results belong to
         // the same physical lookup.  Claim the next architectural snapshot
         // only when that result becomes a visible decision.
@@ -652,19 +699,19 @@ module BranchPredictor #(
         // Hash the request from the speculative state *after* accepting the
         // preceding conditional response.  This is the feedback edge that a
         // naive two-cycle TAGE pipeline loses.
-        tage_lookup_index_0 = request_pc[9:1] ^ lookup_index_fold.bank0;
-        tage_lookup_index_1 = request_pc[9:1] ^ lookup_index_fold.bank1;
-        tage_lookup_index_2 = request_pc[9:1] ^ lookup_index_fold.bank2;
-        tage_lookup_index_3 = request_pc[9:1] ^ lookup_index_fold.bank3;
+        tage_lookup_index_0 = issue_pc[9:1] ^ issue_index_fold.bank0;
+        tage_lookup_index_1 = issue_pc[9:1] ^ issue_index_fold.bank1;
+        tage_lookup_index_2 = issue_pc[9:1] ^ issue_index_fold.bank2;
+        tage_lookup_index_3 = issue_pc[9:1] ^ issue_index_fold.bank3;
         // Fold all 31 halfword-PC bits into the table tag.  Using only the
         // low tag-width bits makes branches separated by a small power of two
         // indistinguishable whenever their histories match.
-        request_pc_fold_8 = request_pc[8:1] ^ request_pc[16:9] ^ request_pc[24:17] ^ {1'b0, request_pc[31:25]};
-        request_pc_fold_9 = request_pc[9:1] ^ request_pc[18:10] ^ request_pc[27:19] ^ {5'd0, request_pc[31:28]};
-        tage_lookup_tag_0 = request_pc_fold_8 ^ lookup_tag_a_fold.bank0[7:0] ^ {lookup_tag_b_fold.bank0[6:0], 1'b0};
-        tage_lookup_tag_1 = request_pc_fold_8 ^ lookup_tag_a_fold.bank1[7:0] ^ {lookup_tag_b_fold.bank1[6:0], 1'b0};
-        tage_lookup_tag_2 = request_pc_fold_9 ^ lookup_tag_a_fold.bank2 ^ {lookup_tag_b_fold.bank2, 1'b0};
-        tage_lookup_tag_3 = request_pc_fold_9 ^ lookup_tag_a_fold.bank3 ^ {lookup_tag_b_fold.bank3, 1'b0};
+        request_pc_fold_8 = issue_pc[8:1] ^ issue_pc[16:9] ^ issue_pc[24:17] ^ {1'b0, issue_pc[31:25]};
+        request_pc_fold_9 = issue_pc[9:1] ^ issue_pc[18:10] ^ issue_pc[27:19] ^ {5'd0, issue_pc[31:28]};
+        tage_lookup_tag_0 = request_pc_fold_8 ^ issue_tag_a_fold.bank0[7:0] ^ {issue_tag_b_fold.bank0[6:0], 1'b0};
+        tage_lookup_tag_1 = request_pc_fold_8 ^ issue_tag_a_fold.bank1[7:0] ^ {issue_tag_b_fold.bank1[6:0], 1'b0};
+        tage_lookup_tag_2 = request_pc_fold_9 ^ issue_tag_a_fold.bank2 ^ {issue_tag_b_fold.bank2, 1'b0};
+        tage_lookup_tag_3 = request_pc_fold_9 ^ issue_tag_a_fold.bank3 ^ {issue_tag_b_fold.bank3, 1'b0};
 
         // Output ports are leaves of the wrapper logic.  Internal state and
         // feedback consume the selected signals above, never the port nets.
@@ -812,6 +859,71 @@ module BranchPredictor #(
                 ^ {3'd0, prediction_history_next[106], 4'd0};
         }
 
+    }
+
+    // S0 captures the history frontier that was visible when the fetch side
+    // accepted the request.  If an older response is applied while the packet
+    // waits, its speculative history becomes newer before this packet can
+    // issue.  Rebase only the folded-history fields in that case; the packet,
+    // physical token, and its PC remain the registered S0 transaction.  This
+    // preserves the old one-request-per-clock lookup semantics across the new
+    // enqueue/issue boundary without rewriting the wide S0 payload on every
+    // cycle.
+    always_comb {
+        issue_pc               = ingress_q.pc;
+        issue_fallthrough      = ingress_q.fallthrough;
+        issue_is_conditional   = ingress_q.is_conditional;
+        issue_token            = ingress_q.token;
+        issue_index_fold.bank0 = ingress_q.index_fold.bank0;
+        issue_index_fold.bank1 = ingress_q.index_fold.bank1;
+        issue_index_fold.bank2 = ingress_q.index_fold.bank2;
+        issue_index_fold.bank3 = ingress_q.index_fold.bank3;
+        issue_tag_a_fold.bank0 = ingress_q.tag_a_fold.bank0;
+        issue_tag_a_fold.bank1 = ingress_q.tag_a_fold.bank1;
+        issue_tag_a_fold.bank2 = ingress_q.tag_a_fold.bank2;
+        issue_tag_a_fold.bank3 = ingress_q.tag_a_fold.bank3;
+        issue_tag_b_fold.bank0 = ingress_q.tag_b_fold.bank0;
+        issue_tag_b_fold.bank1 = ingress_q.tag_b_fold.bank1;
+        issue_tag_b_fold.bank2 = ingress_q.tag_b_fold.bank2;
+        issue_tag_b_fold.bank3 = ingress_q.tag_b_fold.bank3;
+        issue_index_nt.bank0   = ingress_q.index_nt.bank0;
+        issue_index_nt.bank1   = ingress_q.index_nt.bank1;
+        issue_index_nt.bank2   = ingress_q.index_nt.bank2;
+        issue_index_nt.bank3   = ingress_q.index_nt.bank3;
+        issue_tag_a_nt.bank0   = ingress_q.tag_a_nt.bank0;
+        issue_tag_a_nt.bank1   = ingress_q.tag_a_nt.bank1;
+        issue_tag_a_nt.bank2   = ingress_q.tag_a_nt.bank2;
+        issue_tag_a_nt.bank3   = ingress_q.tag_a_nt.bank3;
+        issue_tag_b_nt.bank0   = ingress_q.tag_b_nt.bank0;
+        issue_tag_b_nt.bank1   = ingress_q.tag_b_nt.bank1;
+        issue_tag_b_nt.bank2   = ingress_q.tag_b_nt.bank2;
+        issue_tag_b_nt.bank3   = ingress_q.tag_b_nt.bank3;
+        if append_prediction || launch_conditional_shadow {
+            issue_index_fold.bank0 = lookup_index_fold.bank0;
+            issue_index_fold.bank1 = lookup_index_fold.bank1;
+            issue_index_fold.bank2 = lookup_index_fold.bank2;
+            issue_index_fold.bank3 = lookup_index_fold.bank3;
+            issue_tag_a_fold.bank0 = lookup_tag_a_fold.bank0;
+            issue_tag_a_fold.bank1 = lookup_tag_a_fold.bank1;
+            issue_tag_a_fold.bank2 = lookup_tag_a_fold.bank2;
+            issue_tag_a_fold.bank3 = lookup_tag_a_fold.bank3;
+            issue_tag_b_fold.bank0 = lookup_tag_b_fold.bank0;
+            issue_tag_b_fold.bank1 = lookup_tag_b_fold.bank1;
+            issue_tag_b_fold.bank2 = lookup_tag_b_fold.bank2;
+            issue_tag_b_fold.bank3 = lookup_tag_b_fold.bank3;
+            issue_index_nt.bank0   = request_index_nt.bank0;
+            issue_index_nt.bank1   = request_index_nt.bank1;
+            issue_index_nt.bank2   = request_index_nt.bank2;
+            issue_index_nt.bank3   = request_index_nt.bank3;
+            issue_tag_a_nt.bank0   = request_tag_a_nt.bank0;
+            issue_tag_a_nt.bank1   = request_tag_a_nt.bank1;
+            issue_tag_a_nt.bank2   = request_tag_a_nt.bank2;
+            issue_tag_a_nt.bank3   = request_tag_a_nt.bank3;
+            issue_tag_b_nt.bank0   = request_tag_b_nt.bank0;
+            issue_tag_b_nt.bank1   = request_tag_b_nt.bank1;
+            issue_tag_b_nt.bank2   = request_tag_b_nt.bank2;
+            issue_tag_b_nt.bank3   = request_tag_b_nt.bank3;
+        }
     }
 
     // GHR and all folded histories share one explicit architectural
@@ -1210,28 +1322,81 @@ module BranchPredictor #(
             response_btb_identity_stale_q = 1'b1;
         }
         if request_fire {
-            response_fallthrough_q    = request_fallthrough;
-            response_conditional_q    = request_is_conditional;
-            response_btb_set_q        = request_pc[7:1];
-            response_index_nt_q.bank0 = request_index_nt.bank0;
-            response_index_nt_q.bank1 = request_index_nt.bank1;
-            response_index_nt_q.bank2 = request_index_nt.bank2;
-            response_index_nt_q.bank3 = request_index_nt.bank3;
-            response_tag_a_nt_q.bank0 = request_tag_a_nt.bank0;
-            response_tag_a_nt_q.bank1 = request_tag_a_nt.bank1;
-            response_tag_a_nt_q.bank2 = request_tag_a_nt.bank2;
-            response_tag_a_nt_q.bank3 = request_tag_a_nt.bank3;
-            response_tag_b_nt_q.bank0 = request_tag_b_nt.bank0;
-            response_tag_b_nt_q.bank1 = request_tag_b_nt.bank1;
-            response_tag_b_nt_q.bank2 = request_tag_b_nt.bank2;
-            response_tag_b_nt_q.bank3 = request_tag_b_nt.bank3;
+            response_fallthrough_q    = issue_fallthrough;
+            response_conditional_q    = issue_is_conditional;
+            response_btb_set_q        = issue_pc[7:1];
+            response_index_nt_q.bank0 = issue_index_nt.bank0;
+            response_index_nt_q.bank1 = issue_index_nt.bank1;
+            response_index_nt_q.bank2 = issue_index_nt.bank2;
+            response_index_nt_q.bank3 = issue_index_nt.bank3;
+            response_tag_a_nt_q.bank0 = issue_tag_a_nt.bank0;
+            response_tag_a_nt_q.bank1 = issue_tag_a_nt.bank1;
+            response_tag_a_nt_q.bank2 = issue_tag_a_nt.bank2;
+            response_tag_a_nt_q.bank3 = issue_tag_a_nt.bank3;
+            response_tag_b_nt_q.bank0 = issue_tag_b_nt.bank0;
+            response_tag_b_nt_q.bank1 = issue_tag_b_nt.bank1;
+            response_tag_b_nt_q.bank2 = issue_tag_b_nt.bank2;
+            response_tag_b_nt_q.bank3 = issue_tag_b_nt.bank3;
+        }
+    }
+
+    // S0: enqueue the external request and its history snapshot.  The
+    // registered packet is the only source for the table issue edge, so the
+    // cache-hit/request-ready cone in Core terminates at this entry.  A full
+    // entry may be replaced when its old packet issues on the same edge.
+    #[allow(missing_reset_statement)]
+    always_ff (clk, rst_n) {
+        if_reset {
+            // The wide packet is masked by ingress_valid_q.  Leaving it
+            // reset-free removes an asynchronous reset mux from every
+            // payload bit; enqueue writes all fields before the entry may
+            // issue on a later edge.
+            ingress_valid_q   = 1'b0;
+            lookup_sequence_q = 3'd0;
+        } else if recover_valid || discard_all {
+            // No younger request may issue after a recovery/discard edge.
+            // Payload is intentionally retained; valid is the transaction
+            // boundary and prevents stale fields from reaching either table.
+            ingress_valid_q = 1'b0;
+        } else if ingress_accept {
+            ingress_valid_q            = 1'b1;
+            ingress_q.pc               = request_pc;
+            ingress_q.fallthrough      = request_fallthrough;
+            ingress_q.is_conditional   = request_is_conditional;
+            ingress_q.token            = lookup_sequence_q;
+            ingress_q.index_fold.bank0 = lookup_index_fold.bank0;
+            ingress_q.index_fold.bank1 = lookup_index_fold.bank1;
+            ingress_q.index_fold.bank2 = lookup_index_fold.bank2;
+            ingress_q.index_fold.bank3 = lookup_index_fold.bank3;
+            ingress_q.tag_a_fold.bank0 = lookup_tag_a_fold.bank0;
+            ingress_q.tag_a_fold.bank1 = lookup_tag_a_fold.bank1;
+            ingress_q.tag_a_fold.bank2 = lookup_tag_a_fold.bank2;
+            ingress_q.tag_a_fold.bank3 = lookup_tag_a_fold.bank3;
+            ingress_q.tag_b_fold.bank0 = lookup_tag_b_fold.bank0;
+            ingress_q.tag_b_fold.bank1 = lookup_tag_b_fold.bank1;
+            ingress_q.tag_b_fold.bank2 = lookup_tag_b_fold.bank2;
+            ingress_q.tag_b_fold.bank3 = lookup_tag_b_fold.bank3;
+            ingress_q.index_nt.bank0   = request_index_nt.bank0;
+            ingress_q.index_nt.bank1   = request_index_nt.bank1;
+            ingress_q.index_nt.bank2   = request_index_nt.bank2;
+            ingress_q.index_nt.bank3   = request_index_nt.bank3;
+            ingress_q.tag_a_nt.bank0   = request_tag_a_nt.bank0;
+            ingress_q.tag_a_nt.bank1   = request_tag_a_nt.bank1;
+            ingress_q.tag_a_nt.bank2   = request_tag_a_nt.bank2;
+            ingress_q.tag_a_nt.bank3   = request_tag_a_nt.bank3;
+            ingress_q.tag_b_nt.bank0   = request_tag_b_nt.bank0;
+            ingress_q.tag_b_nt.bank1   = request_tag_b_nt.bank1;
+            ingress_q.tag_b_nt.bank2   = request_tag_b_nt.bank2;
+            ingress_q.tag_b_nt.bank3   = request_tag_b_nt.bank3;
+            lookup_sequence_q          = lookup_sequence_q + 3'd1;
+        } else if request_fire {
+            ingress_valid_q = 1'b0;
         }
     }
 
     #[allow(missing_reset_statement)]
     always_ff (clk, rst_n) {
         if_reset {
-            lookup_sequence_q  = 3'd0;
             allocation_token_q = 3'd0;
             for history_bit in 0..108 {
                 speculative_history_q[history_bit] = 1'b0;
@@ -1281,10 +1446,6 @@ module BranchPredictor #(
             committed_tag_a_q     = committed_tag_a_next;
             speculative_tag_b_q   = speculative_tag_b_next;
             committed_tag_b_q     = committed_tag_b_next;
-            if request_fire {
-                lookup_sequence_q = lookup_sequence_q + 3'd1;
-            }
-
             if raw_response_capture {
                 // Provisionally claim the current architectural token.  A
                 // later registered taken output may prove this metadata

@@ -265,8 +265,10 @@ impl Driver {
         self.set_u8("request_valid", 1);
         self.tick();
         self.set_u8("request_valid", 0);
-        // The synchronous BTB/TAGE result first enters the metadata queue,
-        // then the fully registered classification/output stage.
+        // The request first enters the one-entry ingress stage. The
+        // synchronous BTB/TAGE result then enters the metadata queue,
+        // followed by the fully registered classification/output stage.
+        self.tick();
         self.tick();
         self.tick();
         self.response()
@@ -339,6 +341,133 @@ impl Driver {
     }
 }
 
+#[test]
+fn ingress_stage_adds_one_edge_and_keeps_table_pair_in_lockstep() {
+    let mut driver = Driver::new();
+    let first_pc = 0x4002;
+    let second_pc = 0x4042;
+    let third_pc = 0x4082;
+
+    driver.set_u32("request_pc", first_pc);
+    driver.set_u32("request_fallthrough", first_pc + 2);
+    driver.set_u8("request_valid", 1);
+    assert_eq!(
+        driver.get("request_accept"),
+        1,
+        "empty ingress must enqueue"
+    );
+    assert_eq!(driver.get("request_fire"), 0, "enqueue must precede issue");
+    driver.tick();
+    driver.set_u8("request_valid", 0);
+
+    // The first edge only fills S0. No table response can exist yet; the
+    // registered packet is visible as the next issue candidate.
+    assert_eq!(driver.get("btb_response_valid"), 0);
+    assert_eq!(driver.get("tage_response_valid"), 0);
+    assert_eq!(driver.get("request_fire"), 1);
+    driver.tick();
+
+    // S1 is the synchronous table response. The externally visible decision
+    // is still one registered stage farther away for a cold miss.
+    assert_eq!(driver.get("btb_response_valid"), 1);
+    assert_eq!(driver.get("tage_response_valid"), 1);
+    assert_eq!(driver.get("response_valid"), 0);
+
+    // Fill a replacement request while the first raw response is captured.
+    // Both table instances must launch the same registered transaction.
+    driver.set_u32("request_pc", second_pc);
+    driver.set_u32("request_fallthrough", second_pc + 2);
+    driver.set_u8("request_valid", 1);
+    assert_eq!(driver.get("request_accept"), 1);
+    driver.tick();
+    driver.set_u32("request_pc", third_pc);
+    driver.set_u32("request_fallthrough", third_pc + 2);
+    assert_eq!(driver.get("request_accept"), 1);
+    assert_eq!(driver.get("request_fire"), 1);
+    assert_eq!(driver.get("btb_response_valid"), 0);
+    assert_eq!(driver.get("tage_response_valid"), 0);
+    driver.tick();
+    driver.set_u8("request_valid", 0);
+    assert_eq!(driver.get("btb_response_valid"), 1);
+    assert_eq!(driver.get("tage_response_valid"), 1);
+    assert_eq!(driver.get("response_valid"), 1);
+    assert_eq!(driver.response().token, 0);
+    driver.set_u8("response_accept", 1);
+    assert_eq!(driver.get("request_fire"), 1);
+    driver.tick();
+    driver.set_u8("response_accept", 0);
+    driver.set_u8("request_valid", 0);
+
+    // The first decision was accepted while the second raw response was
+    // captured. Its token and payload remain ordered despite the extra S0.
+    let second = driver.response();
+    assert_eq!(second.token, 1);
+    assert_eq!(second.next_pc, second_pc + 2);
+}
+
+#[test]
+fn ingress_issue_rebases_on_predecessor_conditional_shadow() {
+    let mut driver = Driver::new_with_fold_probes();
+
+    // Make the history non-zero so using the enqueue-edge fold is observably
+    // different from the predecessor's not-taken shadow at the issue edge.
+    driver.set_u8("recover_kind", KIND_CONDITIONAL);
+    driver.set_u8("recover_taken", 1);
+    driver.set_u8("recover_valid", 1);
+    driver.tick();
+    driver.set_u8("recover_valid", 0);
+    assert_fold_frontier(&mut driver, false, 1);
+
+    let first_pc = 0x1002;
+    let second_pc = 0x1042;
+    let third_pc = 0x1082;
+    driver.set_u32("request_pc", first_pc);
+    driver.set_u32("request_fallthrough", first_pc + 4);
+    driver.set_u8("request_is_conditional", 1);
+    driver.set_u8("request_valid", 1);
+    assert_eq!(driver.get("request_accept"), 1);
+    driver.tick();
+
+    // The second request is accepted while the first request issues. It is
+    // therefore carrying the old frontier in S0 when the first response is
+    // still unknown.
+    driver.set_u32("request_pc", second_pc);
+    driver.set_u32("request_fallthrough", second_pc + 4);
+    driver.set_u8("request_is_conditional", 1);
+    assert_eq!(driver.get("request_accept"), 1);
+    assert_eq!(driver.get("request_fire"), 1);
+    driver.tick();
+
+    // At this edge the first conditional response is captured and the
+    // second packet issues. Its TAGE address must use first's not-taken fold
+    // (history 1 -> 2), not the stale enqueue-edge fold (history 1).
+    assert_eq!(driver.get("raw_response_capture"), 1);
+    assert_eq!(driver.get("request_fire"), 1);
+    driver.set_u32("request_pc", third_pc);
+    driver.set_u32("request_fallthrough", third_pc + 4);
+    driver.set_u8("request_is_conditional", 1);
+    driver.tick();
+    assert_eq!(
+        driver.get_tage("lookup_index0_q"),
+        u64::from(((second_pc >> 1) & 0x1ff) ^ 2),
+        "issue must rebase the queued request on its predecessor's NT shadow",
+    );
+
+    // C was enqueued while B issued. B's response is now the known
+    // predecessor, so C must advance the preview once more (2 -> 4).
+    driver.set_u8("request_valid", 0);
+    driver.set_u8("response_accept", 1);
+    assert_eq!(driver.get("raw_response_capture"), 1);
+    assert_eq!(driver.get("request_fire"), 1);
+    driver.tick();
+    driver.set_u8("response_accept", 0);
+    assert_eq!(
+        driver.get_tage("lookup_index0_q"),
+        u64::from(((third_pc >> 1) & 0x1ff) ^ 4),
+        "continuous conditional issue must carry the NT preview forward",
+    );
+}
+
 fn seed_full_btb_set_with_way_zero_next(driver: &mut Driver, first_pc: u32) {
     let second_pc = first_pc + 0x100;
     assert_eq!((first_pc >> 1) & 0x7f, (second_pc >> 1) & 0x7f);
@@ -360,6 +489,9 @@ fn launch_cold_btb_lookup(driver: &mut Driver, pc: u32) {
     assert_eq!(driver.get("request_accept"), 1);
     driver.tick();
     driver.set_u8("request_valid", 0);
+    // The first edge enqueues the request; the following edge issues the
+    // registered packet into both synchronous tables.
+    driver.tick();
     assert_eq!(driver.get("btb_response_valid"), 1);
     assert_eq!(driver.get("tage_response_valid"), 1);
     assert_eq!(driver.get("raw_response_capture"), 1);
@@ -880,6 +1012,9 @@ fn same_edge_old_hit_capture_and_older_replacement_marks_the_token_stale() {
     driver.set_u8("request_valid", 1);
     driver.tick();
     driver.set_u8("request_valid", 0);
+    // The enqueue edge is separate from the synchronous table issue edge.
+    // Leave retirement for the later raw-response capture edge.
+    driver.tick();
 
     driver.set_u8("retire_token", older_a.token);
     driver.set_u32("retire_pc", replacement_pc);
@@ -954,6 +1089,7 @@ fn retiring_an_unrelated_control_cannot_steal_a_cold_miss_reservation() {
     driver.set_u8("request_valid", 1);
     driver.tick();
     driver.set_u8("request_valid", 0);
+    driver.tick();
 
     driver.set_u8("retire_token", older.token);
     driver.set_u32("retire_pc", older_pc);
@@ -1250,11 +1386,15 @@ fn taken_held_decision_cancels_an_already_pending_shadow() {
 
     driver.set_u32("request_pc", fallthrough + 2);
     driver.set_u32("request_fallthrough", fallthrough + 4);
+    // A is captured and B is issued on this edge; C replaces the ingress
+    // packet. The following edge promotes A and issues C while C's table
+    // response remains the cancelable shadow.
+    driver.tick();
     assert_eq!(driver.get("decision_promote"), 1);
     assert_eq!(driver.get("raw_response_capture"), 1);
     assert_eq!(driver.get("request_accept"), 1);
-    driver.tick();
     driver.set_u8("request_valid", 0);
+    driver.tick();
 
     let taken = driver.response();
     assert!(taken.taken);
@@ -1423,7 +1563,13 @@ fn recovery_and_discard_reject_a_same_edge_request() {
     recovering.set_u32("request_pc", 0x2c02);
     recovering.set_u32("request_fallthrough", 0x2c04);
     recovering.set_u8("request_valid", 1);
+    // Exercise the S0 flush itself: the request is accepted while the older
+    // miss response is held, then recovery must invalidate the queued packet
+    // before it can issue to either table.
+    assert_eq!(recovering.get("request_accept"), 1);
+    recovering.tick();
     recovering.set_u8("recover_valid", 1);
+    assert_eq!(recovering.get("ingress_valid_q"), 1);
     assert_eq!(recovering.get("request_accept"), 0);
     recovering.tick();
     recovering.set_u8("request_valid", 0);
@@ -1455,7 +1601,10 @@ fn recovery_and_discard_reject_a_same_edge_request() {
     discarding.set_u32("request_pc", 0x3202);
     discarding.set_u32("request_fallthrough", 0x3204);
     discarding.set_u8("request_valid", 1);
+    assert_eq!(discarding.get("request_accept"), 1);
+    discarding.tick();
     discarding.set_u8("discard_all", 1);
+    assert_eq!(discarding.get("ingress_valid_q"), 1);
     assert_eq!(discarding.get("request_accept"), 0);
     discarding.tick();
     discarding.set_u8("request_valid", 0);
@@ -1845,6 +1994,9 @@ fn not_taken_conditional_launches_a_visible_successor_with_nt_history() {
     driver.set_u8("request_valid", 0);
     driver.set_u8("response_accept", 0);
     driver.tick();
+    // B was accepted into the ingress on A's acceptance edge; issue and
+    // response capture are separate edges now.
+    driver.tick();
     assert_eq!(driver.get("decision_fast_miss"), 1);
     assert_fold_frontier(&mut driver, false, old_history);
     let response_b = driver.response();
@@ -1874,9 +2026,12 @@ fn fast_miss_path_sustains_direct_accept_pop_capture_and_push() {
     driver.tick();
     driver.set_u32("request_pc", pcs[1]);
     driver.set_u32("request_fallthrough", pcs[1] + 2);
-    assert_eq!(driver.get("raw_response_capture"), 1);
-    assert_eq!(driver.get("request_accept"), 1);
     driver.tick();
+    driver.set_u32("request_pc", pcs[2]);
+    driver.set_u32("request_fallthrough", pcs[2] + 2);
+    // A is captured while B issues and C replaces the ingress on this edge.
+    driver.tick();
+    driver.set_u8("request_valid", 0);
 
     // Four cold misses are now accepted on consecutive edges.  Every edge
     // directly accepts the current decision, captures the next raw result,
@@ -1894,8 +2049,9 @@ fn fast_miss_path_sustains_direct_accept_pop_capture_and_push() {
             driver.get_tage_slot("slot_index0_q", expected_token, 9),
             u64::from((pcs[cycle] >> 1) & 0x1ff),
         );
-        driver.set_u32("request_pc", pcs[cycle + 2]);
-        driver.set_u32("request_fallthrough", pcs[cycle + 2] + 2);
+        driver.set_u32("request_pc", pcs[cycle + 3]);
+        driver.set_u32("request_fallthrough", pcs[cycle + 3] + 2);
+        driver.set_u8("request_valid", 1);
         driver.set_u8("response_accept", 1);
         assert_eq!(driver.get("decision_fast_miss"), 1);
         assert_eq!(driver.get("fast_miss_accept"), 1);
@@ -1953,11 +2109,15 @@ fn taken_prediction_cancels_conditional_shadow_and_reuses_its_token() {
     driver.tick();
     driver.set_u32("request_pc", fallthrough + 2);
     driver.set_u32("request_fallthrough", fallthrough + 4);
+    // A is captured and B is issued on this edge; C replaces the ingress
+    // packet. The following edge promotes A and issues C while C's table
+    // response remains the cancelable shadow.
+    driver.tick();
     assert_eq!(driver.get("decision_promote"), 1);
     assert_eq!(driver.get("raw_response_capture"), 1);
     assert_eq!(driver.get("request_accept"), 1);
-    driver.tick();
     driver.set_u8("request_valid", 0);
+    driver.tick();
 
     let response_a = driver.response();
     assert_eq!(response_a.kind, KIND_CONDITIONAL);
@@ -2001,6 +2161,7 @@ fn taken_prediction_cancels_conditional_shadow_and_reuses_its_token() {
     assert_eq!(driver.get("request_accept"), 1);
     driver.tick();
     driver.set_u8("request_valid", 0);
+    driver.tick();
     driver.tick();
     assert_eq!(driver.get("decision_fast_miss"), 1);
 
@@ -2063,6 +2224,10 @@ fn cancelled_shadow_self_consumes_without_a_replacement_request() {
     driver.set_u32("request_fallthrough", fallthrough + 4);
     driver.tick();
     driver.set_u8("request_valid", 0);
+    // The classifier/output register adds one edge after the third request
+    // has been issued; keep the already-enqueued C packet from being replaced
+    // by a duplicate while A is promoted.
+    driver.tick();
 
     let taken = driver.response();
     assert!(taken.taken);
