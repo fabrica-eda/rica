@@ -341,6 +341,25 @@ impl Driver {
     }
 }
 
+fn assert_bank_local_valids(driver: &mut Driver, expected: u64, context: &str) {
+    for bank in [
+        "tage_base_valid_q",
+        "tage_tag0_valid_q",
+        "tage_tag1_valid_q",
+        "tage_tag2_valid_q",
+        "tage_tag3_valid_q",
+        "btb_way0_valid_q",
+        "btb_way1_valid_q",
+        "btb_plru_valid_q",
+    ] {
+        assert_eq!(
+            driver.get(bank),
+            expected,
+            "{context}: bank-local ingress {bank}"
+        );
+    }
+}
+
 #[test]
 fn ingress_stage_adds_one_edge_and_keeps_table_pair_in_lockstep() {
     let mut driver = Driver::new();
@@ -362,6 +381,7 @@ fn ingress_stage_adds_one_edge_and_keeps_table_pair_in_lockstep() {
 
     // The first edge only fills S0. No table response can exist yet; the
     // registered packet is visible as the next issue candidate.
+    assert_bank_local_valids(&mut driver, 1, "first enqueue");
     assert_eq!(driver.get("btb_response_valid"), 0);
     assert_eq!(driver.get("tage_response_valid"), 0);
     assert_eq!(driver.get("request_fire"), 1);
@@ -384,6 +404,7 @@ fn ingress_stage_adds_one_edge_and_keeps_table_pair_in_lockstep() {
     driver.set_u32("request_fallthrough", third_pc + 2);
     assert_eq!(driver.get("request_accept"), 1);
     assert_eq!(driver.get("request_fire"), 1);
+    assert_bank_local_valids(&mut driver, 1, "simultaneous pop/push");
     assert_eq!(driver.get("btb_response_valid"), 0);
     assert_eq!(driver.get("tage_response_valid"), 0);
     driver.tick();
@@ -403,6 +424,34 @@ fn ingress_stage_adds_one_edge_and_keeps_table_pair_in_lockstep() {
     let second = driver.response();
     assert_eq!(second.token, 1);
     assert_eq!(second.next_pc, second_pc + 2);
+}
+
+#[test]
+fn recovery_and_discard_flush_all_bank_local_ingress_valids() {
+    for discard in [false, true] {
+        let mut driver = Driver::new();
+        let pc = if discard { 0x4a02 } else { 0x4c02 };
+        driver.set_u32("request_pc", pc);
+        driver.set_u32("request_fallthrough", pc + 4);
+        driver.set_u8("request_valid", 1);
+        assert_eq!(driver.get("request_accept"), 1);
+        driver.tick();
+        driver.set_u8("request_valid", 0);
+        assert_bank_local_valids(&mut driver, 1, "queued packet before flush");
+
+        if discard {
+            driver.set_u8("discard_all", 1);
+        } else {
+            driver.set_u8("recover_kind", KIND_NONE);
+            driver.set_u8("recover_valid", 1);
+        }
+        driver.tick();
+        driver.set_u8("discard_all", 0);
+        driver.set_u8("recover_valid", 0);
+        assert_bank_local_valids(&mut driver, 0, "recovery/discard flush");
+        assert_eq!(driver.get("btb_response_valid"), 0);
+        assert_eq!(driver.get("tage_response_valid"), 0);
+    }
 }
 
 #[test]

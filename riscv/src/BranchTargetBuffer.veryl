@@ -19,7 +19,19 @@ module BranchTargetBuffer #(
     rst_n           : input  reset    ,
     ready           : output logic    ,
     lookup_valid    : input  logic    ,
+    // Keep the response transaction valid separate from the three physical
+    // bank issue valids. Each BRAM bank is fed by its own registered ingress
+    // copy, avoiding a single lookup-accept CE tree across both ways and PLRU.
+    lookup_valid_way0: input logic    ,
+    lookup_valid_way1: input logic    ,
+    lookup_valid_replacement: input logic,
     lookup_token    : input  logic<3> ,
+    // The three packet copies carry their own address to the physical bank.
+    // `lookup_pc` remains the transaction-level address used for response
+    // metadata; under the frontend lockstep contract all four values match.
+    lookup_pc_way0  : input  logic<32>,
+    lookup_pc_way1  : input  logic<32>,
+    lookup_pc_replacement: input logic<32>,
     lookup_pc       : input  logic<32>,
     response_accept : input  logic    ,
     response_cancel : input  logic    ,
@@ -53,7 +65,8 @@ module BranchTargetBuffer #(
     var way_1_read_q  : logic<64>;
     var way_0_bypass_q: logic    ;
     var way_1_bypass_q: logic    ;
-    var bypass_data_q : logic<64>;
+    var bypass_data_0_q : logic<64>;
+    var bypass_data_1_q : logic<64>;
     var way_0_entry   : logic<64>;
     var way_1_entry   : logic<64>;
 
@@ -62,6 +75,9 @@ module BranchTargetBuffer #(
     var lookup_set_q  : logic<7> ;
     var lookup_tag_q  : logic<24>;
     var lookup_accept : logic    ;
+    var lookup_accept_way0: logic;
+    var lookup_accept_way1: logic;
+    var lookup_accept_replacement: logic;
 
     // One pseudo-LRU bit per set selects the next victim.  Keep this as a
     // canonical simple-dual-port memory as well: spelling it as a packed
@@ -92,14 +108,17 @@ module BranchTargetBuffer #(
         // directly keeps the local capacity gate acyclic while retaining the
         // accept-and-replace case.
         lookup_accept = lookup_valid && ready && (!lookup_valid_q || response_accept);
+        lookup_accept_way0 = lookup_valid_way0 && ready && (!lookup_valid_q || response_accept);
+        lookup_accept_way1 = lookup_valid_way1 && ready && (!lookup_valid_q || response_accept);
+        lookup_accept_replacement = lookup_valid_replacement && ready && (!lookup_valid_q || response_accept);
 
         way_0_entry = way_0_read_q;
         way_1_entry = way_1_read_q;
         if way_0_bypass_q {
-            way_0_entry = bypass_data_q;
+            way_0_entry = bypass_data_0_q;
         }
         if way_1_bypass_q {
-            way_1_entry = bypass_data_q;
+            way_1_entry = bypass_data_1_q;
         }
 
         replacement_read_q = replacement_read_raw_q;
@@ -173,14 +192,14 @@ module BranchTargetBuffer #(
     // invalidation, and update into one write per way. This is the canonical
     // simple-dual-port shape expected by Struo and ECP5 DP16KD inference.
     always_ff (clk) {
-        if lookup_accept {
-            way_0_read_q = way_0_memory[lookup_pc[7:1]];
+        if lookup_accept_way0 {
+            way_0_read_q = way_0_memory[lookup_pc_way0[7:1]];
         }
     }
 
     always_ff (clk) {
-        if lookup_accept {
-            way_1_read_q = way_1_memory[lookup_pc[7:1]];
+        if lookup_accept_way1 {
+            way_1_read_q = way_1_memory[lookup_pc_way1[7:1]];
         }
     }
 
@@ -205,12 +224,22 @@ module BranchTargetBuffer #(
     always_ff (clk, rst_n) {
         if_reset {
             way_0_bypass_q = 1'b0;
+            bypass_data_0_q = 64'd0;
+        } else if lookup_accept_way0 {
+            way_0_bypass_q = write_way_0 && (write_set == lookup_pc_way0[7:1]);
+            bypass_data_0_q = write_entry;
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
             way_1_bypass_q = 1'b0;
-            bypass_data_q  = 64'd0;
-        } else if lookup_accept {
-            way_0_bypass_q = write_way_0 && (write_set == lookup_pc[7:1]);
-            way_1_bypass_q = write_way_1 && (write_set == lookup_pc[7:1]);
-            bypass_data_q  = write_entry;
+            bypass_data_1_q = 64'd0;
+        } else if lookup_accept_way1 {
+            way_1_bypass_q = write_way_1 && (write_set == lookup_pc_way1[7:1]);
+            bypass_data_1_q = write_entry;
+        } else if lookup_accept_way0 {
+            way_1_bypass_q = 1'b0;
         }
     }
 
@@ -236,8 +265,8 @@ module BranchTargetBuffer #(
     }
 
     always_ff (clk) {
-        if lookup_accept {
-            replacement_read_raw_q = replacement_memory[lookup_pc[7:1]];
+        if lookup_accept_replacement {
+            replacement_read_raw_q = replacement_memory[lookup_pc_replacement[7:1]];
         }
     }
 
@@ -256,9 +285,9 @@ module BranchTargetBuffer #(
         if_reset {
             replacement_read_bypass_q = 1'b0;
             replacement_bypass_data_q = 1'b0;
-        } else if lookup_accept {
-            replacement_read_bypass_q = (scrub_active_q && (scrub_set_q == lookup_pc[7:1]))
-                || (replacement_write && (replacement_address == lookup_pc[7:1]));
+        } else if lookup_accept_replacement {
+            replacement_read_bypass_q = (scrub_active_q && (scrub_set_q == lookup_pc_replacement[7:1]))
+                || (replacement_write && (replacement_address == lookup_pc_replacement[7:1]));
             replacement_bypass_data_q = replacement_data;
             if scrub_active_q {
                 replacement_bypass_data_q = 1'b0;

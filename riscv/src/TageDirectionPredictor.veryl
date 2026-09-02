@@ -24,7 +24,18 @@ module TageDirectionPredictor #(
     clk  : input clock          ,
     rst_n: input reset_async_low,
 
+    // `lookup_valid` is the transaction-level valid used for response and
+    // token bookkeeping.  The physical read ports receive bank-local valid
+    // copies from the frontend ingress.  These are deliberately separate
+    // registered queue outputs: the base and each tagged bank can keep its
+    // enable close to its own BRAM/FF cluster instead of making one
+    // lookup-accept net drive all five memories and every metadata register.
     lookup_valid: input logic,
+    lookup_valid_base: input logic,
+    lookup_valid_tag0: input logic,
+    lookup_valid_tag1: input logic,
+    lookup_valid_tag2: input logic,
+    lookup_valid_tag3: input logic,
     // lookup_token correlates the physical BTB/TAGE response. snapshot_token
     // names the architectural prediction/training slot claimed when that
     // response first becomes visible; canceled shadow lookups claim no slot.
@@ -101,6 +112,11 @@ module TageDirectionPredictor #(
     var lookup_tag3_q               : logic<9> ;
 
     var lookup_accept         : logic    ;
+    var lookup_accept_base    : logic    ;
+    var lookup_accept_tag0    : logic    ;
+    var lookup_accept_tag1    : logic    ;
+    var lookup_accept_tag2    : logic    ;
+    var lookup_accept_tag3    : logic    ;
     var response_base_entry   : logic<2> ;
     var response_entry0       : logic<16>;
     var response_entry1       : logic<16>;
@@ -311,7 +327,10 @@ module TageDirectionPredictor #(
     var base_portb_addr : logic<11>;
     var base_portb_data : logic<2> ;
     var base_porta_addr : logic<11>;
-    var tag_porta_enable: logic    ;
+    var tag_porta_enable0: logic    ;
+    var tag_porta_enable1: logic    ;
+    var tag_porta_enable2: logic    ;
+    var tag_porta_enable3: logic    ;
     var tag_porta_write : logic    ;
     var tag_porta_addr0 : logic<9> ;
     var tag_porta_addr1 : logic<9> ;
@@ -415,6 +434,16 @@ module TageDirectionPredictor #(
         // ready also avoids a ready/accept loop in the enclosing frontend.
         ready         = !scrub_active_q;
         lookup_accept = lookup_valid && ready && (!response_valid_q || response_accept);
+        // Keep the response queue's single transaction decision centralized,
+        // but let each physical bank consume its own registered valid.  The
+        // frontend guarantees lockstep bank valids; spelling the accepts
+        // independently is important because these signals terminate at
+        // different BRAM/read-address cones after lowering.
+        lookup_accept_base = lookup_valid_base && ready && (!response_valid_q || response_accept);
+        lookup_accept_tag0 = lookup_valid_tag0 && ready && (!response_valid_q || response_accept);
+        lookup_accept_tag1 = lookup_valid_tag1 && ready && (!response_valid_q || response_accept);
+        lookup_accept_tag2 = lookup_valid_tag2 && ready && (!response_valid_q || response_accept);
+        lookup_accept_tag3 = lookup_valid_tag3 && ready && (!response_valid_q || response_accept);
 
         response_base_entry = base_read_raw_q;
         if base_read_bypass_q {
@@ -915,7 +944,10 @@ module TageDirectionPredictor #(
         base_portb_addr  = train_packet_base_addr_q;
         base_portb_data  = train_packet_base_data_q;
         base_porta_addr  = lookup_pc[11:1];
-        tag_porta_enable = lookup_accept;
+        tag_porta_enable0 = lookup_accept_tag0;
+        tag_porta_enable1 = lookup_accept_tag1;
+        tag_porta_enable2 = lookup_accept_tag2;
+        tag_porta_enable3 = lookup_accept_tag3;
         tag_porta_write  = 1'b0;
         tag_porta_addr0  = lookup_index_0;
         tag_porta_addr1  = lookup_index_1;
@@ -971,7 +1003,10 @@ module TageDirectionPredictor #(
             base_portb_write = 1'b1;
             base_portb_addr  = scrub_addr_q;
             base_portb_data  = 2'b01;
-            tag_porta_enable = scrub_addr_q <: 11'd512;
+            tag_porta_enable0 = scrub_addr_q <: 11'd512;
+            tag_porta_enable1 = scrub_addr_q <: 11'd512;
+            tag_porta_enable2 = scrub_addr_q <: 11'd512;
+            tag_porta_enable3 = scrub_addr_q <: 11'd512;
             tag_porta_write  = scrub_addr_q <: 11'd512;
             tag_porta_addr0  = scrub_addr_q[8:0];
             tag_porta_addr1  = scrub_addr_q[8:0];
@@ -984,7 +1019,7 @@ module TageDirectionPredictor #(
     // The base table has one synchronous lookup read and one serialized
     // scrub/training write. No reset touches the array itself.
     always_ff (clk) {
-        if lookup_accept {
+        if lookup_accept_base {
             base_read_raw_q = base_memory[base_porta_addr];
         }
     }
@@ -997,7 +1032,7 @@ module TageDirectionPredictor #(
 
     inst tagged_table0: TageTaggedTableMemory (
         clk           : clk             ,
-        port_a_enable : tag_porta_enable,
+        port_a_enable : tag_porta_enable0,
         port_a_write  : tag_porta_write ,
         port_a_address: tag_porta_addr0 ,
         port_a_data   : 16'd0           ,
@@ -1011,7 +1046,7 @@ module TageDirectionPredictor #(
 
     inst tagged_table1: TageTaggedTableMemory (
         clk           : clk             ,
-        port_a_enable : tag_porta_enable,
+        port_a_enable : tag_porta_enable1,
         port_a_write  : tag_porta_write ,
         port_a_address: tag_porta_addr1 ,
         port_a_data   : 16'd0           ,
@@ -1025,7 +1060,7 @@ module TageDirectionPredictor #(
 
     inst tagged_table2: TageTaggedTableMemory (
         clk           : clk             ,
-        port_a_enable : tag_porta_enable,
+        port_a_enable : tag_porta_enable2,
         port_a_write  : tag_porta_write ,
         port_a_address: tag_porta_addr2 ,
         port_a_data   : 16'd0           ,
@@ -1039,7 +1074,7 @@ module TageDirectionPredictor #(
 
     inst tagged_table3: TageTaggedTableMemory (
         clk           : clk             ,
-        port_a_enable : tag_porta_enable,
+        port_a_enable : tag_porta_enable3,
         port_a_write  : tag_porta_write ,
         port_a_address: tag_porta_addr3 ,
         port_a_data   : 16'd0           ,
@@ -1066,16 +1101,24 @@ module TageDirectionPredictor #(
             tag_bypass_data1_q = 16'd0;
             tag_bypass_data2_q = 16'd0;
             tag_bypass_data3_q = 16'd0;
-        } else if lookup_accept {
+        } else if lookup_accept_base {
             base_read_bypass_q = base_portb_write && (base_portb_addr == lookup_pc[11:1]);
             base_bypass_data_q = base_portb_data;
+        }
+        if lookup_accept_tag0 {
             tag_read_bypass0_q = tag_portb_write0 && (tag_portb_addr0 == lookup_index_0);
-            tag_read_bypass1_q = tag_portb_write1 && (tag_portb_addr1 == lookup_index_1);
-            tag_read_bypass2_q = tag_portb_write2 && (tag_portb_addr2 == lookup_index_2);
-            tag_read_bypass3_q = tag_portb_write3 && (tag_portb_addr3 == lookup_index_3);
             tag_bypass_data0_q = tag_portb_data0;
+        }
+        if lookup_accept_tag1 {
+            tag_read_bypass1_q = tag_portb_write1 && (tag_portb_addr1 == lookup_index_1);
             tag_bypass_data1_q = tag_portb_data1;
+        }
+        if lookup_accept_tag2 {
+            tag_read_bypass2_q = tag_portb_write2 && (tag_portb_addr2 == lookup_index_2);
             tag_bypass_data2_q = tag_portb_data2;
+        }
+        if lookup_accept_tag3 {
+            tag_read_bypass3_q = tag_portb_write3 && (tag_portb_addr3 == lookup_index_3);
             tag_bypass_data3_q = tag_portb_data3;
         }
     }
