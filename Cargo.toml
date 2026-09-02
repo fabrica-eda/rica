@@ -12,12 +12,17 @@ serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
 celox = { git = "https://github.com/celox-sim/celox.git", rev = "7bb38a0ce4d66f349d499b270d27375d7c1a01bb" }
 celox03 = { package = "celox", version = "=0.3.1" }
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "69e7ec13cfe7437b0f12c362741f7790c92940b6" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "69e7ec13cfe7437b0f12c362741f7790c92940b6" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "69e7ec13cfe7437b0f12c362741f7790c92940b6" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "69e7ec13cfe7437b0f12c362741f7790c92940b6" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d" }
+struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "eb6dd6ac184b2783e4738edd369a991131b3de7b" }
+struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "eb6dd6ac184b2783e4738edd369a991131b3de7b" }
+struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "eb6dd6ac184b2783e4738edd369a991131b3de7b" }
+struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "eb6dd6ac184b2783e4738edd369a991131b3de7b" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "7b372da4997c924b48cc09327ef006b7af753e65" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "7b372da4997c924b48cc09327ef006b7af753e65" }
+
+[patch.crates-io]
+# Temporary v0.3.1 backport of Celox PR #736. Struo still pins Celox 0.3.1;
+# remove this patch after it migrates to a release containing the fix.
+celox-sir-opt = { git = "https://github.com/celox-sim/celox.git", rev = "f5c548d5d4becb298f924ab06e1febb9eb3da064" }
 
 [profile.release]
 lto = "thin"
