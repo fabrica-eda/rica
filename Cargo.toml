@@ -16,8 +16,8 @@ struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404d
 struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
 struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
 struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "7b372da4997c924b48cc09327ef006b7af753e65" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "7b372da4997c924b48cc09327ef006b7af753e65" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "893d699f3624e8ff23e00e0264cfd87e9ed1ba2c" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "893d699f3624e8ff23e00e0264cfd87e9ed1ba2c" }
 
 [patch.crates-io]
 # Temporary v0.3.1 backport of Celox PR #736. Struo still pins Celox 0.3.1;
