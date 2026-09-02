@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "regions": {
+    "hardware_memory_corridor": {
+      "rect": [0, 0, 126, 90]
+    },
+    "cpu_predictor_corridor": {
+      "rect": [16, 24, 112, 95]
+    }
+  },
+  "require_overlap": [
+    ["hardware_memory_corridor", "cpu_predictor_corridor"]
+  ],
+  "propagate_ff_di_driver": true,
+  "rules": [
+    {
+      "region": "hardware_memory_corridor",
+      "glob": "bram_hardware_memory.*"
+    },
+    {
+      "region": "hardware_memory_corridor",
+      "glob": "ff_hardware_memory.*"
+    },
+    {
+      "region": "cpu_predictor_corridor",
+      "glob": "bram_core.branch_predictor.*"
+    },
+    {
+      "region": "cpu_predictor_corridor",
+      "glob": "bram_core.registers.*"
+    },
+    {
+      "region": "cpu_predictor_corridor",
+      "glob": "ff_core.branch_predictor.*"
+    },
+    {
+      "region": "cpu_predictor_corridor",
+      "glob": "ff_core.registers.*"
+    }
+  ]
+}
