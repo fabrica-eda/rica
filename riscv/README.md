@@ -10,6 +10,11 @@ building blocks:
 - `src/ExecuteUnit.veryl`: two-slice carry-select integer ALU
 - `src/Core.veryl`: scalar one-wide pipeline state, hazard control, forwarding,
   traps, and commit
+- `src/BranchPredictor.veryl`: prediction request/response tokens, speculative
+  history/RAS state, retirement training, and redirect recovery
+- `src/BranchTargetBuffer.veryl`: synchronous two-way target/type cache
+- `src/TageDirectionPredictor.veryl`: synchronous bimodal plus four-table TAGE
+- `src/TageTaggedTableMemory.veryl`: canonical dual-port tagged-table storage
 - `src/CsrFile.veryl`: machine-mode CSR and trap state
 - `src/PerformanceCounter64.veryl`: exact split-carry 64-bit event counter
 - `src/PerformanceEventCounters4.veryl`: four 64-bit pipeline-event counters
@@ -23,7 +28,7 @@ building blocks:
 - `src/HardwareMemory.veryl`: 256 KiB unified board BRAM running at half the
   CPU frequency
 - `src/Top.veryl`: 124.8 MHz ECP5 EVN PLL/LED bring-up wrapper
-- `verify/`: architectural, synthesis, and mapping-equivalence regressions
+- `verify/`: architectural, synthesis, and logical-mapping regressions
 
 The frozen non-overlapped `Core250` timing stress design has moved to Texo's
 `examples/core250-qor`; it is no longer the CPU architecture or QoR fixture
@@ -40,6 +45,9 @@ The current overlapped implementation has:
 - registered raw-fetch and decompression stages, with the PC advancing by two
   or four bytes and 32-bit instructions supported across an eight-byte line
   boundary
+- a three-slot head/middle/tail fetch FIFO, which absorbs the predictor's
+  registered hit path while preserving one accepted sequential instruction per
+  clock
 - CPI 1 through consecutive dependent ALU instructions using registered EX
   bypasses
 - one localized wait for load-use, shift-use, and compare-use dependencies;
@@ -56,28 +64,92 @@ The current overlapped implementation has:
 - 64-bit architectural registers and data with a 32-bit physical address
   space
 
-The architectural regression currently commits 58 instructions in 110 clocks
-(1.897 CPI), including RV64 word operations, load-use and shift-use
+### Branch prediction
+
+The scalar frontend accepts one prediction request per clock. A 128-set,
+two-way BTB supplies control type and target. Conditional direction comes from
+a 2048-entry two-bit bimodal table plus four 512-entry, 16-bit tagged TAGE
+tables with geometric history lengths 4/12/36/108. The 16-entry RAS follows
+the RISC-V x1/x5 call, return, and coroutine hints, including compressed PC+2
+links. All prediction memories read synchronously. Their response first enters
+a compact metadata decision register; BTB hits are classified into a second
+elastic output register, while the common BTB-miss/not-taken case is served
+directly from the ordered decision register. A non-taken response can accept
+its sequential replacement request on the same edge. A held taken response
+instead blocks requests, then cancels the decision and raw fall-through
+shadows on its acceptance edge; the target request can launch on the next
+edge.
+
+This FPGA-oriented TAGE variant has no `USE_ALT_ON_NA` counter: a weak tagged
+provider always selects its prediction-time true alternate (the next-longest
+tag hit, or bimodal). On an eligible misprediction, the two-bit LFSR probes
+exactly one longer-history bank independently of that row's free state. A free
+chosen row is allocated; a busy chosen row only decrements its own two-bit
+usefulness and does not fall through to another bank. Every 2^18 committed
+conditional branches, a background sweep clears alternating usefulness bits,
+so two sweeps age surviving entries to zero while preserving lookup throughput.
+Current S2 training stalls all four aging banks for one cycle. A registered
+training write owns only its target bank; pending aging read/modify/write state
+is held and then resumed, rather than committing a stale row after training.
+
+Eight tokens retain prediction-time metadata until retirement. Retire training
+is pipelined into the table write ports, with same-row forwarding preserving
+back-to-back updates. Recovery restores the committed GHR/RAS frontier and
+applies the resolved action. That frontier rule is valid only for this scalar,
+in-order pipeline, where no unresolved older control transfer remains hidden
+when a younger one recovers. A two-wide or out-of-order implementation must
+attach a predictor checkpoint to each ROB branch; it cannot reuse this single
+committed-frontier shortcut.
+
+The architectural regression currently commits 58 instructions in 118 clocks
+(2.034 CPI), including RV64 word operations, load-use and shift-use
 dependencies, and taken BEQ, JAL, and JALR redirects. The independent RV64
-comparison ELF completes 16 commits in 51 clocks. The bundled ELF suite now
-contains eight programs; all eight pass both the ordinary simulator and both
-coincident-edge serializations of the dual-clock HardwareMemory model. This
-includes the 143-commit compressed test in 234 ordinary-Core clocks and a
-dedicated counter/readback test.
+ELF suite has the following ordinary-Core results:
+
+| ELF | clocks | commits |
+| --- | ---: | ---: |
+| `alu` | 101 | 30 |
+| `compare` | 84 | 16 |
+| `compressed` | 438 | 143 |
+| `control` | 97 | 27 |
+| `memory` | 108 | 37 |
+| `performance` | 235 | 108 |
+| `shift` | 147 | 37 |
+| `system` | 546 | 180 |
+
+All eight also pass both coincident-edge serializations of the dual-clock
+HardwareMemory model. `performance` is the dedicated counter/readback test.
 
 The RV64 `mcycle` and `minstret` counters are writable at 0xB00/0xB02; the
 standard 0xC00 `cycle` and 0xC02 `instret` addresses are read-only aliases.
 Two custom machine CSRs expose implementation event counts without widening
 the four-bit internal CSR index: 0x7C0 selects a counter and 0x7C1 reads or
-writes its 64-bit value. Selector 0 is a dependency bubble, 1 is a data-memory
-wait, 2 is redirect generation/application, and 3 is a front-end bubble.
-These are control events rather than a decomposition of CPI: a front-end
-bubble can coexist with an older retirement. At most one class advances per
-clock using the controller's priority order: memory, redirect, dependency,
-then front end. `PerformanceCounter64` uses parallel 32-bit low/high increments
-for the architectural counters. `PerformanceEventCounters4` stores four words
-but selects only the active word before a shared incrementer. The event inputs
-are registered for timing; a delayed freeze preserves the final pending event.
+writes its 64-bit value.
+
+| 0x7C0 selector | board debug index | Counter |
+| ---: | ---: | --- |
+| — | 0 | `mcycle` |
+| — | 1 | `minstret` |
+| 0 | 2 | dependency bubble |
+| 1 | 3 | data-memory wait |
+| 2 | 4 | redirect generation/application |
+| 3 | 5 | empty fetch/decode front end |
+| 4 | 6 | retired conditional branch |
+| 5 | 7 | conditional direction wrong |
+| 6 | 8 | retired control transfer with a BTB miss |
+| 7 | 9 | retired return/coroutine that used the BTB fallback because the RAS was empty |
+| 8 | 10 | architectural next-PC prediction repair |
+
+The first four are control events rather than a decomposition of CPI: a
+front-end bubble can coexist with an older retirement. At most one of those
+four classes advances per clock using the controller's priority order: memory,
+redirect, dependency, then front end. Predictor events are independent and may
+overlap one another and a pipeline class. Repair counts Core recovery only;
+predictor slot discard for traps/MRET is not a repair. `PerformanceCounter64`
+uses parallel 32-bit low/high increments for the architectural and independent
+predictor counters. `PerformanceEventCounters4` stores the four pipeline words
+but selects only the active word before a shared incrementer. Every event input
+is registered for timing; a delayed freeze preserves the final pending event.
 
 The EVN has a 12 MHz reference and an integer ECP5 PLL. The board configuration
 uses `CLKI_DIV=1`, a 12 MHz phase-detector frequency, and a 624 MHz VCO.
@@ -88,22 +160,52 @@ data-sheet range, so neither is used. The board disables unused commit payload
 registers while retaining `commit_valid` for its heartbeat; the verification
 build keeps the full architectural commit trace.
 
-The production timing flow checks ordinary per-domain paths and both
-related-clock boundaries. Although memory runs at half the CPU frequency, the
-phase-aligned clocks can have an intervening CPU edge, so both directions must
-meet the 8.012 ns CPU period. The instruction payload is captured first in the
+The production timing flow checks ordinary per-domain paths and applies a
+separate one-CPU-period setup guard to both divided-clock boundaries. Although
+memory runs at half the CPU frequency, the board's zero-phase clock contract
+can have an intervening CPU edge, so both directions must meet the 8.012 ns CPU
+period derived from nextpnr's reported 124.812782 MHz constraint. The nearby
+8.013 ns figure is the rounded reciprocal of the human-readable 124.8 MHz PLL
+frequency. The guard validates the exact 5:10 PLL configuration and reported
+frequencies, but it is not general generated-clock STA or an independent
+hold/jitter/skew analysis. The instruction payload is captured first in the
 CPU domain; the wider data selection cone is first registered in the memory
 domain. The response toggle changes only with that registered data, so
 load/store completion follows the actual response rather than an assumed
 pipeline length.
 
+The current predictor-enabled physical implementation does not close this
+target. The exact current 31,450-cell board map reaches 89.598 MHz with
+official nextpnr 0.11.1 static seed 5. Its worst path runs from an automatically
+retimed `fetch_line_q[20]` bit to a tagged TAGE table `WEA`, with 2.000 ns of
+logic and 9.161 ns of routing. It also fails the one-CPU-period memory-to-CPU
+guard at 9.205/8.012 ns. Texo 0.1.6 implements the same logical map at
+-1.813 ns setup WNS and reports another retimed fetch-line capture endpoint.
+A controlled no-retime build is worse at 75.763 MHz, and moving reset scrub
+to the tagged tables' other port merely moves the bottleneck and reaches
+83.836 MHz; both experiments were reverted. These are placement-sensitive
+negative optimization results, not proof of a confirmed tool defect. No
+bitstream is generated from these failed runs; hashes and full path breakdowns
+are retained in
+[`../toolchain/measurements/2026-09-02-rica-qor.md`](../toolchain/measurements/2026-09-02-rica-qor.md).
+
 ## Verification
 
-Run RTL simulation, Struo mapping, and equivalence checks:
+Run source RTL simulation and Struo logical mapping:
 
 ```sh
 cargo run --locked --offline -p verify-riscv
 ```
+
+This checks Struo's proof-signed internal mapping transformations, but it is
+not a complete mapped functional comparison. Passing `--post-map` additionally
+runs the expensive ECP5-primitive simulation. The old deterministic
+true-dual-port rejection and 512-way read-mux overflow have focused fixes; the
+current Struo integration pin is `eb6dd6ac184b2783e4738edd369a991131b3de7b`.
+An interactive complete release-mode post-map native build was stopped after
+more than five minutes without a bounded completion signal; it is not a
+required default gate and is tracked conservatively by STR-007 in
+[`TOOLCHAIN_ISSUES.md`](../TOOLCHAIN_ISSUES.md).
 
 Build and run the independent self-checking RV64 ELF suite:
 
@@ -157,7 +259,8 @@ target/texo-git/bin/texo pnr riscv --top CompressedDecoderTimingTop \
   --output riscv/build/compressed-decoder-126.texo.json
 ```
 
-The current fixture closes at +0.607 ns setup WNS and +0.323 ns hold WNS.
+The last recorded fixture result was +0.607 ns setup WNS and +0.323 ns hold
+WNS; it is not a fresh run of the current Texo dependency.
 
 `HardwareTestTop` adds 256 KiB of direct-JTAG-loadable unified true-dual-port BRAM,
 CPU run/reset control, and a `tohost` result mailbox. The first physical port
@@ -165,7 +268,7 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction buffer exposes a halfword-aligned window spanning up
 to two adjacent lines. After timing closure, routing, and packing
-`riscv/build/riscv-hardware-test-125-texo.bit`, program it and run the eight
+`riscv/build/riscv-hardware-test-125-predictor.bit`, program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -217,10 +320,12 @@ the dummy bit used by the former two-bit bridge misaligns this full frame.
 Only a terminal `tohost` store acknowledged by the synchronous memory response
 token is captured. On that edge the store still retires; the following frozen
 snapshot therefore includes its `minstret` increment and every preceding
-memory-wait event. Response banks 5/6 expose `mcycle`, `minstret`, and the four
-pipeline-event counters. The XVC runner reads and validates all six 64-bit
-values, then prints a `METRIC` line including CPI for every ELF. Protocol
-version 0x05 identifies this ACK-gated response layout.
+memory-wait event. Response banks 5/6 expose the low/high halves of all eleven
+counters in the table above. SELECT address bits [11:8] choose the counter and
+retain the existing response-bank/bit selector in the low byte. The XVC runner
+reads and validates all eleven 64-bit values, then prints a `METRIC` line
+including CPI for every ELF. The 128-bit frame, response banks, and protocol
+version 0x05 remain unchanged.
 
 After programming once, run the two physical ACT4 catalogs with:
 
@@ -250,7 +355,7 @@ Use the same PLL binding for the Texo flow:
 
 ```sh
 cargo install --git https://github.com/fabrica-eda/texo.git \
-  --rev f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d \
+  --rev 7b372da4997c924b48cc09327ef006b7af753e65 \
   --root target/texo-git --locked texo-cli
 target/texo-git/bin/texo pnr riscv --top HardwareTestTop \
   --device LFE5UM5G-85F --package CABGA381 --speed 8 \
@@ -271,34 +376,66 @@ target/texo-git/bin/texo pnr riscv --top HardwareTestTop \
   --register-enable-fanout 'ff_core.csr_file.minstret_counter.high_q[*]=8' \
   --register-enable-fanout 'ff_core.csr_file.event_counters.low_q[*][*]=8' \
   --register-enable-fanout 'ff_core.csr_file.event_counters.high_q[*][*]=8' \
-  --output riscv/build/riscv-hardware-test-125-ce8.texo.json
+  --register-enable-fanout 'ff_core.csr_file.predictor_conditional_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_conditional_counter.high_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_direction_wrong_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_direction_wrong_counter.high_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_btb_miss_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_btb_miss_counter.high_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_ras_fallback_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_ras_fallback_counter.high_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_repair_counter.low_q[*]=8' \
+  --register-enable-fanout 'ff_core.csr_file.predictor_repair_counter.high_q[*]=8' \
+  --output riscv/build/riscv-hardware-test-125-plruclean.texo.json
 ```
 
 Generate a native bitstream only after the Texo run reports timing closure:
 
 ```sh
-target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125-ce8.texo.json \
-  --bit riscv/build/riscv-hardware-test-125-texo.bit
+target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125-plruclean.texo.json \
+  --bit riscv/build/riscv-hardware-test-125-predictor.bit
 ```
 
 The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
-`f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d` (Texo 0.1.6). The final
-`riscv-hardware-test-125-ce8.texo.json` checkpoint closes the 125 MHz-targeted
-flow (124.8 MHz PLL clock) at +11 ps setup WNS with zero setup TNS and +290 ps
-hold WNS with zero hold TNS. It contains 20,588 Struo-mapped cells, 16,771
-implemented cells, 18,497 nets, and 228,641 routed PIPs. STA checks 10,406 of
-10,926 endpoints; the 520 unchecked endpoints belong to the separate
+`7b372da4997c924b48cc09327ef006b7af753e65`: Texo 0.1.6 plus the final head of
+[PR #59](https://github.com/fabrica-eda/texo/pull/59), with every internal
+Struo dependency locked to Rica's `eb6dd6ac184b2783e4738edd369a991131b3de7b`
+integration revision. A fresh run at that exact pin implemented 30,095 cells,
+31,588 nets, and 367,697 PIPs in 271.19 seconds, but failed setup with
+-1.813 ns WNS and -0.870057 us TNS across 1,687 endpoints. Mapping equivalence
+passed; bitgen and hardware testing were correctly skipped. The physical
+checkpoint below remains attributed to the older `f8c57e09` revision.
+
+### Archived pre-predictor hardware checkpoint
+
+The WNS, utilization, hash, and board pass totals below belong to the former
+six-counter design. That artifact contains neither the current BTB/TAGE/RAS
+frontend nor the eleven-counter ABI and is not a qualification result for the
+current RTL. No timing-closed predictor-enabled qualification result,
+bitstream hash, or physical pass total is recorded here until a fresh build
+and board run complete.
+
+The recorded result for the historical checkpoint formerly written as
+`riscv-hardware-test-125-ce8.texo.json` closed the 125 MHz-targeted flow
+(124.8 MHz PLL clock) at +11 ps setup WNS with zero setup TNS and +290 ps hold
+WNS with zero hold TNS. It contained 20,588 Struo-mapped cells, 16,771
+implemented cells, 18,497 nets, and 228,641 routed PIPs. STA checked 10,406 of
+10,926 endpoints; the 520 unchecked endpoints belonged to the separate
 JTCK/JTAG shift domain, while the CPU, memory, and related-clock boundaries are
-checked. This timing model adds no separate PLL jitter or clock uncertainty,
+checked. The ignored JSON was not retained immutably and has since been reused
+by an experimental predictor build, so these metrics do not describe the file
+currently on disk. This timing model added no separate PLL jitter or clock uncertainty,
 so +11 ps is model closure rather than an independent silicon guardband.
 
 The generated `riscv-hardware-test-125-texo.bit` has SHA-256
 `e53d19fd33bf89d365fb7d4b3c2b790b163fe13296906f7dc90bbb600b2a9320`.
-On the EVN at 124.8 MHz this exact counter-enabled bitstream passes the bundled
+On the EVN at 124.8 MHz this exact historical bitstream passed the bundled
 suite 8/8, the pinned ACT4 RV64I catalog 51/51, and the pinned ACT4 RV64Zca
-catalog 32/32. Every run also passes the host's six-counter consistency checks.
-The dedicated `performance.elf` readback reports high halves
+catalog 32/32. At that pre-predictor-counter checkpoint, every run also passed
+the host's six-counter consistency checks. Its dedicated `performance.elf`
+readback reported high halves
 `[16, 8, 1, 2, 3, 4]` for mcycle, minstret, dependency, memory wait, redirect,
-and front-end empty respectively, exercising every selector and both 32-bit
-response banks in hardware.
+and front-end empty respectively. The current regression expects
+`[16, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9]` after rebuilding the bitstream, but that
+expected signature is not a claim of fresh hardware validation.

@@ -31,6 +31,30 @@ trace.
 The bundled build locates LLVM 20's `llvm-mc` and Rust's bundled `rust-lld`.
 Set `LLVM_MC` or `RUST_LLD` to override either executable.
 
+## Predictor regressions
+
+The RTL predictor tests cover the current one-request-per-clock synchronous
+pipeline: a two-way, 128-set BTB; a 2048x2 bimodal table plus four 512x16 TAGE
+tables using 4/12/36/108-bit histories; and a 16-entry x1/x5-aware RAS. They
+exercise held-response replacement rules, retire-time pipelined training and
+same-row forwarding, BTB type/target repair, compressed PC+2 links, RAS
+fallback, and recovery/discard token handling. Directed cases also cover
+same-set cold-miss victim reservation, deferred invalidation guarded by the
+physical `(set, way)` identity, same-edge replacement versus response capture,
+reset scrubbing of every inferred predictor BRAM, and refreshing a masked
+invalid fetch payload without issuing a predictor request or advancing the
+cursor.
+
+The focused predictor regression currently passes 60/60 cases: 23 model
+cases, 36 source-RTL cases, and one complete reset-scrub case. The Core
+predictor-recovery integration suite separately passes 11/11 cases.
+
+These recovery tests deliberately model the present scalar in-order core. Its
+predictor may recover from the committed GHR/RAS frontier because older control
+transfers resolve in order. Dual issue or out-of-order execution requires a
+per-branch ROB predictor checkpoint; passing this scalar suite is not evidence
+that the shortcut is safe for a two-wide core.
+
 ## EVN hardware runner
 
 The same ELF contract is supported by the direct-JTAG hardware harness:
@@ -39,8 +63,11 @@ The same ELF contract is supported by the direct-JTAG hardware harness:
 cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-tests
 ```
 
-The default command programs `build/riscv-hardware-test-125-texo.bit` and then
-runs all eight bundled tests. `--no-program` reuses the programmed image,
+After a timing-closed predictor bitstream has been generated, the default
+command programs `build/riscv-hardware-test-125-predictor.bit` and runs all
+eight bundled tests. The current predictor-enabled implementation does not
+close timing, so no current bitstream or hardware pass is claimed.
+`--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
 execution window. `--expect-tohost value` selects an exact diagnostic mailbox
 value. Positional ELF paths select individual or external tests.
@@ -52,17 +79,33 @@ The runner writes generated SVF files under `build/hardware-rv64`. A successful
 result covers the entire board path: JTAGG ER1, 128-bit command transport,
 BRAM loading, PLL/reset, RV64 execution, and `tohost` readback. The result is
 accepted only after HardwareMemory acknowledges the terminal store. That ACK
-also gates the frozen XVC snapshot of `mcycle`, `minstret`, and the dependency,
-memory-wait, redirect, and front-end event counters; the runner validates and
-prints them as `METRIC` protocol-version-0x05 records.
+also gates the frozen XVC snapshot of all eleven counters: `mcycle`, `minstret`,
+the dependency/memory-wait/redirect/front-end pipeline classes, and conditional
+resolved/direction wrong/BTB miss/RAS fallback/prediction repair events. SELECT
+address bits [11:8] choose the counter. The runner validates and prints them as
+`METRIC` records without changing the 128-bit frame, response banks 5/6, or
+protocol version 0x05.
 
-The current counter-enabled bitstream generated from
-`build/riscv-hardware-test-125-ce8.texo.json` has SHA-256
+## Historical hardware checkpoint
+
+The recorded bitstream below predates both the BTB/TAGE/RAS frontend and the
+eleven-counter readback ABI. The current host asks for eleven selectors, so the
+old image is not expected to pass the current hardware runner. Its hash and
+pass totals are retained only as provenance; fresh PNR, bitgen, and board runs
+must replace them before claiming current hardware coverage.
+
+The recorded pre-predictor-counter bitstream generated from a checkpoint
+formerly written as `build/riscv-hardware-test-125-ce8.texo.json` has SHA-256
 `e53d19fd33bf89d365fb7d4b3c2b790b163fe13296906f7dc90bbb600b2a9320`. On the
-EVN at 124.8 MHz it physically passes the bundled suite 8/8, the pinned ACT4
+EVN at 124.8 MHz it physically passed the bundled suite 8/8, the pinned ACT4
 RV64I catalog 51/51, and the pinned ACT4 RV64Zca catalog 32/32. Every ELF also
-passes the six-counter readback checks; `performance.elf` specifically proves
-all selectors and both 32-bit banks with distinct non-zero high halves.
+passed the former six-counter readback checks. That retained result predates
+the predictor counters. The ignored JSON was later reused by an experimental
+predictor P&R run and no longer matches those historical metrics. The current
+`performance.elf` regression exercises all
+eleven selectors and both 32-bit banks with distinct non-zero high halves; a
+new bitstream still requires physical validation before replacing the recorded
+hash and pass counts above.
 
 ## Architectural test integration
 
@@ -135,8 +178,10 @@ silently alter their instruction streams. They currently cover:
 - `ECALL`, `EBREAK`, `MRET`, illegal-instruction traps, and the implemented
   machine-mode CSRs through the Zicsr register and immediate forms
 - RV64 `mcycle`/`minstret`, their read-only `cycle`/`instret` aliases, and the
-  custom 0x7C0 selector/0x7C1 data window for four implementation event
-  counters: dependency, memory wait, redirect, and front-end bubble
+  custom 0x7C0 selector/0x7C1 data window for nine implementation event
+  counters: selectors 0..3 are dependency, memory wait, redirect, and
+  front-end bubble; selectors 4..8 are conditional resolved, direction wrong,
+  BTB miss, RAS fallback, and prediction repair
 - dependent ALU forwarding, a load-use dependency, and a taken redirect whose
   target load immediately feeds a dependent branch
 - explicit RV64C integer arithmetic, shifts, loads/stores, branches, jumps,
