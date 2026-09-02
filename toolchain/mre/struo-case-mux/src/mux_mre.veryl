@@ -1,0 +1,205 @@
+module CaseMux9 (
+    clk   : input  clock,
+    select: input  logic<4>,
+    data  : input  logic<576>,
+    result: output logic<64>,
+) {
+    var select_q: logic<4>;
+    var data_q  : logic<576>;
+    var selected: logic<64>;
+    var result_q: logic<64>;
+
+    always_comb {
+        case select_q {
+            4'd0: selected = data_q[63:0];
+            4'd1: selected = data_q[127:64];
+            4'd2: selected = data_q[191:128];
+            4'd3: selected = data_q[255:192];
+            4'd4: selected = data_q[319:256];
+            4'd5: selected = data_q[383:320];
+            4'd6: selected = data_q[447:384];
+            4'd7: selected = data_q[511:448];
+            4'd8: selected = data_q[575:512];
+            default: selected = 64'd0;
+        }
+        result = result_q;
+    }
+
+    always_ff (clk) {
+        select_q = select;
+        data_q   = data;
+        result_q = selected;
+    }
+}
+
+module BalancedMux9 (
+    clk   : input  clock,
+    select: input  logic<4>,
+    data  : input  logic<576>,
+    result: output logic<64>,
+) {
+    var select_q: logic<4>;
+    var data_q  : logic<576>;
+    var level0: logic<64> [8];
+    var level1: logic<64> [4];
+    var level2: logic<64> [2];
+    var selected: logic<64>;
+    var result_q: logic<64>;
+
+    always_comb {
+        if select_q[0] {
+            level0[0] = data_q[127:64];
+            level0[1] = data_q[255:192];
+            level0[2] = data_q[383:320];
+            level0[3] = data_q[511:448];
+            level0[4] = 64'd0;
+        } else {
+            level0[0] = data_q[63:0];
+            level0[1] = data_q[191:128];
+            level0[2] = data_q[319:256];
+            level0[3] = data_q[447:384];
+            level0[4] = data_q[575:512];
+        }
+        level0[5] = 64'd0;
+        level0[6] = 64'd0;
+        level0[7] = 64'd0;
+        if select_q[1] {
+            level1[0] = level0[1];
+            level1[1] = level0[3];
+            level1[2] = level0[5];
+            level1[3] = level0[7];
+        } else {
+            level1[0] = level0[0];
+            level1[1] = level0[2];
+            level1[2] = level0[4];
+            level1[3] = level0[6];
+        }
+        if select_q[2] {
+            level2[0] = level1[1];
+            level2[1] = level1[3];
+        } else {
+            level2[0] = level1[0];
+            level2[1] = level1[2];
+        }
+        if select_q[3] {
+            selected = level2[1];
+        } else {
+            selected = level2[0];
+        }
+        result = result_q;
+    }
+
+    always_ff (clk) {
+        select_q = select;
+        data_q   = data;
+        result_q = selected;
+    }
+}
+
+module CaseMux16 (
+    clk   : input  clock,
+    select: input  logic<4>,
+    data  : input  logic<1024>,
+    result: output logic<64>,
+) {
+    var select_q: logic<4>;
+    var data_q  : logic<1024>;
+    var selected: logic<64>;
+    var result_q: logic<64>;
+
+    always_comb {
+        case select_q {
+            4'd0 : selected = data_q[63:0];
+            4'd1 : selected = data_q[127:64];
+            4'd2 : selected = data_q[191:128];
+            4'd3 : selected = data_q[255:192];
+            4'd4 : selected = data_q[319:256];
+            4'd5 : selected = data_q[383:320];
+            4'd6 : selected = data_q[447:384];
+            4'd7 : selected = data_q[511:448];
+            4'd8 : selected = data_q[575:512];
+            4'd9 : selected = data_q[639:576];
+            4'd10: selected = data_q[703:640];
+            4'd11: selected = data_q[767:704];
+            4'd12: selected = data_q[831:768];
+            4'd13: selected = data_q[895:832];
+            4'd14: selected = data_q[959:896];
+            4'd15: selected = data_q[1023:960];
+            default: selected = 64'd0;
+        }
+        result = result_q;
+    }
+
+    always_ff (clk) {
+        select_q = select;
+        data_q   = data;
+        result_q = selected;
+    }
+}
+
+module BalancedMux16 (
+    clk   : input  clock,
+    select: input  logic<4>,
+    data  : input  logic<1024>,
+    result: output logic<64>,
+) {
+    var select_q: logic<4>;
+    var data_q  : logic<1024>;
+    var level0: logic<64> [8];
+    var level1: logic<64> [4];
+    var level2: logic<64> [2];
+    var selected: logic<64>;
+    var result_q: logic<64>;
+
+    always_comb {
+        if select_q[0] {
+            level0[0] = data_q[127:64];
+            level0[1] = data_q[255:192];
+            level0[2] = data_q[383:320];
+            level0[3] = data_q[511:448];
+            level0[4] = data_q[639:576];
+            level0[5] = data_q[767:704];
+            level0[6] = data_q[895:832];
+            level0[7] = data_q[1023:960];
+        } else {
+            level0[0] = data_q[63:0];
+            level0[1] = data_q[191:128];
+            level0[2] = data_q[319:256];
+            level0[3] = data_q[447:384];
+            level0[4] = data_q[575:512];
+            level0[5] = data_q[703:640];
+            level0[6] = data_q[831:768];
+            level0[7] = data_q[959:896];
+        }
+        if select_q[1] {
+            level1[0] = level0[1];
+            level1[1] = level0[3];
+            level1[2] = level0[5];
+            level1[3] = level0[7];
+        } else {
+            level1[0] = level0[0];
+            level1[1] = level0[2];
+            level1[2] = level0[4];
+            level1[3] = level0[6];
+        }
+        if select_q[2] {
+            level2[0] = level1[1];
+            level2[1] = level1[3];
+        } else {
+            level2[0] = level1[0];
+            level2[1] = level1[2];
+        }
+        if select_q[3] {
+            selected = level2[1];
+        } else {
+            selected = level2[0];
+        }
+        result = result_q;
+    }
+
+    always_ff (clk) {
+        select_q = select;
+        data_q   = data;
+        result_q = selected;
+    }
+}

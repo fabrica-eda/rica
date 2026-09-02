@@ -1,0 +1,12 @@
+[project]
+name = "struo_associative_bool_mre"
+version = "0.1.0"
+
+[build]
+clock_type = "posedge"
+reset_type = "async_low"
+sources = ["src"]
+target = { type = "directory", path = "build/veryl" }
+
+[synth]
+top = "LinearAnd16"

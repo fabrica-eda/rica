@@ -1,4 +1,5 @@
 /target/
+/.agent-artifacts/
 /i2c/build/
 /riscv/build/
 /riscv/.build/

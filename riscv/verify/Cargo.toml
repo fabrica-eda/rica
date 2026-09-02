@@ -27,3 +27,7 @@ path = "src/bin/rv64_tests.rs"
 [[bin]]
 name = "hardware-riscv-tests"
 path = "src/bin/hardware_tests.rs"
+
+[[example]]
+name = "celox-cross-always-ff-old-value"
+path = "../../toolchain/mre/celox-cross-always-ff-old-value/reproduce.rs"

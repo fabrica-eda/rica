@@ -1,0 +1,50 @@
+/// A value written in one clocked process must not be visible to a second
+/// clocked process until after both processes have sampled the old state.
+module CrossAlwaysFfOldValue (
+    clk                 : input  clock    ,
+    rst_n               : input  reset    ,
+    raw_response_capture: input  logic    ,
+    request_fire        : input  logic    ,
+    request_fallthrough : input  logic<32>,
+    current_value       : output logic<32>,
+    captured_value      : output logic<32>,
+    current_metadata    : output logic    ,
+    captured_metadata   : output logic    ,
+) {
+    var response_fallthrough_q: logic<32>;
+    var captured_q            : logic<32>;
+    var response_metadata_q   : logic    ;
+    var captured_metadata_q   : logic    ;
+
+    assign current_value     = response_fallthrough_q;
+    assign captured_value    = captured_q;
+    assign current_metadata  = response_metadata_q;
+    assign captured_metadata = captured_metadata_q;
+
+    // Deliberately keep the producer and consumer in separate always_ff
+    // processes.  Both assignments happen on the same edge in the probe.
+    always_ff (clk) {
+        if raw_response_capture {
+            captured_q          = response_fallthrough_q;
+            captured_metadata_q = response_metadata_q;
+        }
+    }
+
+    // This independent reset-bearing process mirrors the response metadata
+    // bank that accompanied response_fallthrough_q in the original circuit.
+    always_ff (clk, rst_n) {
+        if_reset {
+            response_metadata_q = 1'b0;
+        } else if request_fire {
+            response_metadata_q = 1'b1;
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            response_fallthrough_q = 32'd4;
+        } else if request_fire {
+            response_fallthrough_q = request_fallthrough;
+        }
+    }
+}
