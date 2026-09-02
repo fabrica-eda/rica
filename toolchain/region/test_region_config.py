@@ -65,4 +65,60 @@ except RegionSpecError:
 else:
     raise AssertionError("insufficient legal resource capacity was accepted")
 
+try:
+    __import__("region_spec").validate({"schema": 1, "regions": {"r": [0, 0, 1, 1]},
+                                         "rules": [{"region": "r", "glob": "*"}],
+                                         "require_overlap": None})
+except RegionSpecError:
+    pass
+else:
+    raise AssertionError("non-list require_overlap was accepted")
+
+try:
+    __import__("region_spec").validate({"schema": 1, "regions": {"r": [0, 0, 1, 1]},
+                                         "rules": [{"region": "r", "glob": "*"}],
+                                         "propagate_ff_di_driver": "false"})
+except RegionSpecError:
+    pass
+else:
+    raise AssertionError("non-boolean propagate_ff_di_driver was accepted")
+
 print("region config tests: PASS")
+
+
+# The physical A/B candidates intentionally constrain only the memory macros.
+# Check their exact hierarchy globs and the legal ECP5 bounds without requiring
+# a nextpnr Python context.
+candidate_names = [
+    "region_memory_overlap.json",
+    "region_memory_left.json",
+    "region_memory_right.json",
+]
+candidate_cells = [
+    "bram_hardware_memory.g_bank[0].mem_low_0",
+    "bram_core.branch_predictor.tage.base_memory",
+    "bram_core.registers.bank_a_0",
+]
+for candidate_name in candidate_names:
+    candidate = load(ROOT / candidate_name)
+    candidate = __import__("region_spec").validate(candidate, (0, 0, 126, 95))
+    assignments, matches = expand_exact_members(candidate_cells, candidate["rules"])
+    assert len(matches) == 3
+    assert len(assignments) == 3
+    assert all(not name.startswith("ff_") for name in assignments)
+    assert candidate["propagate_ff_di_driver"] is False
+    assert all(rule["cell_type"] == "DP16KD" for rule in candidate["rules"])
+    typed_cells = {name: "DP16KD" for name in candidate_cells}
+    expand_exact_members(candidate_cells, candidate["rules"], typed_cells)
+    try:
+        expand_exact_members(
+            candidate_cells,
+            candidate["rules"],
+            {name: "TRELLIS_FF" for name in candidate_cells},
+        )
+    except RegionSpecError:
+        pass
+    else:
+        raise AssertionError("typed region glob accepted a wrong cell type")
+
+print("region candidate tests: PASS")

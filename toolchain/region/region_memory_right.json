@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "regions": {
+    "hardware_memory_corridor": {
+      "rect": [30, 0, 126, 90]
+    },
+    "cpu_predictor_corridor": {
+      "rect": [0, 24, 96, 95]
+    }
+  },
+  "require_overlap": [
+    ["hardware_memory_corridor", "cpu_predictor_corridor"]
+  ],
+  "propagate_ff_di_driver": false,
+  "rules": [
+    {
+      "region": "hardware_memory_corridor",
+      "glob": "bram_hardware_memory.*",
+      "cell_type": "DP16KD"
+    },
+    {
+      "region": "cpu_predictor_corridor",
+      "glob": "bram_core.branch_predictor.*",
+      "cell_type": "DP16KD"
+    },
+    {
+      "region": "cpu_predictor_corridor",
+      "glob": "bram_core.registers.*",
+      "cell_type": "DP16KD"
+    }
+  ]
+}

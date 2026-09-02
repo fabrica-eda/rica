@@ -70,14 +70,16 @@ except RegionSpecError as error:
 for name, rectangle in config["regions"].items():
     ctx.createRectangularRegion(name, *rectangle)
 
-try:
-    assignments, matches = expand_exact_members(cells.keys(), config["rules"])
-except RegionSpecError as error:
-    fail(str(error))
-
 
 def cell_type(cell):
     return str(cell.type)
+
+
+try:
+    assignments, matches = expand_exact_members(
+        cells.keys(), config["rules"], {name: cell_type(cell) for name, cell in cells.items()})
+except RegionSpecError as error:
+    fail(str(error))
 
 
 def di_driver(cell):

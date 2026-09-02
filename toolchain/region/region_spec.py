@@ -70,9 +70,18 @@ def validate(config, device_bounds=None):
             raise RegionSpecError("rule %d references unknown region %r" % (index, region))
         if not isinstance(pattern, str) or not pattern:
             raise RegionSpecError("rule %d has an empty glob" % index)
-        rules.append({"region": region, "glob": pattern})
+        cell_type = rule.get("cell_type")
+        if cell_type is not None and (not isinstance(cell_type, str) or not cell_type):
+            raise RegionSpecError("rule %d has an invalid cell_type" % index)
+        normalized = {"region": region, "glob": pattern}
+        if cell_type is not None:
+            normalized["cell_type"] = cell_type
+        rules.append(normalized)
 
-    for pair in config.get("require_overlap", []):
+    raw_overlap = config.get("require_overlap", [])
+    if not isinstance(raw_overlap, list):
+        raise RegionSpecError("require_overlap must be a list")
+    for pair in raw_overlap:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise RegionSpecError("require_overlap entries must contain two region names")
         if pair[0] not in regions or pair[1] not in regions:
@@ -81,12 +90,16 @@ def validate(config, device_bounds=None):
             raise RegionSpecError(
                 "regions %s and %s do not overlap" % (pair[0], pair[1]))
 
+    propagate_ff_di_driver = config.get("propagate_ff_di_driver", True)
+    if not isinstance(propagate_ff_di_driver, bool):
+        raise RegionSpecError("propagate_ff_di_driver must be boolean")
+
     return {
         "schema": 1,
         "regions": regions,
         "rules": rules,
-        "require_overlap": [tuple(pair) for pair in config.get("require_overlap", [])],
-        "propagate_ff_di_driver": bool(config.get("propagate_ff_di_driver", True)),
+        "require_overlap": [tuple(pair) for pair in raw_overlap],
+        "propagate_ff_di_driver": propagate_ff_di_driver,
     }
 
 
@@ -102,7 +115,7 @@ def rectangle_intersection(left, right):
     return result
 
 
-def expand_exact_members(cell_names, rules):
+def expand_exact_members(cell_names, rules, cell_types=None):
     """Expand hierarchy globs and reject unmatched or split assignments."""
 
     names = [str(name) for name in cell_names]
@@ -115,6 +128,20 @@ def expand_exact_members(cell_names, rules):
         if not selected:
             raise RegionSpecError(
                 "unmatched hierarchy glob %r for region %r" % (pattern, region))
+        expected_type = rule.get("cell_type")
+        if expected_type is not None and cell_types is not None:
+            missing_type = [name for name in selected if name not in cell_types]
+            if missing_type:
+                raise RegionSpecError(
+                    "cell_types has no entry for glob %r (first: %s)" %
+                    (pattern, missing_type[:5]))
+            wrong_type = [
+                name for name in selected if str(cell_types[name]) != expected_type
+            ]
+            if wrong_type:
+                raise RegionSpecError(
+                    "glob %r for region %r matched wrong cell_type=%s (first: %s)" %
+                    (pattern, region, expected_type, wrong_type[:5]))
         matches[pattern] = selected
         for name in selected:
             previous = assignments.get(name)

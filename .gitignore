@@ -6,3 +6,4 @@
 /riscv/dependencies/
 /riscv/rica_riscv.f
 /riscv/verify/target/
+__pycache__/
