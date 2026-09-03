@@ -272,6 +272,57 @@ fn tage_partial_lookup_never_publishes_and_next_complete_lookup_replaces_it() {
 }
 
 #[test]
+fn tage_training_without_lookup_does_not_disturb_a_held_response() {
+    let mut driver = TageDriver::new();
+
+    // First publish a response and leave it unaccepted.  The following edge
+    // captures its metadata while no new lookup is present.
+    driver.lookup(1, [true, true, true, true, true, true]);
+    driver.tick();
+    driver.clear_lookup();
+    assert_eq!(driver.get("response_valid"), 1);
+    let held_token = driver.get("response_token");
+    let held_taken = driver.get("response_taken");
+
+    // Present a matching training packet without a lookup.  The collision
+    // select is allowed to change in this idle cycle, but it must not alter
+    // the response being held.  In particular, this exercises the case where
+    // the select is no longer gated by the all-bank lookup accept signal.
+    driver.set_u32("lookup_pc", 0x20);
+    driver.set_u8("classified_valid", 1);
+    driver.set_u8("classified_base_index", 0x10);
+    driver.set_u8("classified_base_entry", 0);
+    driver.set_u8("classified_provider_oh", 0b00001);
+    driver.set_u8("classified_alt_oh", 0b00001);
+    driver.set_u8("classified_lm_pred", 0);
+    driver.set_u8("classified_alt_pred", 0);
+    driver.set_u8("classified_final_pred", 0);
+    driver.set_u8("classified_hit_weak", 0);
+    driver.set_u8("classified_taken", 1);
+    assert_eq!(driver.get("train_valid"), 1);
+    assert_eq!(driver.get("train_base_write"), 1);
+
+    driver.tick();
+    assert_eq!(driver.get("response_valid"), 1);
+    assert_eq!(driver.get("response_token"), held_token);
+    assert_eq!(driver.get("response_taken"), held_taken);
+    assert_eq!(driver.get("response_metadata_captured_q"), 1);
+    assert_eq!(
+        driver.get("train_packet_base_lookup_collision_q"),
+        1,
+        "a matching training packet must capture its select even without a lookup",
+    );
+
+    // Once the held metadata is captured, both a later bubble and the
+    // transient collision-select value are invisible at the response port.
+    driver.set_u8("classified_valid", 0);
+    driver.tick();
+    assert_eq!(driver.get("response_valid"), 1);
+    assert_eq!(driver.get("response_token"), held_token);
+    assert_eq!(driver.get("response_taken"), held_taken);
+}
+
+#[test]
 fn btb_partial_lookup_cannot_mix_with_held_or_replacement_metadata() {
     let mut driver = BtbDriver::new();
 

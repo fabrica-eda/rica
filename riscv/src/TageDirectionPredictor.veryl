@@ -310,9 +310,10 @@ module TageDirectionPredictor #(
     var train_packet_tag_data1_q : logic<16>;
     var train_packet_tag_data2_q : logic<16>;
     var train_packet_tag_data3_q : logic<16>;
-    // The packet registered on a lookup-accept edge is the only queued write
-    // that can affect that lookup's response. Capture the address comparison
-    // on that edge so the BRAM response cone only sees a one-bit select.
+    // Collision selects are meaningful only while a fresh response transaction
+    // is being assembled. Capture the address comparison with every training
+    // packet so lookup_accept is not on this data path; with no fresh lookup,
+    // the select payload is don't-care and held responses use captured metadata.
     var train_packet_base_lookup_collision_q: logic;
     var train_packet_tag_lookup_collision0_q: logic;
     var train_packet_tag_lookup_collision1_q: logic;
@@ -1415,15 +1416,15 @@ module TageDirectionPredictor #(
             train_packet_tag_write1_q            = train_valid && train_tag_write1;
             train_packet_tag_write2_q            = train_valid && train_tag_write2;
             train_packet_tag_write3_q            = train_valid && train_tag_write3;
-            train_packet_base_lookup_collision_q = train_valid && train_base_write && lookup_accept
+            train_packet_base_lookup_collision_q = train_valid && train_base_write
                 && (classified_base_index == lookup_pc[11:1]);
-            train_packet_tag_lookup_collision0_q = train_valid && train_tag_write0 && lookup_accept
+            train_packet_tag_lookup_collision0_q = train_valid && train_tag_write0
                 && (classified_index0 == lookup_index_0);
-            train_packet_tag_lookup_collision1_q = train_valid && train_tag_write1 && lookup_accept
+            train_packet_tag_lookup_collision1_q = train_valid && train_tag_write1
                 && (classified_index1 == lookup_index_1);
-            train_packet_tag_lookup_collision2_q = train_valid && train_tag_write2 && lookup_accept
+            train_packet_tag_lookup_collision2_q = train_valid && train_tag_write2
                 && (classified_index2 == lookup_index_2);
-            train_packet_tag_lookup_collision3_q = train_valid && train_tag_write3 && lookup_accept
+            train_packet_tag_lookup_collision3_q = train_valid && train_tag_write3
                 && (classified_index3 == lookup_index_3);
             if train_valid {
                 train_packet_base_addr_q = classified_base_index;
