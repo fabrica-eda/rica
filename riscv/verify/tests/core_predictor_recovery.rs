@@ -550,6 +550,64 @@ fn invalid_fetch_refreshes_masked_payload_without_issuing_or_advancing() {
 }
 
 #[test]
+fn memory_wait_refreshes_only_invalid_payload_slots() {
+    let load = encode_ld(2, 0, 0);
+    let first = encode_addi(5, 0, 1);
+    let second = encode_addi(5, 0, 2);
+    let mut driver = CoreDriver::new([(0, load), (4, first)]);
+    driver.set_data_response_sequence(0);
+
+    let first_cycle = driver.step();
+    assert_eq!(first_cycle.fetch_pc, 0);
+    driver.set_instr_valid(false);
+
+    let mut first_wait_payload: Option<(u64, u64)> = None;
+    let mut refreshed = false;
+    for _ in 0..30 {
+        let cycle = driver.step();
+        if !cycle.memory_wait || !cycle.cm_is_load {
+            continue;
+        }
+
+        assert_eq!(driver.value("fetch_valid_q"), 0);
+        assert_eq!(driver.value("fetch_lookahead_valid_q"), 0);
+        assert_eq!(driver.value("fetch_tail_valid_q"), 0);
+
+        let payload = (
+            driver.value("fetch_lookahead_payload_q"),
+            driver.value("fetch_tail_payload_q"),
+        );
+        if let Some(previous) = first_wait_payload {
+            assert_ne!(
+                payload.0, previous.0,
+                "the invalid lookahead payload did not use its native CE"
+            );
+            assert_ne!(
+                payload.1, previous.1,
+                "the invalid tail payload did not use its native CE"
+            );
+            assert_eq!(
+                payload.0, payload.1,
+                "invalid payload banks did not refresh from the same input"
+            );
+            refreshed = true;
+            break;
+        } else {
+            first_wait_payload = Some(payload);
+            // The cursor is held by memory_wait. Changing the instruction at
+            // that same PC makes a refresh observable without making the
+            // invalid slot architectural.
+            driver.program.insert(cycle.fetch_pc, second);
+        }
+    }
+
+    assert!(
+        refreshed,
+        "the load never exposed a second memory-wait cycle for payload refresh"
+    );
+}
+
+#[test]
 fn learned_taken_branch_to_fallthrough_repairs_direction_history() {
     // beq x0,x0,+4 is taken, but its target is numerically identical to the
     // ordinary 32-bit fallthrough.  The JAL closes the two-instruction loop.
@@ -652,6 +710,7 @@ fn memory_wait_defers_ex_exception_discard_until_the_pipeline_advances() {
     driver.set_data_response_sequence(0);
 
     let mut held_cycles = 0;
+    let mut valid_payload_snapshot = None;
     for _ in 0..100 {
         let cycle = driver.step();
         if cycle.memory_wait && cycle.ex_valid && cycle.ex_pc == 4 && cycle.ex_exception {
@@ -661,6 +720,22 @@ fn memory_wait_defers_ex_exception_discard_until_the_pipeline_advances() {
                 !cycle.discard,
                 "held exception discarded predictor state early"
             );
+            let current_payload = (
+                driver.value("fetch_payload_q"),
+                driver.value("fetch_lookahead_payload_q"),
+                driver.value("fetch_tail_payload_q"),
+            );
+            if let Some(snapshot) = valid_payload_snapshot {
+                assert_eq!(
+                    current_payload, snapshot,
+                    "a valid fetch payload changed while memory_wait held the queue"
+                );
+            } else {
+                assert_eq!(driver.value("fetch_valid_q"), 1);
+                assert_eq!(driver.value("fetch_lookahead_valid_q"), 1);
+                assert_eq!(driver.value("fetch_tail_valid_q"), 1);
+                valid_payload_snapshot = Some(current_payload);
+            }
             if held_cycles == 3 {
                 break;
             }
