@@ -28,6 +28,8 @@ payloadの破損を再現したため、ランナーの既定を1-byteへ変更�
 CPUの実行速度を下げる回避策ではないが、ホストからのロード時間は増える。
 根本修正とJTAGクロックのタイミング検証は残る。
 [実機の測定値と検証条件](../toolchain/measurements/2026-09-05-rv64-124p8-hardware/README.md)を参照。
+[実装コミット672dea0のIPC・クロック基準記録](../toolchain/measurements/2026-09-05-rv64-ipc-clock/README.md)を
+今後の改良時の比較元とする。依存ALUループの実機IPCは0.660466、CPU設定は124.8 MHz。
 nextpnrの別配置3件は未達であり、採用する実装は上記のTexo checkpointに限定する。
 [以前のL1I比較](RV64_L1I_IMPLEMENTATION.md)の1.575倍とFmax中央値98.814 MHzは
 タイミング改修前の参考記録であり、現在の実機性能ではない。
