@@ -20,10 +20,14 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
     static BIMODAL: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT32: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
         0 => &TAGE,
         2 => &BIMODAL,
         4 => &STATIC,
+        8 => &COMPACT,
+        24 => &COMPACT32,
         _ => panic!("unknown predictor configuration: {config}"),
     };
     image.get_or_init(|| {
@@ -326,9 +330,9 @@ impl CoreDriver {
     }
 }
 
-fn direct_trained_driver(use_tage: bool) -> CoreDriver {
+fn direct_trained_driver(config: u64) -> CoreDriver {
     let mut driver =
-        CoreDriver::with_predictor([(0, encode_jal(0, 4)), (4, encode_jal(0, -4))], use_tage);
+        CoreDriver::with_config([(0, encode_jal(0, 4)), (4, encode_jal(0, -4))], config);
     for _ in 0..300 {
         let cycle = driver.step();
         if cycle.cm_valid && cycle.cm_pc == 0 && cycle.predicted_kind == KIND_DIRECT {
@@ -817,7 +821,11 @@ fn check_mismatch_during_memory_wait(config: u64) {
     let mut held_cycles = 0;
     for _ in 0..100 {
         let cycle = driver.step();
-        if cycle.memory_wait && cycle.ex_valid && cycle.ex_pc == 4 && cycle.ex_mismatch {
+        if cycle.memory_wait
+            && cycle.ex_valid
+            && cycle.ex_pc == 4
+            && (cycle.ex_mismatch || config & 8 != 0)
+        {
             held_cycles += 1;
             assert_eq!(cycle.ex_kind, KIND_CALL);
             assert!(
@@ -838,11 +846,22 @@ fn check_mismatch_during_memory_wait(config: u64) {
     driver.acknowledge_data_request();
     let release = driver.step();
     assert!(!release.memory_wait);
-    assert!(release.ex_mismatch);
-    assert!(
-        release.recover,
-        "mismatch release did not recover speculative state"
-    );
+    if config & 8 != 0 {
+        assert!(!release.ex_mismatch);
+        assert!(
+            !release.recover,
+            "compact call recovered before reaching CM"
+        );
+        let resolution = driver.step();
+        assert!(resolution.cm_valid && resolution.cm_pc == 4);
+        assert!(resolution.recover && resolution.branch_redirect && resolution.retire);
+    } else {
+        assert!(release.ex_mismatch);
+        assert!(
+            release.recover,
+            "mismatch release did not recover speculative state"
+        );
+    }
     assert!(!release.discard);
 
     let following = driver.step();
@@ -941,27 +960,34 @@ fn static_redirect_drops_wrong_path_memory_and_csr_side_effects() {
 
 #[test]
 fn stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
-    check_stale_load(true);
+    check_stale_load(0);
 }
 
 #[test]
 fn bimodal_stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
-    check_stale_load(false);
+    check_stale_load(2);
 }
 
-fn check_stale_load(use_tage: bool) {
+fn check_stale_load(config: u64) {
     // First learn a direct-control BTB entry at PC zero. Replacing that
     // instruction with a load models stale predictor state after executable
     // memory changes: the load itself owns the next-PC repair, but it must
     // still wait for its synchronous data response and retire that response.
-    let mut driver = direct_trained_driver(use_tage);
+    let mut driver = direct_trained_driver(config);
     driver.program.insert(0, encode_ld(31, 0, 0));
     let load_value = 0x0123_4567_89ab_cdef;
     let mut acknowledged = false;
 
     for _ in 0..100 {
         let cycle = driver.step();
-        if cycle.redirect_pending && cycle.cm_valid && cycle.cm_pc == 0 && cycle.cm_is_load {
+        if (if config & 8 != 0 {
+            cycle.branch_redirect
+        } else {
+            cycle.redirect_pending
+        }) && cycle.cm_valid
+            && cycle.cm_pc == 0
+            && cycle.cm_is_load
+        {
             assert!(
                 cycle.memory_wait,
                 "the load's own prediction repair bypassed its pending memory response"
@@ -998,22 +1024,29 @@ fn check_stale_load(use_tage: bool) {
 
 #[test]
 fn stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
-    check_stale_store(true);
+    check_stale_store(0);
 }
 
 #[test]
 fn bimodal_stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
-    check_stale_store(false);
+    check_stale_store(2);
 }
 
-fn check_stale_store(use_tage: bool) {
-    let mut driver = direct_trained_driver(use_tage);
+fn check_stale_store(config: u64) {
+    let mut driver = direct_trained_driver(config);
     driver.program.insert(0, encode_sd(0, 0, 0));
 
     let mut acknowledged = false;
     for _ in 0..100 {
         let cycle = driver.step();
-        if cycle.redirect_pending && cycle.cm_valid && cycle.cm_pc == 0 && cycle.cm_is_store {
+        if (if config & 8 != 0 {
+            cycle.branch_redirect
+        } else {
+            cycle.redirect_pending
+        }) && cycle.cm_valid
+            && cycle.cm_pc == 0
+            && cycle.cm_is_store
+        {
             assert!(
                 cycle.memory_wait,
                 "the repaired store did not wait for its response"
@@ -1047,21 +1080,28 @@ fn check_stale_store(use_tage: bool) {
 
 #[test]
 fn stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
-    check_stale_csr(true);
+    check_stale_csr(0);
 }
 
 #[test]
 fn bimodal_stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
-    check_stale_csr(false);
+    check_stale_csr(2);
 }
 
-fn check_stale_csr(use_tage: bool) {
-    let mut driver = direct_trained_driver(use_tage);
+fn check_stale_csr(config: u64) {
+    let mut driver = direct_trained_driver(config);
     driver.program.insert(0, encode_csrrwi(0, 0x340, 7));
 
     for _ in 0..100 {
         let cycle = driver.step();
-        if cycle.redirect_pending && cycle.cm_valid && cycle.cm_pc == 0 && cycle.cm_is_csr {
+        if (if config & 8 != 0 {
+            cycle.branch_redirect
+        } else {
+            cycle.redirect_pending
+        }) && cycle.cm_valid
+            && cycle.cm_pc == 0
+            && cycle.cm_is_csr
+        {
             assert_eq!(
                 driver.csr_value("mscratch_q"),
                 7,
@@ -1075,7 +1115,7 @@ fn check_stale_csr(use_tage: bool) {
 
 #[test]
 fn fence_i_waits_for_the_older_store_then_retires_once_and_restarts_at_fallthrough() {
-    for config in [0, 2, 4] {
+    for config in [0, 2, 4, 8, 24] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_sd(0, 0, 0)),
@@ -1122,7 +1162,7 @@ fn fence_i_waits_for_the_older_store_then_retires_once_and_restarts_at_fallthrou
 
 #[test]
 fn wrong_path_fence_i_neither_invalidates_nor_retires() {
-    for config in [0, 2, 4] {
+    for config in [0, 2, 4, 8, 24] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_branch(0, 0, 0, 8)),
@@ -1148,5 +1188,22 @@ fn wrong_path_fence_i_neither_invalidates_nor_retires() {
             }
         }
         assert!(committed_target, "configuration {config}");
+    }
+}
+
+#[test]
+fn compact_memory_wait_defers_exception_and_redirect() {
+    for config in [8, 24] {
+        check_exception_during_memory_wait(config);
+        check_mismatch_during_memory_wait(config);
+    }
+}
+
+#[test]
+fn compact_stale_predictions_preserve_load_store_and_csr_effects() {
+    for config in [8, 24] {
+        check_stale_load(config);
+        check_stale_store(config);
+        check_stale_csr(config);
     }
 }

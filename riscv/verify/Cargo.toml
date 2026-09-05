@@ -31,3 +31,7 @@ path = "src/bin/hardware_tests.rs"
 [[example]]
 name = "celox-cross-always-ff-old-value"
 path = "../../toolchain/mre/celox-cross-always-ff-old-value/reproduce.rs"
+
+[[example]]
+name = "celox-parameterized-memory"
+path = "../../toolchain/mre/celox-parameterized-memory/reproduce.rs"

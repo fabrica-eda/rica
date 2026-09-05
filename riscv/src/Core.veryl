@@ -8,7 +8,8 @@ module Core #(
     param COMMIT_PAYLOAD   : bit = 1,
     param SYNC_DATA_MEMORY : bit = 0,
     param RELOCATE_LOW_DATA: bit = 0,
-    // Bit 0 scrubs prediction RAM; bit 1 selects bimodal; bit 2 selects static.
+    // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
+    // its 32-entry variant, bit 5 disables RAS, bit 6 disables direction prediction.
     param BRANCH_PREDICTOR_CONFIG: u32 = 0,
 ) (
     clk                   : input  clock    ,
@@ -198,6 +199,10 @@ module Core #(
     var cm_store_size_q         : logic<2> ;
     var cm_is_branch_q          : logic    ;
     var cm_branch_taken_q       : logic    ;
+    var cm_linear_match_q       : logic    ;
+    var ex_kind_match_q         : logic    ;
+    var cm_taken_match_q        : logic    ;
+    var cm_untaken_match_q      : logic    ;
     var cm_branch_op_q          : logic<3> ;
     var cm_control_fallthrough_q: logic    ;
     var cm_branch_equal_q       : logic<4> ;
@@ -414,7 +419,44 @@ module Core #(
         completion: completion_bus,
     );
 
-    if (BRANCH_PREDICTOR_CONFIG & 4) == 0 :g_dynamic {
+    if (BRANCH_PREDICTOR_CONFIG & 8) != 0 :g_compact {
+        inst compact_predictor: CompactBranchPredictor #(
+            INDEX_BITS   : 6 - ((BRANCH_PREDICTOR_CONFIG >> 4) & 1),
+            USE_RAS      : (BRANCH_PREDICTOR_CONFIG & 32) == 0,
+            USE_DIRECTION: (BRANCH_PREDICTOR_CONFIG & 64) == 0,
+        ) (
+            clk                       : clk                            ,
+            rst_n                     : rst_n                          ,
+            ready                     : predictor_ready                ,
+            request_ready             : predictor_request_ready        ,
+            request_valid             : predictor_request_valid        ,
+            request_accept            : predictor_request_accept       ,
+            request_pc                : fetch_packet.pc                ,
+            request_fallthrough       : fetch_fallthrough              ,
+            response_accept           : predictor_response_accept      ,
+            response_valid            : predictor_response_valid       ,
+            response_token            : predictor_response_token       ,
+            response_kind             : predictor_response_kind        ,
+            response_taken            : predictor_response_taken       ,
+            response_next_pc          : predictor_response_next_pc     ,
+            response_btb_hit          : predictor_response_btb_hit     ,
+            response_tage_hit         : predictor_response_tage_hit    ,
+            response_ras_fallback     : predictor_response_ras_fallback,
+            retire_valid              : predictor_retire_valid_q       ,
+            retire_token              : predictor_retire_q.token       ,
+            retire_pc                 : predictor_retire_q.pc          ,
+            retire_kind               : predictor_retire_q.kind        ,
+            retire_taken              : predictor_retire_q.taken       ,
+            retire_target             : predictor_retire_q.target      ,
+            retire_fallthrough        : predictor_retire_q.fallthrough ,
+            recover_valid             : predictor_recover_valid_q      ,
+            discard_all               : predictor_discard_all_q        ,
+            conditional_resolved_event: predictor_conditional_event    ,
+            direction_wrong_event     : predictor_direction_wrong_event,
+            btb_miss_event            : predictor_btb_miss_event       ,
+            ras_fallback_event        : predictor_ras_fallback_event   ,
+        );
+    } else if (BRANCH_PREDICTOR_CONFIG & 4) == 0 :g_dynamic {
         inst branch_predictor: BranchPredictor #(
             SCRUB_ON_RESET: (BRANCH_PREDICTOR_CONFIG & 1) != 0,
             USE_TAGE      : (BRANCH_PREDICTOR_CONFIG & 2) == 0,
@@ -708,13 +750,22 @@ module Core #(
         if cm_compare_signed_q && (cm_compare_sign_a_q != cm_compare_sign_b_q) {
             cm_compare_result = cm_compare_sign_a_q;
         }
-        if (BRANCH_PREDICTOR_CONFIG & 4) != 0 {
+        if (BRANCH_PREDICTOR_CONFIG & 12) != 0 {
             case cm_branch_op_q {
                 3'b000        : cm_branch_taken = cm_branch_equal_q == 4'b1111;
                 3'b001        : cm_branch_taken = cm_branch_equal_q != 4'b1111;
                 3'b100, 3'b110: cm_branch_taken = cm_compare_result;
                 3'b101, 3'b111: cm_branch_taken = !cm_compare_result;
                 default       : cm_branch_taken = 1'b0;
+            }
+        }
+
+        if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+            // Legal branch encodings select equality/less-than with bit 2 and
+            // invert with bit 0; exceptions mask the reserved encodings.
+            cm_branch_taken = (cm_branch_equal_q == 4'b1111) ^ cm_branch_op_q[0];
+            if cm_branch_op_q[2] {
+                cm_branch_taken = cm_compare_result ^ cm_branch_op_q[0];
             }
         }
 
@@ -785,11 +836,22 @@ module Core #(
             ex_prediction_mismatch = ex_valid_q && ex_static_redirect_q && !ex_exception && !ex_is_mret_q
                 && !ex_is_fence_i_q;
         }
+        if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+            // Compare registered targets in CM; the JALR adder must not also
+            // traverse the PC comparator and the global redirect enables.
+            ex_prediction_mismatch = 1'b0;
+        }
 
         if cm_branch_taken {
             cm_actual_next_pc = cm_redirect_target_q;
         } else {
             cm_actual_next_pc = cm_fallthrough_pc_q;
+        }
+        if ((BRANCH_PREDICTOR_CONFIG & 8) != 0) && !cm_is_branch_q {
+            cm_actual_next_pc = cm_fallthrough_pc_q;
+            if cm_control_kind_q != 3'd0 {
+                cm_actual_next_pc = cm_redirect_target_q;
+            }
         }
         // A faulting branch must enter the trap vector; a future branch-side
         // access/alignment exception must never let prediction repair outrank
@@ -801,6 +863,11 @@ module Core #(
         if (BRANCH_PREDICTOR_CONFIG & 4) != 0 {
             cm_prediction_mismatch = cm_valid_q && cm_is_branch_q && !cm_exception_q && cm_branch_taken
                 && !cm_control_fallthrough_q;
+        }
+        if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+            cm_prediction_mismatch = cm_valid_q && !cm_exception_q && !cm_is_mret_q && !cm_is_fence_i_q
+                && ((!cm_is_branch_q && !cm_linear_match_q) || (cm_is_branch_q && cm_branch_taken && !cm_taken_match_q)
+                    || (cm_is_branch_q && !cm_branch_taken && !cm_untaken_match_q));
         }
         ex_redirect_valid     = ex_prediction_mismatch;
         branch_redirect_valid = cm_prediction_mismatch;
@@ -1039,9 +1106,13 @@ module Core #(
         // Capture the current CM branch candidate unconditionally.  Only the
         // adjacent registered source tag makes this bank observable, so no late
         // branch-valid enable or wide selected D path is required.
-        predictor_recover_q.token       = cm_prediction_token_q;
-        predictor_recover_q.kind        = 3'd1;
-        predictor_recover_q.taken       = cm_branch_taken;
+        predictor_recover_q.token = cm_prediction_token_q;
+        predictor_recover_q.kind  = 3'd1;
+        predictor_recover_q.taken = cm_branch_taken;
+        if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+            predictor_recover_q.kind  = cm_control_kind_q;
+            predictor_recover_q.taken = !cm_is_branch_q || cm_branch_taken;
+        }
         predictor_recover_q.fallthrough = cm_fallthrough_pc_q;
     }
 
@@ -1286,6 +1357,10 @@ module Core #(
             cm_store_size_q          = 2'b11;
             cm_is_branch_q           = 1'b0;
             cm_branch_taken_q        = 1'b0;
+            cm_linear_match_q        = 1'b0;
+            ex_kind_match_q          = 1'b0;
+            cm_taken_match_q         = 1'b0;
+            cm_untaken_match_q       = 1'b0;
             cm_branch_op_q           = 3'd0;
             cm_control_fallthrough_q = 1'b0;
             cm_branch_equal_q        = 4'b0000;
@@ -1450,13 +1525,26 @@ module Core #(
                 cm_store_size_q   = ex_store_size_q;
                 cm_is_branch_q    = ex_valid_q && ex_is_branch_q;
                 cm_branch_taken_q = 1'b0;
-                if (BRANCH_PREDICTOR_CONFIG & 4) == 0 {
+                if (BRANCH_PREDICTOR_CONFIG & 12) == 0 {
                     cm_branch_taken_q = ex_branch_taken;
                 }
                 cm_branch_op_q           = ex_branch_op_q;
                 cm_control_fallthrough_q = ex_control_fallthrough_q;
                 cm_branch_equal_q        = execute_bus.compare_equal;
                 cm_redirect_target_q     = ex_redirect_target;
+                // Register each complete path match before CM chooses direction.
+                cm_taken_match_q   = 1'b0;
+                cm_untaken_match_q = 1'b0;
+                cm_linear_match_q  = 1'b0;
+                if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+                    cm_taken_match_q   = ex_kind_match_q && ex_predicted_taken_q
+                        && (ex_predicted_next_pc_q == ex_redirect_target);
+                    cm_untaken_match_q = ex_kind_match_q && !ex_predicted_taken_q
+                        && (ex_predicted_next_pc_q == ex_fallthrough_pc_q);
+                    cm_linear_match_q  = ex_kind_match_q
+                        && ((ex_link_q && (ex_predicted_next_pc_q == ex_redirect_target))
+                            || (!ex_link_q && (ex_predicted_next_pc_q == ex_fallthrough_pc_q)));
+                }
                 if ex_is_csr_q {
                     cm_arithmetic_q = csr_bus.read_data;
                 } else {
@@ -1549,6 +1637,10 @@ module Core #(
                 ex_predicted_kind_q      = rx_predicted_kind_q;
                 ex_predicted_taken_q     = rx_predicted_taken_q;
                 ex_predicted_next_pc_q   = rx_predicted_next_pc_q;
+                ex_kind_match_q          = 1'b0;
+                if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+                    ex_kind_match_q = rx_predicted_kind_q == rx_control_kind;
+                }
                 if rx_is_compressed_q {
                     ex_fallthrough_pc_q = rx_pc_q + 32'd2;
                 } else {

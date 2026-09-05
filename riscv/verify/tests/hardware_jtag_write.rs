@@ -44,15 +44,23 @@ impl Board {
         bytes[15] = mask;
         self.set("jtag_ce1", 1);
         self.set("jtag_shift", 1);
+        let mut delayed_tdi = 0;
         for bit in 0..128 {
-            self.set("jtag_tdi", bytes[bit / 8] >> (bit % 8) & 1);
+            self.set("jtag_tdi", delayed_tdi);
             self.tick("jtag_tck");
+            delayed_tdi = bytes[bit / 8] >> (bit % 8) & 1;
             if bit % 8 == 0 {
                 self.run(20);
             }
         }
         self.set("jtag_shift", 0);
-        self.tick("jtag_update");
+        self.set("jtag_ce1", 0);
+        self.set("jtag_tdi", delayed_tdi);
+        self.set("jtag_update", 1);
+        self.tick("jtag_tck");
+        self.set("jtag_update", 0);
+        self.tick("jtag_tck");
+        self.tick("jtag_tck");
         self.run(80);
     }
 
@@ -107,7 +115,7 @@ fn mapped_board_loads_and_executes_masked_write64_payloads() {
     board.set("jtag_shift", 0);
     board.set("jtag_tdi", 0);
     board.tick("jtag_tck");
-    board.tick("jtag_update");
+    board.set("jtag_update", 0);
     board.run(10);
     board.set("pll_locked", 1);
     board.set("jtag_rst_n", 1);

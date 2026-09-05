@@ -332,6 +332,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut predictor_config = 0;
     let mut benchmarks = false;
     let mut cache_tests = false;
+    let mut predictor_tests = false;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut act4_elf_dir = project
@@ -341,20 +342,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4_enabled = None::<PathBuf>;
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
-        if argument == "--bimodal" {
-            if predictor_config == 4 {
-                return Err("--bimodal and --static-predictor are mutually exclusive".into());
+        if let Some(config) = argument.to_str().and_then(verify_riscv::predictor_option) {
+            if predictor_config != 0 && predictor_config != config {
+                return Err("select only one predictor configuration".into());
             }
-            predictor_config = 2;
-        } else if argument == "--static-predictor" {
-            if predictor_config == 2 {
-                return Err("--bimodal and --static-predictor are mutually exclusive".into());
-            }
-            predictor_config = 4;
+            predictor_config = config;
         } else if argument == "--benchmarks" {
             benchmarks = true;
         } else if argument == "--cache-tests" {
             cache_tests = true;
+        } else if argument == "--predictor-tests" {
+            predictor_tests = true;
         } else if argument == "--max-cycles" {
             let value = arguments.next().ok_or("--max-cycles requires a value")?;
             max_cycles = value
@@ -385,8 +383,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     if act4 {
-        if benchmarks || cache_tests {
-            return Err("--benchmarks/--cache-tests cannot be combined with --act4".into());
+        if benchmarks || cache_tests || predictor_tests {
+            return Err("bundled diagnostic suites cannot be combined with --act4".into());
         }
         if !requested_elfs.is_empty() {
             return Err("positional ELF paths cannot be combined with --act4".into());
@@ -402,18 +400,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             predictor_config,
         );
     }
-    if benchmarks && cache_tests {
-        return Err("--benchmarks and --cache-tests are mutually exclusive".into());
+    if [benchmarks, cache_tests, predictor_tests]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+        > 1
+    {
+        return Err("select only one bundled diagnostic suite".into());
     }
-    let elfs = if benchmarks || cache_tests {
+    let elfs = if benchmarks || cache_tests || predictor_tests {
         if !requested_elfs.is_empty() {
-            return Err(
-                "--benchmarks/--cache-tests cannot be combined with positional ELFs".into(),
-            );
+            return Err("bundled diagnostic suites cannot be combined with positional ELFs".into());
         }
         build_elfs(
             project,
-            if cache_tests {
+            if predictor_tests {
+                "rv64-predictor"
+            } else if cache_tests {
                 "rv64-cache"
             } else {
                 "rv64-benchmarks"
@@ -439,11 +442,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         println!(
             "METRIC predictor={} workload={} cycles={} commits={}",
-            match predictor_config {
-                0 => "tage",
-                2 => "bimodal",
-                _ => "static",
-            },
+            verify_riscv::predictor_name(predictor_config),
             elf.file_stem().unwrap_or_default().to_string_lossy(),
             result.cycles,
             result.commits,

@@ -97,10 +97,14 @@ module InstructionCache #(
         // Bound each carry chain; the successor tag feeds the fetch-valid
         // handshake and must not wait for a 29-bit ripple increment.
         next_line[2:0]   = 3'd0;
-        next_line[10:3]  = pc[10:3] + 8'd1;
-        next_line[18:11] = pc[18:11] + ((pc[10:3] == 8'hff) as 8);
-        next_line[26:19] = pc[26:19] + ((pc[18:3] == 16'hffff) as 8);
-        next_line[31:27] = pc[31:27] + ((pc[26:3] == 24'hffffff) as 5);
+        next_line[6:3]   = pc[6:3] + 4'd1;
+        next_line[10:7]  = pc[10:7] + ((pc[6:3] == 4'hf) as 4);
+        next_line[14:11] = pc[14:11] + ((pc[10:3] == 8'hff) as 4);
+        next_line[18:15] = pc[18:15] + ((pc[14:3] == 12'hfff) as 4);
+        next_line[22:19] = pc[22:19] + ((pc[18:3] == 16'hffff) as 4);
+        next_line[26:23] = pc[26:23] + ((pc[22:3] == 20'hfffff) as 4);
+        next_line[30:27] = pc[30:27] + ((pc[26:3] == 24'hffffff) as 4);
+        next_line[31]    = pc[31] ^ (pc[30:3] == 28'hfffffff);
         read_address[0]  = pc_line;
         // The odd current/successor bank always uses PC's row and tag.
         read_address[1] = {pc[31:4], 1'b1, 3'd0};

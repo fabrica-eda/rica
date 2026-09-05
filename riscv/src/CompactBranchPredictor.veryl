@@ -1,0 +1,478 @@
+/// Direct-mapped 32/64-entry BTB with per-entry two-bit direction prediction.
+/// Synchronous RAM lookup and registered decode accept one sequential request
+/// per clock. Taken responses cancel the younger sequential lookup. Eight
+/// tokens retain only prediction metadata until Core's in-order retirement.
+/// Recovery follows CM retirement and cancels all remaining lookup/tokens.
+module CompactBranchPredictor #(
+    param INDEX_BITS   : u32 = 6,
+    param USE_RAS      : bit = 1,
+    param USE_DIRECTION: bit = 1,
+) (
+    clk                       : input  clock    ,
+    rst_n                     : input  reset    ,
+    ready                     : output logic    ,
+    request_ready             : output logic    ,
+    request_valid             : input  logic    ,
+    request_accept            : output logic    ,
+    request_pc                : input  logic<32>,
+    request_fallthrough       : input  logic<32>,
+    response_accept           : input  logic    ,
+    response_valid            : output logic    ,
+    response_token            : output logic<3> ,
+    response_kind             : output logic<3> ,
+    response_taken            : output logic    ,
+    response_next_pc          : output logic<32>,
+    response_btb_hit          : output logic    ,
+    response_tage_hit         : output logic    ,
+    response_ras_fallback     : output logic    ,
+    retire_valid              : input  logic    ,
+    retire_token              : input  logic<3> ,
+    retire_pc                 : input  logic<32>,
+    retire_kind               : input  logic<3> ,
+    retire_taken              : input  logic    ,
+    retire_target             : input  logic<32>,
+    retire_fallthrough        : input  logic<32>,
+    recover_valid             : input  logic    ,
+    discard_all               : input  logic    ,
+    conditional_resolved_event: output logic    ,
+    direction_wrong_event     : output logic    ,
+    btb_miss_event            : output logic    ,
+    ras_fallback_event        : output logic    ,
+) {
+    const ROWS      : u32 = 1 << INDEX_BITS;
+    const TAG_BITS  : u32 = 31 - INDEX_BITS;
+    const ENTRY_BITS: u32 = TAG_BITS + 38;
+
+    #[sv("struo_memory = \"required\"")]
+    var btb_memory           : logic<ENTRY_BITS> [ROWS];
+    var table_read_q         : logic<ENTRY_BITS>       ;
+    var table_entry          : logic<ENTRY_BITS>       ;
+    var table_write          : logic                   ;
+    var table_write_index    : logic<INDEX_BITS>       ;
+    var table_write_entry    : logic<ENTRY_BITS>       ;
+    var read_bypass_q        : logic                   ;
+    var read_bypass_data_q   : logic<ENTRY_BITS>       ;
+    var read_tag_q           : logic<TAG_BITS>         ;
+    var read_fallthrough_q   : logic<32>               ;
+    var lookup_valid_q       : logic                   ;
+    var lookup_capacity      : logic                   ;
+    var lookup_transfer      : logic                   ;
+    var response_present_q   : logic                   ;
+    var decoded_kind_q       : logic<3>                ;
+    var decoded_taken_q      : logic                   ;
+    var decoded_hit_q        : logic                   ;
+    var decoded_target_q     : logic<32>               ;
+    var decoded_fallthrough_q: logic<32>               ;
+    var decoded_counter_q    : logic<2>                ;
+    var scrub_q              : logic                   ;
+    var scrub_index_q        : logic<INDEX_BITS>       ;
+    var hit                  : logic                   ;
+    var kind                 : logic<3>                ;
+    var taken                : logic                   ;
+    var target               : logic<32>               ;
+    var ras_fallback         : logic                   ;
+    var response_fire        : logic                   ;
+    var flush                : logic                   ;
+    var allocation_q         : logic<3>                ;
+    var slot_available       : logic                   ;
+    var slot_valid_q         : logic<8>                ;
+    var slot_taken_q         : logic<8>                ;
+    var slot_hit_q           : logic<8>                ;
+    var slot_ras_q           : logic<8>                ;
+    var slot_counter_q       : logic<2>          [8]   ;
+    var slot_value           : logic<6>          [8]   ;
+    var retire_mux0          : logic<6>          [4]   ;
+    var retire_mux1          : logic<6>          [2]   ;
+    var retire_value         : logic<6>                ;
+    var available_mux0       : logic             [4]   ;
+    var available_mux1       : logic             [2]   ;
+    var allocation_busy      : logic                   ;
+    var retire_slot_valid    : logic                   ;
+    var retire_slot_taken    : logic                   ;
+    var retire_slot_ras      : logic                   ;
+    var retire_slot_counter  : logic<2>                ;
+    var retire_hit           : logic                   ;
+    var train_counter        : logic<2>                ;
+    var old_counter          : logic<2>                ;
+    var last_write_valid_q   : logic                   ;
+    var last_write_pc_q      : logic<32>               ;
+    var last_write_count_q   : logic<2>                ;
+    var ras_top              : logic<32>               ;
+    var ras_empty            : logic                   ;
+
+    inst return_stack: CompactReturnStack (
+        clk                                          ,
+        rst_n                                        ,
+        predict_valid      : response_fire && USE_RAS,
+        predict_kind       : decoded_kind_q          ,
+        predict_fallthrough: decoded_fallthrough_q   ,
+        retire_valid       : retire_valid && USE_RAS,
+        retire_kind                                  ,
+        retire_fallthrough                           ,
+        restore            : flush                   ,
+        top                : ras_top                 ,
+        empty              : ras_empty               ,
+    );
+
+    always_comb {
+        flush       = recover_valid || discard_all;
+        ready       = !scrub_q;
+        table_entry = table_read_q;
+        if read_bypass_q {
+            table_entry = read_bypass_data_q;
+        }
+        hit    = lookup_valid_q && table_entry[ENTRY_BITS - 1] && (table_entry[ENTRY_BITS - 2:37] == read_tag_q);
+        kind   = 3'd0;
+        taken  = 1'b0;
+        target = read_fallthrough_q;
+        if hit {
+            kind  = table_entry[4:2];
+            taken = kind != 3'd0;
+            if kind == 3'd1 {
+                taken = USE_DIRECTION && table_entry[1];
+            }
+            if taken {
+                target = table_entry[36:5];
+            }
+        }
+        ras_fallback     = 1'b0;
+        response_next_pc = decoded_target_q;
+        if decoded_taken_q && ((decoded_kind_q == 3'd5) || (decoded_kind_q == 3'd6)) {
+            ras_fallback = !USE_RAS || ras_empty;
+            if USE_RAS && !ras_empty {
+                response_next_pc = ras_top;
+            }
+        }
+        for slot in 0..8 {
+            slot_value[slot] = {
+                slot_valid_q[slot], slot_taken_q[slot], slot_hit_q[slot], slot_ras_q[slot], slot_counter_q[slot]
+            };
+        }
+        for pair in 0..4 {
+            if retire_token[0] {
+                retire_mux0[pair] = slot_value[pair * 2 + 1];
+            } else {
+                retire_mux0[pair] = slot_value[pair * 2];
+            }
+            if allocation_q[0] {
+                available_mux0[pair] = slot_valid_q[pair * 2 + 1];
+            } else {
+                available_mux0[pair] = slot_valid_q[pair * 2];
+            }
+        }
+        for pair in 0..2 {
+            if retire_token[1] {
+                retire_mux1[pair] = retire_mux0[pair * 2 + 1];
+            } else {
+                retire_mux1[pair] = retire_mux0[pair * 2];
+            }
+            if allocation_q[1] {
+                available_mux1[pair] = available_mux0[pair * 2 + 1];
+            } else {
+                available_mux1[pair] = available_mux0[pair * 2];
+            }
+        }
+        if retire_token[2] {
+            retire_value = retire_mux1[1];
+        } else {
+            retire_value = retire_mux1[0];
+        }
+        if allocation_q[2] {
+            allocation_busy = available_mux1[1];
+        } else {
+            allocation_busy = available_mux1[0];
+        }
+        // A retired token becomes reusable on the following clock. Eight slots
+        // cover the scalar pipeline without a retire-to-fetch combinational bypass.
+        slot_available        = !allocation_busy;
+        retire_slot_valid     = retire_value[5];
+        retire_slot_taken     = retire_value[4];
+        retire_hit            = retire_value[5] && retire_value[3];
+        retire_slot_ras       = retire_value[2];
+        retire_slot_counter   = retire_value[1:0];
+        response_valid        = response_present_q && !scrub_q && !flush && slot_available;
+        response_token        = allocation_q;
+        response_kind         = decoded_kind_q;
+        response_taken        = decoded_taken_q;
+        response_btb_hit      = decoded_hit_q;
+        response_tage_hit     = 1'b0;
+        response_ras_fallback = ras_fallback;
+        response_fire         = response_valid && response_accept;
+        lookup_transfer       = lookup_valid_q && (!response_present_q || response_fire) && !flush
+            && !(response_fire && decoded_taken_q);
+        lookup_capacity       = !lookup_valid_q || lookup_transfer;
+        request_ready         = !scrub_q && !flush && lookup_capacity && !(response_fire && decoded_taken_q);
+        request_accept        = request_valid && request_ready;
+
+        old_counter = 2'b01;
+        if retire_hit {
+            old_counter = retire_slot_counter;
+        }
+        // Training uses the lookup snapshot; forward the most recent same-PC
+        // retirement so closely spaced iterations accumulate saturation.
+        if last_write_valid_q && (last_write_pc_q == retire_pc) {
+            old_counter = last_write_count_q;
+        }
+        train_counter = old_counter;
+        if retire_taken {
+            if old_counter != 2'b11 {
+                train_counter = old_counter + 2'd1;
+            }
+        } else if old_counter != 2'b00 {
+            train_counter = old_counter - 2'd1;
+        }
+        table_write       = retire_valid && ((retire_kind != 3'd0) || retire_hit);
+        table_write_index = retire_pc[INDEX_BITS:1];
+        table_write_entry = {
+            retire_kind != 3'd0, retire_pc[31:INDEX_BITS + 1], retire_target, retire_kind, train_counter
+        };
+        if scrub_q {
+            table_write       = 1'b1;
+            table_write_index = scrub_index_q;
+            table_write_entry = 0;
+        }
+
+        conditional_resolved_event = retire_valid && (retire_kind == 3'd1);
+        direction_wrong_event      = conditional_resolved_event
+            && ((retire_slot_valid && retire_slot_taken) != retire_taken);
+        btb_miss_event             = retire_valid && (retire_kind != 3'd0) && !retire_hit;
+        ras_fallback_event         = retire_valid && ((retire_kind == 3'd5) || (retire_kind == 3'd6))
+            && retire_slot_valid && retire_slot_ras;
+    }
+
+    // Speculative RAM reads into a free slot keep the I-cache handshake off
+    // EBR enables. Only request_accept creates an observable valid lookup.
+    always_ff (clk) {
+        if lookup_capacity {
+            table_read_q = btb_memory[request_pc[INDEX_BITS:1]];
+        }
+    }
+    always_ff (clk) {
+        if table_write {
+            btb_memory[table_write_index] = table_write_entry;
+        }
+    }
+    always_ff (clk) {
+        if lookup_capacity {
+            read_tag_q         = request_pc[31:INDEX_BITS + 1];
+            read_fallthrough_q = request_fallthrough;
+            read_bypass_q      = table_write && (table_write_index == request_pc[INDEX_BITS:1]);
+            read_bypass_data_q = table_write_entry;
+        }
+        if lookup_transfer {
+            decoded_kind_q        = kind;
+            decoded_taken_q       = taken;
+            decoded_hit_q         = hit;
+            decoded_target_q      = target;
+            decoded_fallthrough_q = read_fallthrough_q;
+            decoded_counter_q     = table_entry[1:0];
+        }
+        for slot in 0..8 {
+            if response_fire && (allocation_q == slot as 3) {
+                slot_taken_q[slot]   = decoded_taken_q;
+                slot_hit_q[slot]     = decoded_hit_q;
+                slot_ras_q[slot]     = ras_fallback;
+                slot_counter_q[slot] = decoded_counter_q;
+            }
+        }
+        if retire_valid && (retire_kind != 3'd0) {
+            last_write_pc_q    = retire_pc;
+            last_write_count_q = train_counter;
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            scrub_q            = 1'b1;
+            scrub_index_q      = 0;
+            lookup_valid_q     = 1'b0;
+            response_present_q = 1'b0;
+            allocation_q       = 3'd0;
+            slot_valid_q       = 8'd0;
+            last_write_valid_q = 1'b0;
+        } else {
+            if scrub_q {
+                scrub_index_q = scrub_index_q + 1;
+                if scrub_index_q == ROWS - 1 {
+                    scrub_q = 1'b0;
+                }
+            }
+            if retire_valid {
+                if retire_kind != 3'd0 {
+                    last_write_valid_q = 1'b1;
+                }
+            }
+            if response_fire {
+                allocation_q = allocation_q + 3'd1;
+            }
+            for slot in 0..8 {
+                if retire_valid && (retire_token == slot as 3) {
+                    slot_valid_q[slot] = 1'b0;
+                }
+                if response_fire && (allocation_q == slot as 3) {
+                    slot_valid_q[slot] = 1'b1;
+                }
+                if flush {
+                    slot_valid_q[slot] = 1'b0;
+                }
+            }
+            if request_accept {
+                lookup_valid_q = 1'b1;
+            } else if lookup_transfer || (response_fire && decoded_taken_q) {
+                lookup_valid_q = 1'b0;
+            }
+            if lookup_transfer {
+                response_present_q = 1'b1;
+            } else if response_fire {
+                response_present_q = 1'b0;
+            }
+            if flush {
+                response_present_q = 1'b0;
+                lookup_valid_q     = 1'b0;
+                allocation_q       = 3'd0;
+            }
+        }
+    }
+}
+
+/// Eight-entry circular speculative/committed RAS. Overflow drops the oldest
+/// address; underflow predicts through the BTB. Recovery includes the current
+/// retirement. Restore has priority over any cancelled speculative action.
+module CompactReturnStack (
+    clk                : input  clock    ,
+    rst_n              : input  reset    ,
+    predict_valid      : input  logic    ,
+    predict_kind       : input  logic<3> ,
+    predict_fallthrough: input  logic<32>,
+    retire_valid       : input  logic    ,
+    retire_kind        : input  logic<3> ,
+    retire_fallthrough : input  logic<32>,
+    restore            : input  logic    ,
+    top                : output logic<32>,
+    empty              : output logic    ,
+) {
+    var committed_q     : logic<32> [8];
+    var committed_next  : logic<32> [8];
+    var committed_sp_q  : logic<3>     ;
+    var committed_sp    : logic<3>     ;
+    var committed_n_q   : logic<4>     ;
+    var committed_n     : logic<4>     ;
+    var speculative_q   : logic<32> [8];
+    var speculative     : logic<32> [8];
+    var speculative_sp_q: logic<3>     ;
+    var speculative_sp  : logic<3>     ;
+    var speculative_n_q : logic<4>     ;
+    var speculative_n   : logic<4>     ;
+    var action_valid    : logic        ;
+    var action_kind     : logic<3>     ;
+    var action_pc       : logic<32>    ;
+    var top_candidate   : logic<32> [8];
+    var top_mux0        : logic<32> [4];
+    var top_mux1        : logic<32> [2];
+    var committed_pop   : logic        ;
+    var committed_push  : logic        ;
+    var speculative_pop : logic        ;
+    var speculative_push: logic        ;
+    var base_sp         : logic<3>     ;
+    var base_n          : logic<4>     ;
+
+    always_comb {
+        // Rotate the leaves instead of subtracting before the address mux.
+        // Explicit binary stages avoid a priority chain in the FPGA mapper.
+        top_candidate[0] = speculative_q[7];
+        for i in 1..8 {
+            top_candidate[i] = speculative_q[i - 1];
+        }
+        for pair in 0..4 {
+            if speculative_sp_q[0] {
+                top_mux0[pair] = top_candidate[pair * 2 + 1];
+            } else {
+                top_mux0[pair] = top_candidate[pair * 2];
+            }
+        }
+        for pair in 0..2 {
+            if speculative_sp_q[1] {
+                top_mux1[pair] = top_mux0[pair * 2 + 1];
+            } else {
+                top_mux1[pair] = top_mux0[pair * 2];
+            }
+        }
+        if speculative_sp_q[2] {
+            top = top_mux1[1];
+        } else {
+            top = top_mux1[0];
+        }
+        empty          = speculative_n_q == 4'd0;
+        committed_pop  = retire_valid && ((retire_kind == 3'd5) || (retire_kind == 3'd6)) && (committed_n_q != 4'd0);
+        committed_push = retire_valid && ((retire_kind == 3'd4) || (retire_kind == 3'd6));
+        committed_sp   = committed_sp_q;
+        committed_n    = committed_n_q;
+        if committed_push && !committed_pop {
+            committed_sp = committed_sp_q + 3'd1;
+            if committed_n_q != 4'd8 {
+                committed_n = committed_n_q + 4'd1;
+            }
+        } else if committed_pop && !committed_push {
+            committed_sp = committed_sp_q - 3'd1;
+            committed_n  = committed_n_q - 4'd1;
+        }
+        for i in 0..8 {
+            committed_next[i] = committed_q[i];
+            if committed_push
+                && (((committed_sp_q == i as 3) && !committed_pop)
+                    || ((committed_sp_q == (i + 1) as 3) && committed_pop)) {
+                committed_next[i] = retire_fallthrough;
+            }
+        }
+        base_sp          = speculative_sp_q;
+        base_n           = speculative_n_q;
+        action_valid     = predict_valid;
+        action_kind      = predict_kind;
+        action_pc        = predict_fallthrough;
+        speculative_pop  = action_valid && ((action_kind == 3'd5) || (action_kind == 3'd6)) && (base_n != 4'd0);
+        speculative_push = action_valid && ((action_kind == 3'd4) || (action_kind == 3'd6));
+        speculative_sp   = base_sp;
+        speculative_n    = base_n;
+        if speculative_push && !speculative_pop {
+            speculative_sp = base_sp + 3'd1;
+            if base_n != 4'd8 {
+                speculative_n = base_n + 4'd1;
+            }
+        } else if speculative_pop && !speculative_push {
+            speculative_sp = base_sp - 3'd1;
+            speculative_n  = base_n - 4'd1;
+        }
+        for i in 0..8 {
+            speculative[i] = speculative_q[i];
+            if speculative_push
+                && (((base_sp == i as 3) && !speculative_pop) || ((base_sp == (i + 1) as 3) && speculative_pop)) {
+                speculative[i] = action_pc;
+            }
+            if restore {
+                speculative[i] = committed_next[i];
+            }
+        }
+        if restore {
+            speculative_sp = committed_sp;
+            speculative_n  = committed_n;
+        }
+    }
+    always_ff (clk) {
+        for i in 0..8 {
+            committed_q[i]   = committed_next[i];
+            speculative_q[i] = speculative[i];
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            committed_sp_q   = 3'd0;
+            committed_n_q    = 4'd0;
+            speculative_sp_q = 3'd0;
+            speculative_n_q  = 4'd0;
+        } else {
+            committed_sp_q   = committed_sp;
+            committed_n_q    = committed_n;
+            speculative_sp_q = speculative_sp;
+            speculative_n_q  = speculative_n;
+        }
+    }
+}

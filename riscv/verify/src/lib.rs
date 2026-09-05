@@ -6,7 +6,7 @@ use std::path::Path;
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 17] = [
+const CORE_SOURCES: [&str; 18] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -24,7 +24,34 @@ const CORE_SOURCES: [&str; 17] = [
     "CompletionUnit.veryl",
     "Core.veryl",
     "StaticBranchPredictor.veryl",
+    "CompactBranchPredictor.veryl",
 ];
+
+/// Shared experiment selectors for the ELF and board-model runners.
+pub fn predictor_option(argument: &str) -> Option<u64> {
+    match argument {
+        "--bimodal" => Some(2),
+        "--static-predictor" => Some(4),
+        "--compact-predictor" => Some(8),
+        "--compact-predictor-32" => Some(24),
+        "--compact-predictor-no-ras" => Some(40),
+        "--compact-predictor-no-direction" => Some(72),
+        _ => None,
+    }
+}
+
+pub fn predictor_name(config: u64) -> &'static str {
+    match config {
+        0 => "tage",
+        2 => "bimodal",
+        4 => "static",
+        8 => "compact64",
+        24 => "compact32",
+        40 => "compact64-no-ras",
+        72 => "compact64-no-direction",
+        _ => "unknown",
+    }
+}
 
 fn reset_trampoline(entry: u64) -> Result<Vec<u32>, String> {
     if entry < 0x7fff_f800 {

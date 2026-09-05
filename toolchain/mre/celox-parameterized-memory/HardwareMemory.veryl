@@ -1,0 +1,339 @@
+/// 256 KiB unified hardware-test memory with a byte-wide debug loader.
+///
+/// Port A fetches instruction lines on the rising memory edge and becomes the
+/// debug write port while the CPU is held in reset. Port B performs synchronous
+/// LSU reads and writes on that same 62.4 MHz edge. Eight byte banks preserve
+/// arbitrary RV64 load/store alignment without requiring a third memory port.
+///
+/// Addresses at 0x8000_0000 map directly to the first 252 KiB of BRAM. The
+/// reset trampoline at address zero is relocated to the final 4 KiB. The Core
+/// holds each LSU request until its response. This module captures instruction,
+/// LSU, and stopped-CPU debug request bundles once in the memory domain before
+/// address translation and BRAM selection, so related-clock crossings end at
+/// simple registers instead of high-fanout BRAM address logic.
+module HardwareMemory (
+    clk                        : input  'memory clock              ,
+    rst_n                      : input  'memory reset_async_low    ,
+    cpu_instr_address          : input  'memory logic          <32>,
+    cpu_instr_line             : output 'memory logic          <64>,
+    cpu_instr_request_sequence : input  'memory logic              ,
+    cpu_instr_response_sequence: output 'memory logic              ,
+    cpu_instr_response_address : output 'memory logic          <32>,
+    cpu_instr_response_valid   : output 'memory logic              ,
+    cpu_data_address           : input  'memory logic          <32>,
+    cpu_data_read              : output 'memory logic          <64>,
+    cpu_data_write             : input  'memory logic          <64>,
+    cpu_data_mask              : input  'memory logic          <8> ,
+    cpu_data_we                : input  'memory logic              ,
+    cpu_data_request_sequence  : input  'memory logic              ,
+    cpu_data_response_sequence : output 'memory logic              ,
+    debug_write                : input  'memory logic              ,
+    debug_address              : input  'memory logic          <32>,
+    debug_data                 : input  'memory logic          <8> ,
+) {
+    const BANK_COUNT: u32 = 8;
+
+    var instr_physical     : 'memory logic<18>;
+    var instr_port_physical: 'memory logic<18>;
+    var debug_physical     : 'memory logic<18>;
+    var data_physical      : 'memory logic<18>;
+
+    var instr_read    : 'memory logic<8> [BANK_COUNT];
+    var data_bank_read: 'memory logic<8> [BANK_COUNT];
+
+    var data_read_row             : 'memory logic<15> [BANK_COUNT];
+    var data_row_base             : 'memory logic<15>             ;
+    var data_row_next             : 'memory logic<15>             ;
+    var data_row_advance          : 'memory logic<8>              ;
+    var store_bank_data           : 'memory logic<8>  [BANK_COUNT];
+    var store_bank_mask           : 'memory logic     [BANK_COUNT];
+    var store_data_request_rotated: 'memory logic<64>             ;
+    var store_mask_request_rotated: 'memory logic<8>              ;
+    var data_read_mux             : 'memory logic<64>             ;
+    var instr_port_row            : 'memory logic<14>             ;
+    var instr_port_high           : 'memory logic                 ;
+    var instr_response_high_q     : 'memory logic                 ;
+    var instr_request_address_q   : 'memory logic<32>             ;
+    var instr_request_sequence_q  : 'memory logic                 ;
+    var instr_response_sequence_q : 'memory logic                 ;
+    var instr_response_address_q  : 'memory logic<32>             ;
+    var instr_response_valid_q    : 'memory logic                 ;
+    var debug_write_q             : 'memory logic                 ;
+    var debug_address_q           : 'memory logic<32>             ;
+    var debug_data_q              : 'memory logic<8>              ;
+    var data_port_row             : 'memory logic<14> [BANK_COUNT];
+    var data_port_high            : 'memory logic     [BANK_COUNT];
+    var data_response_high_q      : 'memory logic     [BANK_COUNT];
+    var data_response_offset_q    : 'memory logic<3>              ;
+    var data_address_q            : 'memory logic<32>             ;
+    var data_write_q              : 'memory logic<64>             ;
+    var data_mask_q               : 'memory logic<8>              ;
+    var data_we_q                 : 'memory logic                 ;
+    var data_request_sequence_q   : 'memory logic                 ;
+    var data_request_handled_q    : 'memory logic                 ;
+    var data_response_sequence_q  : 'memory logic                 ;
+    var data_output_q             : 'memory logic<64>             ;
+    var data_request_new          : 'memory logic                 ;
+
+    always_comb {
+        instr_physical = instr_request_address_q[17:0];
+        if !instr_request_address_q[31] {
+            instr_physical = {6'h3f, instr_request_address_q[11:0]};
+        }
+        debug_physical = debug_address_q[17:0];
+        if !debug_address_q[31] {
+            debug_physical = {6'h3f, debug_address_q[11:0]};
+        }
+        data_physical = data_address_q[17:0];
+        if debug_write_q {
+            instr_port_physical = debug_physical;
+        } else {
+            instr_port_physical = instr_physical;
+        }
+        instr_port_row  = instr_port_physical[16:3];
+        instr_port_high = instr_port_physical[17];
+
+        data_row_base = data_physical[17:3];
+        data_row_next = data_physical[17:3] + 15'd1;
+        case data_physical[2:0] {
+            3'd0   : data_row_advance = 8'h00;
+            3'd1   : data_row_advance = 8'h01;
+            3'd2   : data_row_advance = 8'h03;
+            3'd3   : data_row_advance = 8'h07;
+            3'd4   : data_row_advance = 8'h0f;
+            3'd5   : data_row_advance = 8'h1f;
+            3'd6   : data_row_advance = 8'h3f;
+            default: data_row_advance = 8'h7f;
+        }
+        for bank in 0..BANK_COUNT {
+            data_read_row[bank] = data_row_base;
+            if data_row_advance[bank] {
+                data_read_row[bank] = data_row_next;
+            }
+        }
+
+        case data_address_q[2:0] {
+            3'd0: {
+                store_data_request_rotated = {
+                    data_write_q[63:56], data_write_q[55:48], data_write_q[47:40], data_write_q[39:32],
+                    data_write_q[31:24], data_write_q[23:16], data_write_q[15:8], data_write_q[7:0]
+                };
+                store_mask_request_rotated = data_mask_q;
+            }
+            3'd1: {
+                store_data_request_rotated = {
+                    data_write_q[55:48], data_write_q[47:40], data_write_q[39:32], data_write_q[31:24],
+                    data_write_q[23:16], data_write_q[15:8], data_write_q[7:0], data_write_q[63:56]
+                };
+                store_mask_request_rotated = {data_mask_q[6:0], data_mask_q[7]};
+            }
+            3'd2: {
+                store_data_request_rotated = {
+                    data_write_q[47:40], data_write_q[39:32], data_write_q[31:24], data_write_q[23:16],
+                    data_write_q[15:8], data_write_q[7:0], data_write_q[63:56], data_write_q[55:48]
+                };
+                store_mask_request_rotated = {data_mask_q[5:0], data_mask_q[7:6]};
+            }
+            3'd3: {
+                store_data_request_rotated = {
+                    data_write_q[39:32], data_write_q[31:24], data_write_q[23:16], data_write_q[15:8],
+                    data_write_q[7:0], data_write_q[63:56], data_write_q[55:48], data_write_q[47:40]
+                };
+                store_mask_request_rotated = {data_mask_q[4:0], data_mask_q[7:5]};
+            }
+            3'd4: {
+                store_data_request_rotated = {
+                    data_write_q[31:24], data_write_q[23:16], data_write_q[15:8], data_write_q[7:0],
+                    data_write_q[63:56], data_write_q[55:48], data_write_q[47:40], data_write_q[39:32]
+                };
+                store_mask_request_rotated = {data_mask_q[3:0], data_mask_q[7:4]};
+            }
+            3'd5: {
+                store_data_request_rotated = {
+                    data_write_q[23:16], data_write_q[15:8], data_write_q[7:0], data_write_q[63:56],
+                    data_write_q[55:48], data_write_q[47:40], data_write_q[39:32], data_write_q[31:24]
+                };
+                store_mask_request_rotated = {data_mask_q[2:0], data_mask_q[7:3]};
+            }
+            3'd6: {
+                store_data_request_rotated = {
+                    data_write_q[15:8], data_write_q[7:0], data_write_q[63:56], data_write_q[55:48],
+                    data_write_q[47:40], data_write_q[39:32], data_write_q[31:24], data_write_q[23:16]
+                };
+                store_mask_request_rotated = {data_mask_q[1:0], data_mask_q[7:2]};
+            }
+            default: {
+                store_data_request_rotated = {
+                    data_write_q[7:0], data_write_q[63:56], data_write_q[55:48], data_write_q[47:40],
+                    data_write_q[39:32], data_write_q[31:24], data_write_q[23:16], data_write_q[15:8]
+                };
+                store_mask_request_rotated = {data_mask_q[0], data_mask_q[7:1]};
+            }
+        }
+
+        data_request_new = data_request_sequence_q != data_request_handled_q;
+
+        for bank in 0..BANK_COUNT {
+            store_bank_data[bank] = store_data_request_rotated[bank step 8];
+            store_bank_mask[bank] = store_mask_request_rotated[bank];
+
+            data_port_row[bank]  = data_read_row[bank][13:0];
+            data_port_high[bank] = data_read_row[bank][14];
+        }
+
+        case data_response_offset_q {
+            3'd0   : data_read_mux = {
+                data_bank_read[7], data_bank_read[6], data_bank_read[5], data_bank_read[4], data_bank_read[3],
+                data_bank_read[2], data_bank_read[1], data_bank_read[0]
+            };
+            3'd1   : data_read_mux = {
+                data_bank_read[0], data_bank_read[7], data_bank_read[6], data_bank_read[5], data_bank_read[4],
+                data_bank_read[3], data_bank_read[2], data_bank_read[1]
+            };
+            3'd2   : data_read_mux = {
+                data_bank_read[1], data_bank_read[0], data_bank_read[7], data_bank_read[6], data_bank_read[5],
+                data_bank_read[4], data_bank_read[3], data_bank_read[2]
+            };
+            3'd3   : data_read_mux = {
+                data_bank_read[2], data_bank_read[1], data_bank_read[0], data_bank_read[7], data_bank_read[6],
+                data_bank_read[5], data_bank_read[4], data_bank_read[3]
+            };
+            3'd4   : data_read_mux = {
+                data_bank_read[3], data_bank_read[2], data_bank_read[1], data_bank_read[0], data_bank_read[7],
+                data_bank_read[6], data_bank_read[5], data_bank_read[4]
+            };
+            3'd5   : data_read_mux = {
+                data_bank_read[4], data_bank_read[3], data_bank_read[2], data_bank_read[1], data_bank_read[0],
+                data_bank_read[7], data_bank_read[6], data_bank_read[5]
+            };
+            3'd6   : data_read_mux = {
+                data_bank_read[5], data_bank_read[4], data_bank_read[3], data_bank_read[2], data_bank_read[1],
+                data_bank_read[0], data_bank_read[7], data_bank_read[6]
+            };
+            default: data_read_mux = {
+                data_bank_read[6], data_bank_read[5], data_bank_read[4], data_bank_read[3], data_bank_read[2],
+                data_bank_read[1], data_bank_read[0], data_bank_read[7]
+            };
+        }
+
+        cpu_instr_line              = {
+            instr_read[7], instr_read[6], instr_read[5], instr_read[4], instr_read[3], instr_read[2], instr_read[1],
+            instr_read[0]
+        };
+        cpu_instr_response_address  = instr_response_address_q;
+        cpu_instr_response_valid    = instr_response_valid_q;
+        cpu_instr_response_sequence = instr_response_sequence_q;
+        cpu_data_read               = data_output_q;
+        cpu_data_response_sequence  = data_response_sequence_q;
+    }
+
+    // Keep every synchronous RAM read destination scalar inside its generated
+    // lane. This preserves the canonical true-dual-port inference shape while
+    // removing all hand-unrolled byte-bank control.
+    for bank in 0..BANK_COUNT :g_bank {
+        #[sv("struo_memory = \"required\"")]
+        var mem_low: 'memory logic<8> [16384];
+        #[sv("struo_memory = \"required\"")]
+        var mem_high: 'memory logic<8> [16384];
+
+        var instr_read_low : 'memory logic<8>;
+        var instr_read_high: 'memory logic<8>;
+        var data_read_low  : 'memory logic<8>;
+        var data_read_high : 'memory logic<8>;
+
+        always_comb {
+            instr_read[bank] = instr_read_low;
+            if instr_response_high_q {
+                instr_read[bank] = instr_read_high;
+            }
+            data_bank_read[bank] = data_read_low;
+            if data_response_high_q[bank] {
+                data_bank_read[bank] = data_read_high;
+            }
+        }
+
+        always_ff (clk) {
+            if debug_write_q && (debug_physical[2:0] == bank as 3) && !instr_port_high {
+                mem_low[instr_port_row] = debug_data_q;
+            } else {
+                instr_read_low = mem_low[instr_port_row];
+            }
+        }
+        always_ff (clk) {
+            if debug_write_q && (debug_physical[2:0] == bank as 3) && instr_port_high {
+                mem_high[instr_port_row] = debug_data_q;
+            } else {
+                instr_read_high = mem_high[instr_port_row];
+            }
+        }
+        always_ff (clk) {
+            if data_request_new && data_we_q && store_bank_mask[bank] && !data_port_high[bank] {
+                mem_low[data_port_row[bank]] = store_bank_data[bank];
+            } else {
+                data_read_low = mem_low[data_port_row[bank]];
+            }
+        }
+        always_ff (clk) {
+            if data_request_new && data_we_q && store_bank_mask[bank] && data_port_high[bank] {
+                mem_high[data_port_row[bank]] = store_bank_data[bank];
+            } else {
+                data_read_high = mem_high[data_port_row[bank]];
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            instr_request_address_q   = 32'h0000_0000;
+            instr_response_address_q  = 32'h0000_0000;
+            instr_response_valid_q    = 1'b0;
+            instr_request_sequence_q  = 1'b0;
+            instr_response_sequence_q = 1'b0;
+            debug_write_q             = 1'b0;
+            debug_address_q           = 32'h0000_0000;
+            debug_data_q              = 8'h00;
+            data_address_q            = 32'h0000_0000;
+            data_write_q              = 64'h0000_0000_0000_0000;
+            data_mask_q               = 8'h00;
+            data_we_q                 = 1'b0;
+            data_request_sequence_q   = 1'b0;
+            data_request_handled_q    = 1'b0;
+            data_response_sequence_q  = 1'b0;
+            data_output_q             = 64'h0000_0000_0000_0000;
+        } else {
+            // Capture every request interface before address translation or
+            // byte-bank selection. The instruction response tag follows its
+            // request register, matching the address sampled by the BRAM one
+            // edge later; InstructionBuffer accepts variable tagged latency.
+            instr_request_address_q  = cpu_instr_address;
+            instr_request_sequence_q = cpu_instr_request_sequence;
+            debug_write_q            = debug_write;
+            debug_address_q          = debug_address;
+            debug_data_q             = debug_data;
+            data_address_q           = cpu_data_address;
+            data_write_q             = cpu_data_write;
+            data_mask_q              = cpu_data_mask;
+            data_we_q                = cpu_data_we;
+            data_request_sequence_q  = cpu_data_request_sequence;
+            // The bank/high/byte selection cone is registered in the slow
+            // domain. Publish its token on the same edge, then let Core's
+            // CPU-domain stage capture the stable bundle.
+            data_output_q             = data_read_mux;
+            data_response_sequence_q  = data_request_handled_q;
+            instr_response_address_q  = {instr_request_address_q[31:3], 3'b000};
+            instr_response_sequence_q = instr_request_sequence_q;
+            instr_response_valid_q    = !debug_write_q;
+            if data_request_new {
+                data_request_handled_q = data_request_sequence_q;
+            }
+        }
+    }
+
+    always_ff (clk) {
+        instr_response_high_q  = instr_port_physical[17];
+        data_response_offset_q = data_address_q[2:0];
+        for bank in 0..BANK_COUNT {
+            data_response_high_q[bank] = data_read_row[bank][14];
+        }
+    }
+}

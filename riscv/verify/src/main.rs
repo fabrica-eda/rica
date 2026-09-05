@@ -503,7 +503,7 @@ fn $read_value(simulator: &mut $simulator_type, name: &str) -> u64 {
 fn $function(
     simulator: &mut $simulator_type,
     label: &str,
-    expected_trace_cycles: usize,
+    expected_trace_cycles: Option<usize>,
 ) -> Result<(), Box<dyn Error>> {
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
@@ -533,7 +533,9 @@ fn $function(
     let mut committed = 0_usize;
     let mut commit_cycles = Vec::new();
     let mut elapsed_cycles = 0_usize;
-    for cycle in 0..140 {
+    // Compact BTB storage is scrubbed on reset, including in the native model.
+    let trace_limit = if expected_trace_cycles.is_some() { 140 } else { 256 };
+    for cycle in 0..trace_limit {
         let fetch_pc = $read_value(simulator, "pc");
         let fetched_instruction = expected
             .iter()
@@ -642,12 +644,16 @@ fn $function(
     }
     // Dynamic prediction includes its registered ingress and state repairs.
     // The static response is shorter and repairs only a wrong next PC.
-    // The caller selects the measured 126/105-clock regression contract.
-    if elapsed_cycles != expected_trace_cycles {
-        return Err(format!(
-            "{label}: architectural trace took {elapsed_cycles} clocks, expected exactly {expected_trace_cycles}"
-        )
-        .into());
+    // Preserve the established 126/105-clock contracts for those predictors.
+    // Experimental predictors still check every retirement and execution
+    // latency above, without inheriting another frontend's cycle count.
+    if let Some(expected) = expected_trace_cycles {
+        if elapsed_cycles != expected {
+            return Err(format!(
+                "{label}: architectural trace took {elapsed_cycles} clocks, expected exactly {expected}"
+            )
+            .into());
+        }
     }
     if $read_value(simulator, "halted") != 0 || $read_value(simulator, "debug_x31") != 0x55 {
         return Err(format!("{label}: final architectural signature is invalid").into());
@@ -899,7 +905,15 @@ fn verify_hardware_memory_elf(
         .collect::<Vec<_>>()
         .join("\n");
     Err(format!(
-        "hardware-memory RTL {label} timed out after {commits} commits and {reset_entries} reset entries\n{recent}"
+        "hardware-memory RTL {label} timed out after {commits} commits and {reset_entries} reset entries; pc={:#x}, instruction={:#x}, instruction_valid={}, memory_address={:#x}, memory_line={:#x}, memory_valid={}, request_sequence={}, response_sequence={}\n{recent}",
+        value_native(&mut simulator, "pc"),
+        value_native(&mut simulator, "instruction"),
+        value_native(&mut simulator, "instruction_valid"),
+        value_native(&mut simulator, "memory_instr_address"),
+        value_native(&mut simulator, "memory_instr_line"),
+        value_native(&mut simulator, "memory_instr_response_valid"),
+        value_native(&mut simulator, "memory_instr_request_sequence"),
+        value_native(&mut simulator, "memory_instr_response_sequence"),
     )
     .into())
 }
@@ -967,7 +981,15 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
     let mut simulator = SimulatorBuilder::new(&source, "JtagDebugTransport").build_native()?;
     let clk = simulator.event("clk");
     let jtag_tck = simulator.event("jtag_tck");
-    let jtag_update = simulator.event("jtag_update");
+    let jtag_update = simulator.signal("jtag_update");
+    let update =
+        |simulator: &mut celox::Simulator<celox::NativeBackend>| -> Result<(), Box<dyn Error>> {
+            for level in [1_u8, 0, 0] {
+                simulator.modify(|io| io.set(jtag_update, level))?;
+                simulator.tick(jtag_tck)?;
+            }
+            Ok(())
+        };
     let rst_n = simulator.signal("rst_n");
     let jtag_rst_n = simulator.signal("jtag_rst_n");
     let jtag_tdi = simulator.signal("jtag_tdi");
@@ -986,6 +1008,7 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
         io.set(rst_n, 0_u8);
         io.set(jtag_rst_n, 0_u8);
         io.set(jtag_tdi, 0_u8);
+        io.set(jtag_update, 0_u8);
         io.set(jtag_shift, 0_u8);
         io.set(jtag_ce1, 0_u8);
         io.set(jtag_ce2, 0_u8);
@@ -993,7 +1016,6 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
         io.set(status_bit, 1_u8);
     })?;
     simulator.tick(jtag_tck)?;
-    simulator.tick(jtag_update)?;
     simulator.tick(clk)?;
     simulator.modify(|io| {
         io.set(rst_n, 1_u8);
@@ -1019,10 +1041,9 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
     frame[7..15].copy_from_slice(&0x8877_6655_4433_2211_u64.to_le_bytes());
     frame[15] = 0xa5;
 
-    // Model the ECP5 JTAGG registers explicitly: JTDI is one TCK late, and
-    // registered JSHIFT remains asserted on the trailing TAP transition. The
-    // host sends exactly 128 physical bits; that transition delivers bit 127
-    // to this post-JTAGG transport before JUPDATE captures the mailbox.
+    // At falling JTCK, JTAGG's JTDI is one cycle behind its controls.
+    // The registered shift enable extends reception through the trailing
+    // transition; UPDATE is sampled as data in the same clock domain.
     simulator.modify(|io| {
         io.set(jtag_shift, 1_u8);
         io.set(jtag_ce1, 1_u8);
@@ -1033,13 +1054,13 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
         simulator.tick(jtag_tck)?;
         delayed_tdi = frame[physical_bit / 8] & (1 << (physical_bit % 8)) != 0;
     }
-    simulator.modify(|io| io.set(jtag_tdi, u8::from(delayed_tdi)))?;
-    simulator.tick(jtag_tck)?;
     simulator.modify(|io| {
+        io.set(jtag_tdi, u8::from(delayed_tdi));
         io.set(jtag_shift, 0_u8);
         io.set(jtag_ce1, 0_u8);
     })?;
-    simulator.tick(jtag_update)?;
+    simulator.tick(jtag_tck)?;
+    update(&mut simulator)?;
 
     let expected_low = BigUint::from(u64::from_le_bytes(frame[0..8].try_into()?));
     let expected_high = BigUint::from(u64::from_le_bytes(frame[8..16].try_into()?));
@@ -1072,12 +1093,12 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Synchronize the consumed request back to TCK, then update an unrelated
+    // Let the UPDATE edge detector clear, then update an unrelated
     // DR chain (neither CE1 nor CE2). It must not reuse the retained ER1 arm.
     for _ in 0..4 {
         simulator.tick(jtag_tck)?;
     }
-    simulator.tick(jtag_update)?;
+    update(&mut simulator)?;
     for _ in 0..6 {
         simulator.tick(clk)?;
         if simulator.get(command_valid) != BigUint::from(0_u8) {
@@ -1098,7 +1119,7 @@ fn verify_direct_jtag_transport(project: &Path) -> Result<(), Box<dyn Error>> {
         io.set(jtag_shift, 0_u8);
         io.set(jtag_ce2, 0_u8);
     })?;
-    simulator.tick(jtag_update)?;
+    update(&mut simulator)?;
     for _ in 0..6 {
         simulator.tick(clk)?;
         if simulator.get(command_valid) != BigUint::from(0_u8) {
@@ -1393,20 +1414,15 @@ fn mapped_critical_sinks(cells: &[Ecp5Cell]) -> Vec<(usize, String)> {
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args().collect::<Vec<_>>();
     let rtl_only = arguments.iter().any(|argument| argument == "--rtl-only");
-    let bimodal = arguments.iter().any(|argument| argument == "--bimodal");
-    let static_prediction = arguments
+    let configs = arguments
         .iter()
-        .any(|argument| argument == "--static-predictor");
-    if bimodal && static_prediction {
+        .filter_map(|arg| verify_riscv::predictor_option(arg))
+        .collect::<std::collections::BTreeSet<_>>();
+    if configs.len() > 1 {
         return Err("select only one predictor configuration".into());
     }
-    let predictor_config = if static_prediction {
-        4
-    } else if bimodal {
-        2
-    } else {
-        0
-    };
+    let predictor_config = configs.first().copied().unwrap_or(0);
+    let static_prediction = predictor_config == 4;
     let cache_option = arguments.iter().position(|arg| arg == "--icache-kib");
     let icache_index_bits = if let Some(index) = cache_option {
         match arguments.get(index + 1).map(String::as_str) {
@@ -1438,7 +1454,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .skip_while(|(_, argument)| *argument != "--hardware-memory-rtl")
             .skip(1)
             .filter(|(index, argument)| {
-                !matches!(argument.as_str(), "--bimodal" | "--static-predictor")
+                verify_riscv::predictor_option(argument).is_none()
                     && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
             })
             .map(|(_, argument)| PathBuf::from(argument))
@@ -1454,6 +1470,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("predictor selection requires --rtl-only or --hardware-memory-rtl; use nextpnr-riscv HardwareBimodalTestTop or HardwareStaticTestTop for mapping".into());
     }
     verify_direct_jtag_transport(project)?;
+    if arguments.iter().any(|argument| argument == "--jtag-only") {
+        return Ok(());
+    }
     verify_register_file(project)?;
     if register_file_only {
         return Ok(());
@@ -1466,7 +1485,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     verify_native(
         &mut rtl,
         "Celox RTL native",
-        if static_prediction { 105 } else { 126 },
+        if predictor_config & 8 != 0 {
+            None
+        } else {
+            Some(if static_prediction { 105 } else { 126 })
+        },
     )?;
     let mut board_rtl = SimulatorBuilder::new(&core_source, "Core")
         .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
@@ -1536,7 +1559,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Celox post-map native build completed in {:?}",
         post_map_native_started.elapsed()
     );
-    verify_post_map(&mut post_map, "Celox post-map simulation", 126)?;
+    verify_post_map(&mut post_map, "Celox post-map simulation", Some(126))?;
     println!(
         "Struo: {} nodes, {} registers, {} ECP5 cells; equivalence passed",
         synthesized.netlist.nodes().len(),

@@ -997,19 +997,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut arguments = env::args_os().skip(1);
     let mut run_tck = DEFAULT_RUN_TCK;
-    // The qualified 4 KiB board image corrupts some upper WRITE64 payload
-    // bits on silicon. Single-byte masked writes pass the same probes while
-    // preserving the CPU/PLL configuration; wider writes require an explicit
-    // selection until the transport is repaired and qualified again.
-    let mut write_bytes = 1_usize;
+    // The falling-edge JTAG image passed all 100 physical ELFs and all 48
+    // former WRITE64 corruption probes with eight-byte masked writes.
+    let mut write_bytes = 8_usize;
     let mut expected_tohost = 1_u64;
     let mut program = true;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
-    // Use the exact 124.8 MHz / 4 KiB image physically verified with byte
-    // writes. Other implementations must be selected with --bitstream.
-    let mut bitstream = project.join("build/riscv-hardware-cached-4k-124p8-20260905-ce8.bit");
+    // CPU/memory stay at 124.8/62.4 MHz. This exact image repairs the JTAG
+    // boundary race; qualification is recorded in RV64_JTAG_FIX.md.
+    let mut bitstream =
+        project.join("build/riscv-hardware-compact-4k-124p8-20260906-native-jtck.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

@@ -1,0 +1,26 @@
+[
+  {
+    "cell": "ff_board.jtag_debug_transport.shift_high[63]",
+    "data_pin": "DI",
+    "reason": "no_synchronous_launch",
+    "justification": "JTAGG JTDI launch is uncharacterized. Falling-edge receive and one-cycle control alignment are checked by mapped RTL and real-board 128-bit scan/WRITE64 regressions; this is not numerical boundary STA."
+  },
+  {
+    "cell": "ff_board.jtag_debug_transport.shift_enable_q",
+    "data_pin": "DI",
+    "reason": "no_synchronous_launch",
+    "justification": "JTAGG CE1/SHIFT launch is uncharacterized. Registered falling-edge control is checked by mapped RTL and physical JTAG frame regressions; this is not numerical boundary STA."
+  },
+  {
+    "cell": "ff_board.jtag_debug_transport.update_q",
+    "data_pin": "DI",
+    "reason": "no_synchronous_launch",
+    "justification": "JTAGG UPDATE launch is uncharacterized. Falling-edge sampling and one-shot update acceptance are verified by RTL and real-board regressions; UPDATE is not a fabric clock."
+  },
+  {
+    "cell": "ff_board.jtag_debug_transport.request_toggle_meta_q",
+    "data_pin": "DI",
+    "reason": "no_synchronous_launch",
+    "justification": "First stage of the JTCK-to-CPU request toggle synchronizer. The source holds the bundled mailbox, the next CPU stage consumes the synchronized toggle, and reset/relock behavior is checked separately."
+  }
+]
