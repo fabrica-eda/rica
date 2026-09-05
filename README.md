@@ -5,31 +5,41 @@ the I2C block used to establish host-driven hardware debug under `i2c/`.
 
 The ECP5 RV64 architecture comparison, measurements, and implementation plan
 are recorded in [the architecture plan](riscv/RV64_ARCHITECTURE_PLAN.md).
-The current development build is scalar RV64 with static prediction and a
-4 KiB instruction cache (`HardwareCached4KTestTop`). It now closes Texo's
-routed timing at the mandatory 124.8/62.4 MHz PLL clocks: +64 ps setup and
-+290 ps hold. Four RTL-model diagnostics show a 1.470x geometric-mean cycle-count
-speedup, with 140 Rust tests and 1,078 ELF model runs passing.
-The [124.8 MHz report](riscv/RV64_124P8_TIMING.md) records the bitstream,
-reproduction commands, capacity limits, and evidence. The exact image has now
-passed **98/98 physical ELF tests and eleven counters per test**, using
-one-byte JTAG writes through the Windows D2XX bridge. Eight-byte writes have
-a reproducible payload fault; the runner defaults to the verified byte-write
-path. See the [physical verification record](toolchain/measurements/2026-09-05-rv64-124p8-hardware/README.md).
+The current development build is scalar RV64 with a **64-entry BTB, two-bit
+direction prediction, eight-entry RAS and 4 KiB instruction cache**
+(`HardwareCompact4KTestTop`). The current image retains the mandatory
+**124.8/62.4 MHz PLL clocks**, with **+1 ps setup / +290 ps hold** and
+14,406 setup/hold checks, including 515 in the JTAG domain, in normal STA.
+It passed **100/100 distinct physical ELFs**, including **118 executions**
+with repeats and eleven counter checks per execution, through Windows D2XX.
+
+The JTAG receiver now samples on falling edges and registers the control
+boundary. This repairs the placement-dependent zero-response failure and the
+former WRITE64 corruption. The hardware runner defaults to the native-JTCK-STA
+image and **eight-byte writes**; the updated default also passed the basic eight ELFs.
+CPU performance
+remains within one cycle of the previous compact image on the original four
+diagnostics, whose speedup over the static image was about **1.223×**.
+The new timing-margin and LSU candidates failed routed timing and were not
+adopted. Their implementations, results and next steps are recorded in the
+[JTCK/LSU report](riscv/RV64_JTCK_LSU_PLAN.md).
+See the [earlier cause, repair and physical results](riscv/RV64_JTAG_FIX.md),
+[architecture/performance study](riscv/RV64_COMPACT_PREDICTOR.md), and
+[repair evidence](toolchain/measurements/2026-09-06-rv64-jtag-zero/README.md).
+The [static 4 KiB record](riscv/RV64_124P8_TIMING.md) remains the baseline.
 
 The former fifteen-cycle 250 MHz `Core250` design was a useful synthesis,
 placement, routing, BRAM, PLL, JTAGG, setup, and hold stress case, but it is
 not the CPU architecture being developed here. That frozen design and its
 structural regression have moved to Texo's `examples/core250-qor`.
 
-Run the active CPU's source RTL, synthesis, and logical-mapping regression with:
+Run the selected predictor's source RTL regression with:
 
 ```sh
-cargo run --locked --offline -p verify-riscv
+cargo run --locked --offline -p verify-riscv --bin verify-riscv -- --rtl-only --compact-predictor
 ```
 
-The nominal CPU target is 125 MHz. The data-sheet-valid board PLL runs at
-124.8 MHz. Performance work is measured as instruction
+The mandatory board CPU PLL runs at 124.8 MHz. Performance work is measured as instruction
 throughput, not Fmax alone: consecutive dependent ALU instructions sustain one
 instruction per clock through registered EX bypasses, while load-, shift-, and
 compare-use dependencies wait only for their producing stage. Board BRAM runs
@@ -71,7 +81,7 @@ claimed for that checkpoint; the retained hashes and path breakdowns are in
 
 ### Archived pre-predictor hardware checkpoint
 
-The following result predates the current BTB/TAGE/RAS frontend and eleven-
+The following result predates the predictor frontend and eleven-
 counter readback ABI. It is retained as provenance, not as timing or hardware
 qualification of the current RTL.
 
@@ -89,7 +99,7 @@ generated
 On the EVN at 124.8 MHz this exact historical bitstream passed all eight
 bundled ELFs, all 51 pinned ACT4 RV64I ELFs, and all 32 pinned ACT4 RV64Zca
 ELFs. The then-current hardware runner also read and validated its six 64-bit
-performance counters after every ELF. The current static/L1I image has separate
+performance counters after every ELF. The current compact/L1I image has separate
 timing and physical evidence linked above, including its byte-write loading
 requirement; the historical results do not qualify its eight-byte JTAG path.
 

@@ -25,11 +25,13 @@ tool. Unconfirmed observations remain excluded until a reproducer is retained.
 | STR-011 | Struo ECP5 mapper | [PR #86](https://github.com/fabrica-eda/struo/pull/86) validated (`eff404d`) and pinned through Texo PR #60 (`893d699`) | integration revision `eb6dd6a` and upstream before PR #86 | INIT-independent dynamic LUT inputs create false timing arcs and unnecessary routing load |
 | CEL-001 | Celox native x86 backend | Historical fix; original Rica MRE/log not retained | before PR #712 | SSA reload materialization could exhaust the register allocator |
 | CEL-002 | Celox SIR optimizer | [PR #736](https://github.com/celox-sim/celox/pull/736) open (`c005d316`); current workflow pins validated 0.3.1 [backport `f5c548d5`](https://github.com/celox-sim/celox/commit/f5c548d5d4becb298f924ab06e1febb9eb3da064) | Celox 0.3.1 and upstream before `c005d316` | Rejecting a >128-bit concat fold can discard operands and make native verification fail |
+| CEL-003 | Celox source-memory simulation | Counterexample retained; component/root cause unresolved | `7bb38a0` and native control at local `4342678` | Adding an unused module parameter shifts consecutive debug bytes by one write |
 | TEX-001 | Texo ECP5 STA | Fixed upstream/current pin | before `bcc53c6` | Corner, clock-edge, and margin policy did not correlate with nextpnr |
 | TEX-002 | Texo hold ECO | Fixed upstream/current pin | before `299836dd` | A pin-only FF rebinding could leave an invalid frozen route |
 | TEX-003 | Texo implementation | Fixed upstream/current pin | before `522d7caf` | Successful P&R could emit a functionally wrong configuration |
 | TEX-004 | Texo placer | Fixed upstream/current pin | before `ed36807` | Critical sinks could disappear from high-fanout placement edges |
 | TEX-005 | Texo bitgen | Fixed upstream/current pin | before `a59f787` | Bitgen emitted a nonexistent `JTAG.MODE` enum |
+| TEX-006 | Texo timing release gate | [PR #61](https://github.com/fabrica-eda/texo/pull/61) and internal-clock [PR #62](https://github.com/fabrica-eda/texo/pull/62) merged; native JTCK physically validated | exercised `7b372da` and upstream main `049b4be` | Positive checked-path slack allowed bitgen with unconstrained JTAG endpoints |
 | NPNR-001 | nextpnr timing reports | Local one-CPU-period setup-budget guard; generated-clock STA still missing | historically observed with 0.6; locally reproduced with official 0.11.1 | Related divided-clock crossings are absent from the ordinary per-domain pass/fail result |
 | RICA-001 | Rica nextpnr report validator | Fixed locally | before this work | Assuming exactly two global clocks rejected current reports containing two JTAG clocks |
 
@@ -570,6 +572,23 @@ all pass. Upstream #736 is still open. The complete release-mode full-design
 post-map gate remains pending and is not evidence for or against this isolated
 width fix.
 
+## CEL-003 — Unused module parameter changes memory behavior
+
+The [retained source/harness](toolchain/mre/celox-parameterized-memory/README.md)
+adds one unused parameter to the original `HardwareMemory`, with no other RTL
+change. Native simulation passes the original consecutive-byte stream but
+returns the following write's byte at each address in the parameterized form.
+WASM also disagrees with the expected stream, including on the original source.
+This is a confirmed simulation discrepancy; frontend, scheduling and backend
+ownership remain unresolved. Updating to the available local Celox 0.4.4 tree
+did not fix the native failure, and the dependency change was discarded.
+
+The LSU prototype is archived and supplies no CPU-model IPC result. The normal
+31 RTL files match the physical native-JTCK baseline, whose exact bitstream
+passed 100 distinct ELFs. A native regression protects its consecutive-byte
+loader behavior; the failing parameterized circuit is an explicit reproducer,
+not an ignored qualification test or an adopted CPU change.
+
 ## TEX-001 — ECP5 STA did not correlate with nextpnr
 
 **Observed.** Texo and nextpnr could report materially different setup margins
@@ -630,6 +649,50 @@ though ER1/ER2 were the intended user-chain controls.
 `JTAG.ER1 ENABLED` and `JTAG.ER2 ENABLED`. The public native bitgen API and the
 full hardware SVF regression are the integration gates. See
 [`i2c/KNOWN_ISSUES.md`](i2c/KNOWN_ISSUES.md).
+
+## TEX-006 — Incomplete STA coverage could be promoted to timing closure
+
+**Observed.** The RV64 image with checkpoint SHA-256
+`2968727d267284680a1f22ada914f8b259d7bfca1d61ed04a805b23cba34198e`
+had setup +14 ps / hold +290 ps and `met_timing=true`, but 519 JTAG endpoints
+were `unconstrained_clock` and one CDC endpoint was `no_synchronous_launch`.
+Texo still recorded `timing_closure` and generated a bitstream with dead JTAG
+ER1 responses. The source audit isolates a missing coverage gate; it does not
+prove that nextpnr/Trellis delay numbers or STA arithmetic were wrong.
+
+**Upstream coverage fix (merged).** [PR #61](https://github.com/fabrica-eda/texo/pull/61),
+head `472340e1f9b81b001a82d732c464847933f1be80`, requires reviewed modeled
+endpoint coverage in the flow and independently at bitgen. Unconnected or
+unconstrained capture clocks cannot be excepted. Deliberate
+`no_synchronous_launch` omissions require an exact cell/pin/reason and a
+justification, retained in the checkpoint. New omissions, stale/duplicate
+exceptions, and missing coverage block generation before runtime lookup or
+output. Inherited timing evidence is cleared before evaluating a new run.
+
+**Validation.** Workspace tests: 417 passed, 5 existing ignored; example tests:
+3 passed; fmt, Clippy with warnings denied, and Python compilation passed.
+The new bitgen regressions fail against clean main `049b4be` and pass at the
+PR head. Both retained full Rica checkpoints (original failing and RTL-fixed
+with only main STA) are rejected for unconstrained JTAG clocks, with no output.
+[PR validation records](toolchain/measurements/2026-09-06-texo-timing-coverage-pr/)
+retain the logs and artifact identifiers.
+
+**Native JTCK follow-up.** [PR #62](https://github.com/fabrica-eda/texo/pull/62)
+merged as `fd261c7`. The `--clock-constraints` interface selects `jtagg.JTCK`
+by mapped cell/output pin and preserves PLL/DCCA relationships. Rica's native
+STA checks all 515 JTCK setup/hold endpoints; their nominal slacks and edges
+match the supplemental graph on the same routed checkpoint. Four external/CDC
+endpoints have exact reviewed exceptions. Normal bitgen produced an image
+that passed 100 unique ELFs / 118 physical executions. Records are in
+[native JTCK measurements](toolchain/measurements/2026-09-06-rv64-native-jtck/).
+The pinned local CLI includes the coverage fix; older Cargo/tool snapshots
+and sealed historical artifacts retain their original provenance.
+
+JTAGG launch/capture characterization and reset recovery/removal remain
+follow-up work; an exception is not a timing check or proof of CDC correctness.
+[PR #63](https://github.com/fabrica-eda/texo/pull/63) adds an explicit setup
+reserve without changing the PLL periods; the reserve is not characterized
+PVT/jitter data.
 
 ## NPNR-001 — Divided PLL outputs are not signed off as related clocks
 

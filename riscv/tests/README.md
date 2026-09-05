@@ -33,6 +33,17 @@ Set `LLVM_MC` or `RUST_LLD` to override either executable.
 
 ## Predictor regressions
 
+The compact predictor candidate is described in
+[RV64_COMPACT_PREDICTOR.md](../RV64_COMPACT_PREDICTOR.md). Use
+`--compact-predictor`, `--compact-predictor-32`,
+`--compact-predictor-no-ras`, or `--compact-predictor-no-direction` with the
+ELF and board-memory model runners. `--predictor-tests` builds the additional
+[BTB collision and nested-call diagnostics](rv64-predictor/README.md).
+The compact RTL suite covers the elastic lookup/decode pipeline, full tokens,
+same-row forwarding, wrong-path lookup cancellation, retire-time recovery,
+and compressed links plus RAS overflow/underflow. Core integration exercises
+memory waits, stale BTB load/store/CSR predictions, exceptions, and FENCE.I.
+
 The RTL predictor tests cover the current one-request-per-clock synchronous
 pipeline: a two-way, 128-set BTB; a 2048x2 bimodal table plus four 512x16 TAGE
 tables using 4/12/36/108-bit histories; and a 16-entry x1/x5-aware RAS. They
@@ -63,10 +74,12 @@ The same ELF contract is supported by the direct-JTAG hardware harness:
 cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-tests
 ```
 
-After a timing-closed predictor bitstream has been generated, the default
-command programs `build/riscv-hardware-test-125-predictor.bit` and runs all
-eight bundled tests. The current predictor-enabled implementation does not
-close timing, so no current bitstream or hardware pass is claimed.
+The default command programs the qualified compact 64-entry BTB/RAS + 4 KiB image,
+`build/riscv-hardware-compact-4k-124p8-20260906-jtag-falling.bit`, uses eight-byte
+writes and runs all eight bundled tests. Its [hardware record](../RV64_JTAG_FIX.md)
+covers 100 distinct ELFs, 134 executions and all eleven counters at CPU
+124.8 MHz / memory 62.4 MHz, with CPU/memory setup +9 ps and hold +290 ps. Select other images
+explicitly after their timing and functional checks pass.
 `--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
 execution window. `--expect-tohost value` selects an exact diagnostic mailbox
@@ -195,3 +208,17 @@ terminal loop; `ECALL` is handled architecturally as a machine-mode exception
 rather than as a simulation halt.
 
 [act4]: https://github.com/riscv/riscv-arch-test
+
+## JTAG receiver regression
+
+The falling-edge receiver is covered at RTL and ECP5-primitive level by
+`jtag_transport_edges`: every frame bit, raw control/data boundary timing,
+UPDATE retention, unrelated DR scans and CPU-only relock. The mapped test also
+checks all 261 falling-edge FFs. Run it with:
+
+```sh
+cargo test --locked --offline -p verify-riscv --test jtag_transport_edges
+```
+
+[Physical results and the checked bitgen flow](../RV64_JTAG_FIX.md) include
+100 ELFs, 134 executions and the 48 former WRITE64 corruption probes.

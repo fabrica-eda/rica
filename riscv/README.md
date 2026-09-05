@@ -2,18 +2,27 @@
 
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
-The current development build is **scalar RV64, static prediction,
-and a 4 KiB synchronous instruction cache**: `HardwareCached4KTestTop`.
-It closes Texo's routed timing at the mandatory CPU 124.8 MHz / memory
-62.4 MHz clocks, with +64 ps setup and +290 ps hold slack. See the
-[timing and performance report](RV64_124P8_TIMING.md) for the qualified
-bitstream, reproduction command, validation and capacity tradeoffs.
-The exact image passed **98/98 physical ELF tests with eleven counter checks
-per ELF**, loaded through the Windows D2XX bridge with one-byte writes.
-The eight-byte JTAG payload path has an open fault; the runner defaults to
-the verified byte-write workaround. See the
-[physical verification record](../toolchain/measurements/2026-09-05-rv64-124p8-hardware/README.md).
-The [earlier L1I comparison](RV64_L1I_IMPLEMENTATION.md) is historical evidence.
+The current development build is **scalar RV64, a compact 64-entry BTB with
+2-bit direction prediction and an eight-entry RAS, plus a 4 KiB synchronous
+instruction cache**: `HardwareCompact4KTestTop`.
+The current native-JTCK build retains the mandatory CPU **124.8 MHz / memory
+62.4 MHz**, with **+1 ps setup / +290 ps hold** in normal STA. This includes
+515 JTCK setup/hold paths at 6 MHz; their slacks and edges match the supplemental
+audit on the same checkpoint. Four explicit external/CDC exceptions remain.
+The exact image passed **100/100 distinct physical ELFs**, **118 executions** with repeats and eleven
+counter checks each, using Windows D2XX and eight-byte writes.
+
+The hardware runner defaults to this image and **eight-byte WRITE64**; the
+updated default also passed the basic eight ELFs.
+Falling-edge reception and registered controls repair the earlier zero-response
+failure; all 48 former WRITE64 corruption probes also pass. The original four
+diagnostic medians differ from the previous compact image by only 0–1 cycle.
+See the [current JTCK, IPC and LSU comparison](RV64_JTCK_LSU_PLAN.md),
+[earlier cause and repair](RV64_JTAG_FIX.md) and
+[architecture/performance study](RV64_COMPACT_PREDICTOR.md). New placements
+require the checked bitgen flow and physical tests of the exact resulting hash.
+The [static 4 KiB timing record](RV64_124P8_TIMING.md) and
+[earlier L1I comparison](RV64_L1I_IMPLEMENTATION.md) remain historical baselines.
 
 The predictor configurations are available without editing RTL:
 
@@ -22,13 +31,18 @@ The predictor configurations are available without editing RTL:
 | TAGE + BTB + RAS (existing default) | 0, or 1 with reset scrubbing | 0 | none | `HardwareTestTop` |
 | 2048-entry bimodal + BTB + RAS | 2, or 3 with reset scrubbing | 1 | `--bimodal` | `HardwareBimodalTestTop` |
 | Always not taken, no BTB/RAS | 4 (5 also accepted; no RAM to scrub) | 2 | `--static-predictor` | `HardwareStaticTestTop` |
+| **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor` | `HardwareCompact4KTestTop` |
+| Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
+| Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
+| Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |
 
-Hardware wrappers always enable reset scrubbing for the dynamic predictors.
-The architecture plan distinguishes routed timing estimates from qualified
-board operating clocks; none of these new builds has been programmed.
+Hardware wrappers enable reset scrubbing; the compact predictor always scrubs
+its table. The no-flag Core/model default remains the legacy TAGE comparison.
+The qualified hardware-runner image uses the compact 64-entry configuration;
+comparison variants do not inherit its physical qualification.
 
-The cached board tops use static prediction and the same memory, PLL and debug
-interface. `ICACHE_INDEX_BITS=7/8/9` selects 2/4/8 KiB in HardwareTestTop and
+The `HardwareCached*TestTop` capacity-comparison wrappers use static prediction
+and the same memory, PLL and debug interface. `ICACHE_INDEX_BITS=7/8/9` selects 2/4/8 KiB in HardwareTestTop and
 HardwareCoreTestTop; zero selects the legacy two-line instruction buffer.
 
 | Instruction cache | Board synthesis top | Hardware-model flags |
@@ -55,7 +69,7 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --bimodal
 cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --static-predictor --benchmarks --max-cycles 100000
 ```
 
-Both predictor flags also select that configuration for the bundled ELF suite,
+The predictor flags also select that configuration for the bundled ELF suite,
 ACT4, `verify-riscv --rtl-only`, and `verify-riscv --hardware-memory-rtl`.
 Use the board synthesis top in the table with `nextpnr-riscv` for a full-board map.
 
@@ -75,6 +89,9 @@ building blocks:
 - `src/TageDirectionPredictor.veryl`: synchronous bimodal plus four-table TAGE
 - `src/TageTaggedTableMemory.veryl`: canonical dual-port tagged-table storage
 - `src/StaticBranchPredictor.veryl`: one-entry fallthrough response with backpressure and flush
+- `src/CompactBranchPredictor.veryl`: two-stage synchronous BTB, direction counters,
+  eight prediction tokens and speculative/committed RAS
+- `src/HardwareCompactTestTop.veryl`: compact-predictor board configurations
 - `src/CsrFile.veryl`: machine-mode CSR and trap state
 - `src/PerformanceCounter64.veryl`: exact split-carry 64-bit event counter
 - `src/PerformanceEventCounters4.veryl`: four 64-bit pipeline-event counters
@@ -332,9 +349,9 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-cached-4k-124p8-20260905-ce8.bit`, with
-one-byte masked writes. Its build command and hash are in the
-[124.8 MHz report](RV64_124P8_TIMING.md). Program it and run the eight
+verified `riscv/build/riscv-hardware-compact-4k-124p8-20260906-native-jtck.bit`,
+with eight-byte masked writes. Its build command, hash and checked bitgen flow
+are in the [JTCK/LSU report](RV64_JTCK_LSU_PLAN.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -378,22 +395,22 @@ default gateway can be the LAN router rather than the Windows host. For NAT
 networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
-The hardware runner defaults to **one byte per masked WRITE64 frame**.
-`--write-bytes 1` selects it explicitly; `2`, `4`, and `8` are available for
-diagnosis or separately qualified images. The current 4 KiB bitstream corrupts
-some upper payload bits with eight-byte writes, while byte writes pass the
-same instruction/position probes. Slowing JTAG from 6 MHz to 1 MHz does not
-repair wide writes. This workaround changes ELF loading time; CPU/memory
-clocks remain 124.8/62.4 MHz. See the
-[reproducer and scope of the workaround](../toolchain/mre/rv64-jtag-write64/README.md).
+The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
+`riscv-hardware-compact-4k-124p8-20260906-native-jtck.bit`.
+`--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
+remain selectable. The falling-edge receiver passed the former 48 corruption
+probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
+CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](RV64_JTCK_LSU_PLAN.md)
+and [historical failure reproducer](../toolchain/mre/rv64-jtag-write64/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;
 `--act4 --act4-suite Zca` selects previously generated Zca ELFs. ER1 carries
 fixed 128-bit commands (8-byte masked memory writes, control, and response
 selection), while JTDO1 returns one stable selected response bit throughout
 each scan. ECP5's
-registered JTDI/JSHIFT timing requires exactly 128 physical bits here; adding
-the dummy bit used by the former two-bit bridge misaligns this full frame.
+falling-edge receiver registers CE/SHIFT to align with delayed JTDI and
+consumes exactly 128 physical bits. UPDATE is sampled as data in the same
+JTCK domain; the host needs no dummy bit.
 Only a terminal `tohost` store acknowledged by the synchronous memory response
 token is captured. On that edge the store still retires; the following frozen
 snapshot therefore includes its `minstret` increment and every preceding
@@ -428,7 +445,10 @@ advance. `Top` registers the x31 polarity conversion, so its display
 trails by one CPU cycle without putting those LED pads directly on the
 CPU's combinational output path. The PLL lock alone releases CPU reset; the
 generic SW4 input is not required for autonomous bring-up.
-Use the same PLL binding for the Texo flow:
+The selected compact build is reproduced from the command recorded in
+[native JTCK evidence](../toolchain/measurements/2026-09-06-rv64-native-jtck/baseline-pnr.json).
+The following legacy TAGE command records the earlier timing comparison;
+it is not the selected compact implementation. It uses the same PLL binding:
 
 ```sh
 cargo install --git https://github.com/fabrica-eda/texo.git \
@@ -466,7 +486,13 @@ target/texo-git/bin/texo pnr riscv --top HardwareTestTop \
   --output riscv/build/riscv-hardware-test-125-plruclean.texo.json
 ```
 
-Generate a native bitstream only after the Texo run reports timing closure:
+For current board images, include `--clock-constraints jtck-clock-constraints.json`
+and `--timing-exceptions timing-coverage-exceptions.json` in the native PnR
+flow, using paths relative to its working directory. Run
+`tools/check_integrated_jtck_sta.py` on the resulting checkpoint before normal
+bitgen. The complete pinned commands and boundary scope are in the
+[JTCK report](RV64_JTCK_LSU_PLAN.md). The raw legacy command below is retained
+only to explain the older flow:
 
 ```sh
 target/texo-git/bin/texo bitgen riscv/build/riscv-hardware-test-125-plruclean.texo.json \
@@ -489,9 +515,9 @@ checkpoint below remains attributed to the older `f8c57e09` revision.
 The WNS, utilization, hash, and board pass totals below belong to the former
 six-counter design. That artifact contains neither the current BTB/TAGE/RAS
 frontend nor the eleven-counter ABI and is not a qualification result for the
-current RTL. No timing-closed predictor-enabled qualification result,
-bitstream hash, or physical pass total is recorded here until a fresh build
-and board run complete.
+current RTL. The current compact predictor has separate qualification in the
+[implementation report](RV64_COMPACT_PREDICTOR.md); the historical numbers
+below do not apply to that image.
 
 The recorded result for the historical checkpoint formerly written as
 `riscv-hardware-test-125-ce8.texo.json` closed the 125 MHz-targeted flow

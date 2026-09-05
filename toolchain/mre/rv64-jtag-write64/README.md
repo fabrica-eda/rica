@@ -1,5 +1,11 @@
 # 124.8 MHz RV64 board: wide JTAG writes corrupt loaded data
 
+Update, 2026-09-06: the [falling-edge transport repair](../../../riscv/RV64_JTAG_FIX.md)
+passes all 48 offset/immediate probes and all 100 physical ELFs using eight-byte
+writes at the same 124.8/62.4 MHz clocks. The runner now defaults to that exact
+repaired image and eight-byte writes. The record below preserves the original
+failure and byte-write workaround; the old bitstream itself is unchanged.
+
 Observed on the EVN on 2026-09-05. The Windows D2XX bridge successfully
 enumerates FT2232H interface A and detects LFE5UM5G-85 IDCODE `0x81113043`.
 The CPU/memory PLL remains at 124.8/62.4 MHz throughout these experiments.
