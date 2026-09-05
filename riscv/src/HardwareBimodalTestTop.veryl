@@ -1,0 +1,42 @@
+/// Compact-predictor board configuration for reproducible full-device A/B.
+/// The memory, PLL, debug protocol and RV64 execution pipeline are shared
+/// with HardwareTestTop; only tagged direction prediction is disabled.
+module HardwareBimodalTestTop (
+    clk        : input  'reference clock             ,
+    clk_cpu    : input  'cpu       clock             ,
+    clk_mem    : input  'memory    clock             ,
+    pll_locked : input  'cpu       logic             ,
+    led        : output 'cpu       logic          <8>,
+    jtag_tdi   : input  'tap       logic             ,
+    jtag_tck   : input  'tap       clock             ,
+    jtag_rti1  : input  'tap       logic             ,
+    jtag_rti2  : input  'tap       logic             ,
+    jtag_shift : input  'tap       logic             ,
+    jtag_update: input  'tap       clock             ,
+    jtag_rst_n : input  'tap       reset_async_low   ,
+    jtag_ce1   : input  'tap       logic             ,
+    jtag_ce2   : input  'tap       logic             ,
+    jtag_tdo1  : output 'tap       logic             ,
+    jtag_tdo2  : output 'tap       logic             ,
+) {
+    inst board: HardwareTestTop #(
+        PREDICTOR_MODE: 1,
+    ) (
+        clk          ,
+        clk_cpu      ,
+        clk_mem      ,
+        pll_locked   ,
+        led          ,
+        jtag_tdi     ,
+        jtag_tck     ,
+        jtag_rti1    ,
+        jtag_rti2    ,
+        jtag_shift   ,
+        jtag_update  ,
+        jtag_rst_n   ,
+        jtag_ce1     ,
+        jtag_ce2     ,
+        jtag_tdo1    ,
+        jtag_tdo2    ,
+    );
+}

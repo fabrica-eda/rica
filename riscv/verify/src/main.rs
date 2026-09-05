@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{cmp, collections::HashMap};
 
-use celox::{BigUint, SimulatorBuilder};
+use celox::{BigUint, NativeProgramImage, SimulatorBuilder};
 use object::{Object, ObjectSymbol};
 use struo_celox::ecp5_simulator;
 use struo_frontend_veryl::analyze_and_lower;
@@ -503,6 +503,7 @@ fn $read_value(simulator: &mut $simulator_type, name: &str) -> u64 {
 fn $function(
     simulator: &mut $simulator_type,
     label: &str,
+    expected_trace_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
@@ -639,14 +640,12 @@ fn $function(
     {
         return Err(format!("{label}: dependent shift-to-ALU latency was not exactly two clocks").into());
     }
-    // The one-entry predictor ingress adds one fetch edge.  This trace has
-    // seven control-transfer boundaries before the terminal self-loop, each
-    // of which exposes the extra predictor response edge to the in-order
-    // frontend; the resulting architectural count is intentionally exact.
-    const EXPECTED_TRACE_CYCLES: usize = 126;
-    if elapsed_cycles != EXPECTED_TRACE_CYCLES {
+    // Dynamic prediction includes its registered ingress and state repairs.
+    // The static response is shorter and repairs only a wrong next PC.
+    // The caller selects the measured 126/105-clock regression contract.
+    if elapsed_cycles != expected_trace_cycles {
         return Err(format!(
-            "{label}: architectural trace took {elapsed_cycles} clocks, expected exactly {EXPECTED_TRACE_CYCLES}"
+            "{label}: architectural trace took {elapsed_cycles} clocks, expected exactly {expected_trace_cycles}"
         )
         .into());
     }
@@ -714,7 +713,7 @@ impl CoincidentEdgeOrder {
 }
 
 fn verify_hardware_memory_elf(
-    source: &str,
+    model: &NativeProgramImage,
     elf: &Path,
     label: &str,
     coincident_order: CoincidentEdgeOrder,
@@ -744,7 +743,8 @@ fn verify_hardware_memory_elf(
     }
     let loaded_bytes = loaded.len();
 
-    let mut simulator = SimulatorBuilder::new(source, "HardwareCoreTestTop").build_native()?;
+    let mut simulator =
+        SimulatorBuilder::new("", "HardwareCoreTestTop").build_native_from_image(model.clone())?;
     let clk_cpu = simulator.event("clk_cpu");
     let clk_mem = simulator.event("clk_mem");
     let rst_n = simulator.signal("rst_n");
@@ -779,6 +779,7 @@ fn verify_hardware_memory_elf(
     let mut trace = std::collections::VecDeque::with_capacity(20);
     let mut mailbox_low = 0_u64;
     let mut commits = 0_usize;
+    let mut first_commit_cycle = None;
     let mut reset_entries = 0_usize;
     for cycle in 1..=100_000 {
         // Celox exposes one event per tick, so it cannot apply both related
@@ -807,6 +808,7 @@ fn verify_hardware_memory_elf(
             simulator.tick(clk_mem)?;
         }
         if value_native(&mut simulator, "commit_valid") != 0 {
+            first_commit_cycle.get_or_insert(cycle);
             commits += 1;
             let commit_pc = value_native(&mut simulator, "commit_pc");
             if failure_entries.contains(&commit_pc) {
@@ -879,9 +881,12 @@ fn verify_hardware_memory_elf(
                 )
                 .into());
             }
+            let first_commit =
+                first_commit_cycle.ok_or("terminal store observed without a commit")?;
             println!(
-                "Hardware-memory RTL: {label:<12} [{}] PASS; {loaded_bytes} debug bytes loaded, {commits} commits in {cycle} cycles",
+                "Hardware-memory RTL: {label:<12} [{}] PASS; {loaded_bytes} debug bytes loaded, {commits} commits in {cycle} cycles; first commit={first_commit}, execution window={} cycles",
                 coincident_order.label(),
+                cycle - first_commit + 1,
             );
             return Ok(());
         }
@@ -902,15 +907,23 @@ fn verify_hardware_memory_elf(
 fn verify_hardware_memory_rtl(
     project: &Path,
     requested_elfs: &[PathBuf],
+    predictor_config: u64,
+    icache_index_bits: u64,
 ) -> Result<(), Box<dyn Error>> {
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
         verify_riscv::core_source(project)?,
         fs::read_to_string(project.join("src/InstructionBuffer.veryl"))?,
+        fs::read_to_string(project.join("src/InstructionCache.veryl"))?,
         hardware_memory,
         fs::read_to_string(project.join("src/HardwareCoreTestTop.veryl"))?,
     ]
     .join("\n");
+    let model = SimulatorBuilder::new(&source, "HardwareCoreTestTop")
+        .param("PREDICTOR_MODE", predictor_config / 2)
+        .param("ICACHE_INDEX_BITS", icache_index_bits)
+        .compile_native()?
+        .into_program_image();
     if requested_elfs.is_empty() {
         for name in [
             "alu",
@@ -928,7 +941,7 @@ fn verify_hardware_memory_rtl(
                 CoincidentEdgeOrder::CpuThenMemory,
             ] {
                 verify_hardware_memory_elf(
-                    &source,
+                    &model,
                     &project.join("build/rv64i-subset").join(&label),
                     &label,
                     order,
@@ -942,7 +955,7 @@ fn verify_hardware_memory_rtl(
                 CoincidentEdgeOrder::MemoryThenCpu,
                 CoincidentEdgeOrder::CpuThenMemory,
             ] {
-                verify_hardware_memory_elf(&source, elf, &label, order)?;
+                verify_hardware_memory_elf(&model, elf, &label, order)?;
             }
         }
     }
@@ -1380,6 +1393,35 @@ fn mapped_critical_sinks(cells: &[Ecp5Cell]) -> Vec<(usize, String)> {
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args().collect::<Vec<_>>();
     let rtl_only = arguments.iter().any(|argument| argument == "--rtl-only");
+    let bimodal = arguments.iter().any(|argument| argument == "--bimodal");
+    let static_prediction = arguments
+        .iter()
+        .any(|argument| argument == "--static-predictor");
+    if bimodal && static_prediction {
+        return Err("select only one predictor configuration".into());
+    }
+    let predictor_config = if static_prediction {
+        4
+    } else if bimodal {
+        2
+    } else {
+        0
+    };
+    let cache_option = arguments.iter().position(|arg| arg == "--icache-kib");
+    let icache_index_bits = if let Some(index) = cache_option {
+        match arguments.get(index + 1).map(String::as_str) {
+            Some("0") => 0,
+            Some("2") => 7,
+            Some("4") => 8,
+            Some("8") => 9,
+            _ => return Err("--icache-kib requires 0, 2, 4 or 8".into()),
+        }
+    } else {
+        0
+    };
+    if cache_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
+        return Err("--icache-kib requires --hardware-memory-rtl".into());
+    }
     let map_only = arguments.iter().any(|argument| argument == "--map-only");
     let post_map = arguments.iter().any(|argument| argument == "--post-map");
     let register_file_only = arguments
@@ -1392,11 +1434,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         let requested_elfs = arguments
             .iter()
-            .skip_while(|argument| *argument != "--hardware-memory-rtl")
+            .enumerate()
+            .skip_while(|(_, argument)| *argument != "--hardware-memory-rtl")
             .skip(1)
-            .map(PathBuf::from)
+            .filter(|(index, argument)| {
+                !matches!(argument.as_str(), "--bimodal" | "--static-predictor")
+                    && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
+            })
+            .map(|(_, argument)| PathBuf::from(argument))
             .collect::<Vec<_>>();
-        return verify_hardware_memory_rtl(project, &requested_elfs);
+        return verify_hardware_memory_rtl(
+            project,
+            &requested_elfs,
+            predictor_config,
+            icache_index_bits,
+        );
+    }
+    if predictor_config != 0 && !rtl_only {
+        return Err("predictor selection requires --rtl-only or --hardware-memory-rtl; use nextpnr-riscv HardwareBimodalTestTop or HardwareStaticTestTop for mapping".into());
     }
     verify_direct_jtag_transport(project)?;
     verify_register_file(project)?;
@@ -1405,9 +1460,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let core_source = verify_riscv::core_source(project)?;
 
-    let mut rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
-    verify_native(&mut rtl, "Celox RTL native")?;
-    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core").build_native()?;
+    let mut rtl = SimulatorBuilder::new(&core_source, "Core")
+        .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
+        .build_native()?;
+    verify_native(
+        &mut rtl,
+        "Celox RTL native",
+        if static_prediction { 105 } else { 126 },
+    )?;
+    let mut board_rtl = SimulatorBuilder::new(&core_source, "Core")
+        .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
+        .build_native()?;
     verify_board_diagnostic(&mut board_rtl)?;
     if rtl_only {
         return Ok(());
@@ -1473,7 +1536,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Celox post-map native build completed in {:?}",
         post_map_native_started.elapsed()
     );
-    verify_post_map(&mut post_map, "Celox post-map simulation")?;
+    verify_post_map(&mut post_map, "Celox post-map simulation", 126)?;
     println!(
         "Struo: {} nodes, {} registers, {} ECP5 cells; equivalence passed",
         synthesized.netlist.nodes().len(),

@@ -29,9 +29,11 @@ module Top (
     var commit_count_q              : 'cpu logic          <25>;
     var led_count_q                 : 'cpu logic          <6> ;
 
+    var unused_instruction_flush: 'cpu logic;
+
     inst core: Core #(
-        COMMIT_PAYLOAD        : 0,
-        SCRUB_BRANCH_PREDICTOR: 1,
+        COMMIT_PAYLOAD         : 0,
+        BRANCH_PREDICTOR_CONFIG: 1,
     ) (
         clk                   : clk_cpu                     ,
         rst_n                 : core_rst_n                  ,
@@ -61,6 +63,7 @@ module Top (
         commit_mem_wdata      : unused_commit_wdata         ,
         commit_mem_wmask      : unused_commit_wmask         ,
         debug_x31             : x31                         ,
+        instruction_flush     : unused_instruction_flush    ,
     );
 
     // clk_cpu and pll_locked are logical PLL boundary ports. Texo replaces

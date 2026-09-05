@@ -33,6 +33,16 @@ module CompressedDecoder (
     var branch_imm  : logic<13>;
     var jump_imm    : logic<21>;
 
+    // Disjoint instruction matches form a balanced OR tree. No instruction
+    // field waits behind the priority chain of unrelated compressed opcodes.
+    var selected  : logic<32>     ;
+    var candidates: logic<32> [32];
+    var masked    : logic<32> [32];
+    var level0    : logic<32> [16];
+    var level1    : logic<32> [8] ;
+    var level2    : logic<32> [4] ;
+    var level3    : logic<32> [2] ;
+
     always_comb {
         quadrant  = compressed[1:0];
         funct3    = compressed[15:13];
@@ -64,210 +74,110 @@ module CompressedDecoder (
             compressed[11], compressed[5:3], 1'b0
         };
 
-        // A deterministic NOP is supplied alongside illegal encodings.  The
-        // caller must use `illegal`; the instruction value is not a fallback.
-        instruction = 32'h0000_0013;
-        illegal     = 1'b1;
+        // Q0: C.ADDI4SPN, C.LW, C.LD, C.SW, C.SD.
+        selected[0]   = (quadrant == 2'b00) && (funct3 == 3'b000) && (compressed[12:5] != 8'd0);
+        candidates[0] = {addi4spn_imm, 5'd2, 3'b000, rs2_prime, 7'b0010011};
+        selected[1]   = (quadrant == 2'b00) && (funct3 == 3'b010);
+        candidates[1] = {word_imm, rs1_prime, 3'b010, rs2_prime, 7'b0000011};
+        selected[2]   = (quadrant == 2'b00) && (funct3 == 3'b011);
+        candidates[2] = {double_imm, rs1_prime, 3'b011, rs2_prime, 7'b0000011};
+        selected[3]   = (quadrant == 2'b00) && (funct3 == 3'b110);
+        candidates[3] = {word_imm[11:5], rs2_prime, rs1_prime, 3'b010, word_imm[4:0], 7'b0100011};
+        selected[4]   = (quadrant == 2'b00) && (funct3 == 3'b111);
+        candidates[4] = {double_imm[11:5], rs2_prime, rs1_prime, 3'b011, double_imm[4:0], 7'b0100011};
 
-        case quadrant {
-            2'b00: { // Quadrant 0: stack-relative immediate and compact LSU.
-                case funct3 {
-                    3'b000: { // C.ADDI4SPN -> ADDI rd', x2, nzuimm
-                        if compressed[12:5] != 8'b00000000 {
-                            instruction = {addi4spn_imm, 5'd2, 3'b000, rs2_prime, 7'b0010011};
-                            illegal     = 1'b0;
-                        }
-                    }
-                    3'b010: { // C.LW -> LW rd', offset(rs1')
-                        instruction = {word_imm, rs1_prime, 3'b010, rs2_prime, 7'b0000011};
-                        illegal     = 1'b0;
-                    }
-                    3'b011: { // C.LD -> LD rd', offset(rs1')
-                        instruction = {double_imm, rs1_prime, 3'b011, rs2_prime, 7'b0000011};
-                        illegal     = 1'b0;
-                    }
-                    3'b110: { // C.SW -> SW rs2', offset(rs1')
-                        instruction = {word_imm[11:5], rs2_prime, rs1_prime, 3'b010, word_imm[4:0], 7'b0100011};
-                        illegal     = 1'b0;
-                    }
-                    3'b111: { // C.SD -> SD rs2', offset(rs1')
-                        instruction = {double_imm[11:5], rs2_prime, rs1_prime, 3'b011, double_imm[4:0], 7'b0100011};
-                        illegal     = 1'b0;
-                    }
-                    // 001/101 are compressed floating-point operations and
-                    // 100 is reserved in the integer-only Zca subset.
-                    default: {}
-                }
-            }
-            2'b01: { // Quadrant 1: immediates, compact ALU, and PC-relative control.
-                case funct3 {
-                    3'b000: { // C.NOP/C.ADDI and their HINT encodings.
-                        instruction = {ci_imm, rd, 3'b000, rd, 7'b0010011};
-                        illegal     = 1'b0;
-                    }
-                    3'b001: { // C.ADDIW -> ADDIW rd, rd, imm (RV64 only)
-                        if rd != 5'd0 {
-                            instruction = {ci_imm, rd, 3'b000, rd, 7'b0011011};
-                            illegal     = 1'b0;
-                        }
-                    }
-                    3'b010: { // C.LI and its rd=x0 HINT encodings.
-                        instruction = {ci_imm, 5'd0, 3'b000, rd, 7'b0010011};
-                        illegal     = 1'b0;
-                    }
-                    3'b011: {
-                        if rd == 5'd2 { // C.ADDI16SP
-                            if {compressed[12], compressed[6:2]} != 6'b000000 {
-                                instruction = {addi16sp_imm, 5'd2, 3'b000, 5'd2, 7'b0010011};
-                                illegal     = 1'b0;
-                            }
-                        } else { // C.LUI, including the rd=x0 HINT space.
-                            if {compressed[12], compressed[6:2]} != 6'b000000 {
-                                instruction = {compressed[12] repeat 15, compressed[6:2], rd, 7'b0110111};
-                                illegal     = 1'b0;
-                            }
-                        }
-                    }
-                    3'b100: { // C.SRLI/C.SRAI/C.ANDI and compact register ALU.
-                        case compressed[11:10] {
-                            2'b00: { // C.SRLI, including shamt=0 HINT.
-                                instruction = {shift_imm, rs1_prime, 3'b101, rs1_prime, 7'b0010011};
-                                illegal     = 1'b0;
-                            }
-                            2'b01: { // C.SRAI, including shamt=0 HINT.
-                                instruction = {
-                                    6'b010000, compressed[12], compressed[6:2], rs1_prime, 3'b101, rs1_prime, 7'b0010011
-                                };
-                                illegal     = 1'b0;
-                            }
-                            2'b10: { // C.ANDI
-                                instruction = {ci_imm, rs1_prime, 3'b111, rs1_prime, 7'b0010011};
-                                illegal     = 1'b0;
-                            }
-                            2'b11: {
-                                if !compressed[12] {
-                                    case compressed[6:5] {
-                                        2'b00: { // C.SUB
-                                            instruction = {
-                                                7'b0100000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0110011
-                                            };
-                                        }
-                                        2'b01: { // C.XOR
-                                            instruction = {
-                                                7'b0000000, rs2_prime, rs1_prime, 3'b100, rs1_prime, 7'b0110011
-                                            };
-                                        }
-                                        2'b10: { // C.OR
-                                            instruction = {
-                                                7'b0000000, rs2_prime, rs1_prime, 3'b110, rs1_prime, 7'b0110011
-                                            };
-                                        }
-                                        2'b11: { // C.AND
-                                            instruction = {
-                                                7'b0000000, rs2_prime, rs1_prime, 3'b111, rs1_prime, 7'b0110011
-                                            };
-                                        }
-                                    }
-                                    illegal = 1'b0;
-                                } else {
-                                    case compressed[6:5] {
-                                        2'b00: { // C.SUBW (RV64 only)
-                                            instruction = {
-                                                7'b0100000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0111011
-                                            };
-                                            illegal     = 1'b0;
-                                        }
-                                        2'b01: { // C.ADDW (RV64 only)
-                                            instruction = {
-                                                7'b0000000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0111011
-                                            };
-                                            illegal     = 1'b0;
-                                        }
-                                        // 10/11 are reserved by RV64C/Zca.
-                                        default: {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    3'b101: { // C.J -> JAL x0, offset
-                        instruction = {jump_imm[20], jump_imm[10:1], jump_imm[11], jump_imm[19:12], 5'd0, 7'b1101111};
-                        illegal     = 1'b0;
-                    }
-                    3'b110: { // C.BEQZ -> BEQ rs1', x0, offset
-                        instruction = {
-                            branch_imm[12], branch_imm[10:5], 5'd0, rs1_prime, 3'b000, branch_imm[4:1], branch_imm[11],
-                            7'b1100011
-                        };
-                        illegal     = 1'b0;
-                    }
-                    3'b111: { // C.BNEZ -> BNE rs1', x0, offset
-                        instruction = {
-                            branch_imm[12], branch_imm[10:5], 5'd0, rs1_prime, 3'b001, branch_imm[4:1], branch_imm[11],
-                            7'b1100011
-                        };
-                        illegal     = 1'b0;
-                    }
-                }
-            }
-            2'b10: { // Quadrant 2: full-register shifts, stack LSU, and CR ALU.
-                case funct3 {
-                    3'b000: { // C.SLLI and its rd=x0/shamt=0 HINTs.
-                        instruction = {shift_imm, rd, 3'b001, rd, 7'b0010011};
-                        illegal     = 1'b0;
-                    }
-                    3'b010: { // C.LWSP -> LW rd, offset(x2)
-                        if rd != 5'd0 {
-                            instruction = {lwsp_imm, 5'd2, 3'b010, rd, 7'b0000011};
-                            illegal     = 1'b0;
-                        }
-                    }
-                    3'b011: { // C.LDSP -> LD rd, offset(x2)
-                        if rd != 5'd0 {
-                            instruction = {ldsp_imm, 5'd2, 3'b011, rd, 7'b0000011};
-                            illegal     = 1'b0;
-                        }
-                    }
-                    3'b100: {
-                        if !compressed[12] {
-                            if rs2 == 5'd0 { // C.JR -> JALR x0, 0(rs1)
-                                if rd != 5'd0 {
-                                    instruction = {12'd0, rd, 3'b000, 5'd0, 7'b1100111};
-                                    illegal     = 1'b0;
-                                }
-                            } else { // C.MV and its rd=x0 HINTs.
-                                instruction = {7'b0000000, rs2, 5'd0, 3'b000, rd, 7'b0110011};
-                                illegal     = 1'b0;
-                            }
-                        } else {
-                            if rs2 == 5'd0 {
-                                if rd == 5'd0 { // C.EBREAK
-                                    instruction = 32'h0010_0073;
-                                } else { // C.JALR -> JALR x1, 0(rs1)
-                                    instruction = {12'd0, rd, 3'b000, 5'd1, 7'b1100111};
-                                }
-                                illegal = 1'b0;
-                            } else { // C.ADD and its rd=x0 HINTs.
-                                instruction = {7'b0000000, rs2, rd, 3'b000, rd, 7'b0110011};
-                                illegal     = 1'b0;
-                            }
-                        }
-                    }
-                    3'b110: { // C.SWSP -> SW rs2, offset(x2)
-                        instruction = {swsp_imm[11:5], rs2, 5'd2, 3'b010, swsp_imm[4:0], 7'b0100011};
-                        illegal     = 1'b0;
-                    }
-                    3'b111: { // C.SDSP -> SD rs2, offset(x2)
-                        instruction = {sdsp_imm[11:5], rs2, 5'd2, 3'b011, sdsp_imm[4:0], 7'b0100011};
-                        illegal     = 1'b0;
-                    }
-                    // 001/101 are compressed floating-point operations.
-                    default: {}
-                }
-            }
-            // Quadrant 3 identifies instructions wider than 16 bits.  The
-            // fetch pipeline bypasses this decompressor for those instructions.
-            default: {}
+        // Q1 immediates. Preserve the C.NOP/C.ADDI, C.LI and C.LUI HINT spaces.
+        selected[5]   = (quadrant == 2'b01) && (funct3 == 3'b000);
+        candidates[5] = {ci_imm, rd, 3'b000, rd, 7'b0010011};
+        selected[6]   = (quadrant == 2'b01) && (funct3 == 3'b001) && (rd != 5'd0);
+        candidates[6] = {ci_imm, rd, 3'b000, rd, 7'b0011011};
+        selected[7]   = (quadrant == 2'b01) && (funct3 == 3'b010);
+        candidates[7] = {ci_imm, 5'd0, 3'b000, rd, 7'b0010011};
+        selected[8]   = (quadrant == 2'b01) && (funct3 == 3'b011) && (rd == 5'd2)
+            && ({compressed[12], compressed[6:2]} != 6'd0);
+        candidates[8] = {addi16sp_imm, 5'd2, 3'b000, 5'd2, 7'b0010011};
+        selected[9]   = (quadrant == 2'b01) && (funct3 == 3'b011) && (rd != 5'd2)
+            && ({compressed[12], compressed[6:2]} != 6'd0);
+        candidates[9] = {compressed[12] repeat 15, compressed[6:2], rd, 7'b0110111};
+
+        // Q1 compact ALU: SRLI, SRAI, ANDI, SUB, XOR, OR, AND, SUBW, ADDW.
+        selected[10]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[11:10] == 2'b00);
+        candidates[10] = {shift_imm, rs1_prime, 3'b101, rs1_prime, 7'b0010011};
+        selected[11]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[11:10] == 2'b01);
+        candidates[11] = {6'b010000, compressed[12], compressed[6:2], rs1_prime, 3'b101, rs1_prime, 7'b0010011};
+        selected[12]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[11:10] == 2'b10);
+        candidates[12] = {ci_imm, rs1_prime, 3'b111, rs1_prime, 7'b0010011};
+        selected[13]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b011)
+            && (compressed[6:5] == 2'b00);
+        candidates[13] = {7'b0100000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0110011};
+        selected[14]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b011)
+            && (compressed[6:5] == 2'b01);
+        candidates[14] = {7'b0000000, rs2_prime, rs1_prime, 3'b100, rs1_prime, 7'b0110011};
+        selected[15]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b011)
+            && (compressed[6:5] == 2'b10);
+        candidates[15] = {7'b0000000, rs2_prime, rs1_prime, 3'b110, rs1_prime, 7'b0110011};
+        selected[16]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b011)
+            && (compressed[6:5] == 2'b11);
+        candidates[16] = {7'b0000000, rs2_prime, rs1_prime, 3'b111, rs1_prime, 7'b0110011};
+        selected[17]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b111)
+            && (compressed[6:5] == 2'b00);
+        candidates[17] = {7'b0100000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0111011};
+        selected[18]   = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b111)
+            && (compressed[6:5] == 2'b01);
+        candidates[18] = {7'b0000000, rs2_prime, rs1_prime, 3'b000, rs1_prime, 7'b0111011};
+
+        // Q1 control flow: C.J, C.BEQZ and C.BNEZ.
+        selected[19]   = (quadrant == 2'b01) && (funct3 == 3'b101);
+        candidates[19] = {jump_imm[20], jump_imm[10:1], jump_imm[11], jump_imm[19:12], 5'd0, 7'b1101111};
+        selected[20]   = (quadrant == 2'b01) && (funct3 == 3'b110);
+        candidates[20] = {
+            branch_imm[12], branch_imm[10:5], 5'd0, rs1_prime, 3'b000, branch_imm[4:1], branch_imm[11], 7'b1100011
+        };
+        selected[21]   = (quadrant == 2'b01) && (funct3 == 3'b111);
+        candidates[21] = {
+            branch_imm[12], branch_imm[10:5], 5'd0, rs1_prime, 3'b001, branch_imm[4:1], branch_imm[11], 7'b1100011
+        };
+
+        // Q2: shifts, stack loads/stores and the disjoint CR instruction forms.
+        selected[22]   = (quadrant == 2'b10) && (funct3 == 3'b000);
+        candidates[22] = {shift_imm, rd, 3'b001, rd, 7'b0010011};
+        selected[23]   = (quadrant == 2'b10) && (funct3 == 3'b010) && (rd != 5'd0);
+        candidates[23] = {lwsp_imm, 5'd2, 3'b010, rd, 7'b0000011};
+        selected[24]   = (quadrant == 2'b10) && (funct3 == 3'b011) && (rd != 5'd0);
+        candidates[24] = {ldsp_imm, 5'd2, 3'b011, rd, 7'b0000011};
+        selected[25]   = (quadrant == 2'b10) && (funct3 == 3'b100) && !compressed[12] && (rs2 == 5'd0) && (rd != 5'd0);
+        candidates[25] = {12'd0, rd, 3'b000, 5'd0, 7'b1100111};
+        selected[26]   = (quadrant == 2'b10) && (funct3 == 3'b100) && !compressed[12] && (rs2 != 5'd0);
+        candidates[26] = {7'b0000000, rs2, 5'd0, 3'b000, rd, 7'b0110011};
+        selected[27]   = (quadrant == 2'b10) && (funct3 == 3'b100) && compressed[12] && (rs2 == 5'd0) && (rd == 5'd0);
+        candidates[27] = 32'h0010_0073;
+        selected[28]   = (quadrant == 2'b10) && (funct3 == 3'b100) && compressed[12] && (rs2 == 5'd0) && (rd != 5'd0);
+        candidates[28] = {12'd0, rd, 3'b000, 5'd1, 7'b1100111};
+        selected[29]   = (quadrant == 2'b10) && (funct3 == 3'b100) && compressed[12] && (rs2 != 5'd0);
+        candidates[29] = {7'b0000000, rs2, rd, 3'b000, rd, 7'b0110011};
+        selected[30]   = (quadrant == 2'b10) && (funct3 == 3'b110);
+        candidates[30] = {swsp_imm[11:5], rs2, 5'd2, 3'b010, swsp_imm[4:0], 7'b0100011};
+        selected[31]   = (quadrant == 2'b10) && (funct3 == 3'b111);
+        candidates[31] = {sdsp_imm[11:5], rs2, 5'd2, 3'b011, sdsp_imm[4:0], 7'b0100011};
+
+        for i in 0..32 {
+            masked[i] = candidates[i] & {selected[i] repeat 32};
         }
+        for i in 0..16 {
+            level0[i] = masked[i * 2] | masked[i * 2 + 1];
+        }
+        for i in 0..8 {
+            level1[i] = level0[i * 2] | level0[i * 2 + 1];
+        }
+        for i in 0..4 {
+            level2[i] = level1[i * 2] | level1[i * 2 + 1];
+        }
+        for i in 0..2 {
+            level3[i] = level2[i * 2] | level2[i * 2 + 1];
+        }
+        illegal = selected == 32'd0;
+        // Preserve the deterministic NOP for every illegal encoding, without
+        // gating the other 29 output bits behind the legality reduction.
+        instruction = level3[0] | level3[1] | ({illegal repeat 32} & 32'h0000_0013);
     }
 }

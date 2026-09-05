@@ -71,61 +71,23 @@ module Decoder (
         // Predecode CSR addresses before the RX/EX registers. The compact
         // index keeps architectural CSR reads and writes off a 12-bit address
         // comparator in the EX critical path. Zero denotes an unknown CSR.
-        decode.csr_index     = 4'd0;
-        csr_address_writable = 1'b0;
-        case decode.instr[31:20] {
-            12'h300: { // mstatus
-                decode.csr_index     = 4'd1;
-                csr_address_writable = 1'b1;
-            }
-            12'h301: decode.csr_index = 4'd2; // misa
-            12'h305: { // mtvec
-                decode.csr_index     = 4'd3;
-                csr_address_writable = 1'b1;
-            }
-            12'h340: { // mscratch
-                decode.csr_index     = 4'd4;
-                csr_address_writable = 1'b1;
-            }
-            12'h341: { // mepc
-                decode.csr_index     = 4'd5;
-                csr_address_writable = 1'b1;
-            }
-            12'h342: { // mcause
-                decode.csr_index     = 4'd6;
-                csr_address_writable = 1'b1;
-            }
-            12'h343: { // mtval
-                decode.csr_index     = 4'd7;
-                csr_address_writable = 1'b1;
-            }
-            12'hf11: decode.csr_index = 4'd8; // mvendorid
-            12'hf12: decode.csr_index = 4'd9; // marchid
-            12'hf13: decode.csr_index = 4'd10; // mimpid
-            12'hf14: decode.csr_index = 4'd11; // mhartid
-            12'hb00: { // mcycle
-                decode.csr_index     = 4'd12;
-                csr_address_writable = 1'b1;
-            }
-            12'hc00: decode.csr_index = 4'd12; // cycle (read-only alias)
-            12'hb02: { // minstret
-                decode.csr_index     = 4'd13;
-                csr_address_writable = 1'b1;
-            }
-            12'hc02: decode.csr_index = 4'd13; // instret (read-only alias)
-            // Compact implementation-defined performance-counter window.
-            12'h7c0: { // mstallsel
-                decode.csr_index     = 4'd14;
-                csr_address_writable = 1'b1;
-            }
-            12'h7c1: { // mstalldata
-                decode.csr_index     = 4'd15;
-                csr_address_writable = 1'b1;
-            }
-            default: {}
-        }
-        // Legality needs only membership, not the encoded CSR index. Keep it
-        // off the 16-arm index mux by balancing four groups of address compares.
+        // Each address has one index. Encode its bits in parallel instead
+        // of cascading the mutually exclusive address matches.
+        decode.csr_index[0]  = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
+            || (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf12)
+            || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
+            || (decode.instr[31:20] == 12'h7c1);
+        decode.csr_index[1]  = (decode.instr[31:20] == 12'h301) || (decode.instr[31:20] == 12'h305)
+            || (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf13)
+            || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
+        decode.csr_index[2]  = (decode.instr[31:20] == 12'h340) || (decode.instr[31:20] == 12'h341)
+            || (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hb00)
+            || (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
+            || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
+        decode.csr_index[3]  = (decode.instr[31:20] == 12'hf11) || (decode.instr[31:20] == 12'hf12)
+            || (decode.instr[31:20] == 12'hf13) || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb00)
+            || (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
+            || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
         csr_known_group0     = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h301)
             || (decode.instr[31:20] == 12'h305) || (decode.instr[31:20] == 12'h340);
         csr_known_group1     = (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h342)
@@ -145,6 +107,7 @@ module Decoder (
         decode.is_ecall      = 1'b0;
         decode.is_ebreak     = 1'b0;
         decode.is_mret       = 1'b0;
+        decode.is_fence_i    = 1'b0;
         // Every unsupported or reserved encoding raises an illegal-instruction
         // exception instead of silently retiring or stopping the core.
         decode.illegal = 1'b1;
@@ -219,13 +182,14 @@ module Decoder (
                 }
             }
             7'b0001111: { // FENCE/FENCE.I
-                // The core exposes one in-order memory interface and has no
-                // cache, instruction cache, or speculative memory accesses, so
-                // both fences are satisfied when they reach the pipeline.
+                // Data requests complete in order. FENCE.I also serializes the
+                // fetch pipeline and invalidates instruction storage at CM.
                 if funct3 == 3'b000 {
                     decode.illegal = 1'b0;
-                } else if (funct3 == 3'b001) && (decode.instr[31:15] == 17'd0) && (decode.instr[11:7] == 5'd0) {
-                    decode.illegal = 1'b0;
+                } else if funct3 == 3'b001 {
+                    // Zifencei requires ignoring the reserved operand fields.
+                    decode.is_fence_i = 1'b1;
+                    decode.illegal    = 1'b0;
                 }
             }
             7'b1110011: { // SYSTEM / Zicsr
@@ -584,9 +548,7 @@ module Decoder (
             || ((opcode == 7'b0111011)
                 && (((funct7 == 7'b0000000) && ((funct3 == 3'b000) || (funct3 == 3'b001) || (funct3 == 3'b101)))
                     || ((funct7 == 7'b0100000) && ((funct3 == 3'b000) || (funct3 == 3'b101)))));
-        legal_system   = ((opcode == 7'b0001111)
-                && ((funct3 == 3'b000)
-                    || ((funct3 == 3'b001) && (decode.instr[31:15] == 17'd0) && (decode.instr[11:7] == 5'd0))))
+        legal_system   = ((opcode == 7'b0001111) && ((funct3 == 3'b000) || (funct3 == 3'b001)))
             || ((opcode == 7'b1110011)
                 && (((funct3 == 3'b000)
                         && ((decode.instr == 32'h0000_0073) || (decode.instr == 32'h0010_0073)
@@ -595,5 +557,19 @@ module Decoder (
                         && (!csr_write_requested || csr_address_writable))));
         encoding_legal = ((legal_u_jump || legal_control) || (legal_memory || legal_integer)) || legal_system;
         decode.illegal = !encoding_legal;
+        // Generate register/control flags independently from the ALU payload
+        // priority case. These expressions retain its legal instruction flags.
+        decode.is_csr       = (opcode == 7'b1110011) && (funct3[1:0] != 2'b00);
+        decode.csr_op[0]    = decode.is_csr && (funct3[1:0] == 2'b10);
+        decode.csr_op[1]    = decode.is_csr && (funct3[1:0] == 2'b11);
+        decode.csr_use_imm  = decode.is_csr && funct3[2];
+        decode.csr_write    = decode.is_csr && csr_write_requested;
+        decode.is_ecall     = decode.instr == 32'h0000_0073;
+        decode.is_ebreak    = decode.instr == 32'h0010_0073;
+        decode.is_mret      = decode.instr == 32'h3020_0073;
+        decode.is_fence_i   = (opcode == 7'b0001111) && (funct3 == 3'b001);
+        decode.write_enable = legal_u_jump || legal_integer || decode.is_csr
+            || ((opcode == 7'b1100111) && (funct3 == 3'b000)) || ((opcode == 7'b0000011) && (funct3 != 3'b111));
+        decode.word_op      = legal_integer && ((opcode == 7'b0011011) || (opcode == 7'b0111011));
     }
 }

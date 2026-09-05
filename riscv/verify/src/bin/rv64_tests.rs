@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use verify_riscv::{ElfImage, core_source, run_elf};
+use verify_riscv::{ElfImage, compile_elf_model, core_source, run_elf_with_model};
 
 const DEFAULT_MAX_CYCLES: usize = 20_000;
 
@@ -86,10 +86,14 @@ fn rust_lld() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    build_elfs(project, "rv64i-subset")
+}
+
+fn build_elfs(project: &Path, suite: &str) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let tests = project.join("tests/rv64i-subset");
-    let build = project.join("build/rv64i-subset");
+    let build = project.join("build").join(suite);
     fs::create_dir_all(&build)?;
-    let mut sources = fs::read_dir(&tests)?
+    let mut sources = fs::read_dir(project.join("tests").join(suite))?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension() == Some(OsStr::new("S")))
@@ -97,6 +101,12 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     sources.sort();
     let assembler = llvm_mc();
     let linker = rust_lld()?;
+    let suite_linker_script = project.join("tests").join(suite).join("link.ld");
+    let linker_script = if suite_linker_script.is_file() {
+        suite_linker_script
+    } else {
+        tests.join("link.ld")
+    };
     let mut elfs = Vec::new();
     for source in sources {
         let stem = source.file_stem().ok_or("test source has no stem")?;
@@ -117,7 +127,7 @@ fn bundled_elfs(project: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
             Command::new(&linker)
                 .args(["-flavor", "gnu", "-m", "elf64lriscv"])
                 .arg("-T")
-                .arg(tests.join("link.ld"))
+                .arg(&linker_script)
                 .arg("-o")
                 .arg(&elf)
                 .arg(&object),
@@ -224,6 +234,7 @@ fn run_act4(
     enabled_file: &Path,
     suite: Act4Suite,
     max_cycles: usize,
+    predictor_config: u64,
 ) -> Result<(), Box<dyn Error>> {
     let repository = project.parent().ok_or("riscv directory has no parent")?;
     let source_dir = repository
@@ -257,6 +268,10 @@ fn run_act4(
     let source = (!enabled.is_empty())
         .then(|| core_source(project))
         .transpose()?;
+    let model = source
+        .as_deref()
+        .map(|source| compile_elf_model(source, predictor_config))
+        .transpose()?;
     let mut passed = 0;
     let mut ignored = 0;
     let mut failures = Vec::new();
@@ -276,8 +291,8 @@ fn run_act4(
         };
         let image = ElfImage::load(elf);
         let result = image.and_then(|image| {
-            run_elf(
-                source.as_deref().expect("source exists for enabled tests"),
+            run_elf_with_model(
+                model.as_ref().expect("model exists for enabled tests"),
                 image,
                 max_cycles,
             )
@@ -314,6 +329,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut arguments = env::args_os().skip(1);
     let mut max_cycles = DEFAULT_MAX_CYCLES;
+    let mut predictor_config = 0;
+    let mut benchmarks = false;
+    let mut cache_tests = false;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut act4_elf_dir = project
@@ -323,7 +341,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4_enabled = None::<PathBuf>;
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
-        if argument == "--max-cycles" {
+        if argument == "--bimodal" {
+            if predictor_config == 4 {
+                return Err("--bimodal and --static-predictor are mutually exclusive".into());
+            }
+            predictor_config = 2;
+        } else if argument == "--static-predictor" {
+            if predictor_config == 2 {
+                return Err("--bimodal and --static-predictor are mutually exclusive".into());
+            }
+            predictor_config = 4;
+        } else if argument == "--benchmarks" {
+            benchmarks = true;
+        } else if argument == "--cache-tests" {
+            cache_tests = true;
+        } else if argument == "--max-cycles" {
             let value = arguments.next().ok_or("--max-cycles requires a value")?;
             max_cycles = value
                 .to_str()
@@ -353,6 +385,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     if act4 {
+        if benchmarks || cache_tests {
+            return Err("--benchmarks/--cache-tests cannot be combined with --act4".into());
+        }
         if !requested_elfs.is_empty() {
             return Err("positional ELF paths cannot be combined with --act4".into());
         }
@@ -364,9 +399,27 @@ fn main() -> Result<(), Box<dyn Error>> {
             &act4_enabled,
             act4_suite,
             max_cycles,
+            predictor_config,
         );
     }
-    let elfs = if requested_elfs.is_empty() {
+    if benchmarks && cache_tests {
+        return Err("--benchmarks and --cache-tests are mutually exclusive".into());
+    }
+    let elfs = if benchmarks || cache_tests {
+        if !requested_elfs.is_empty() {
+            return Err(
+                "--benchmarks/--cache-tests cannot be combined with positional ELFs".into(),
+            );
+        }
+        build_elfs(
+            project,
+            if cache_tests {
+                "rv64-cache"
+            } else {
+                "rv64-benchmarks"
+            },
+        )?
+    } else if requested_elfs.is_empty() {
         bundled_elfs(project)?
     } else {
         requested_elfs
@@ -375,13 +428,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("no RV64 ELF tests were supplied".into());
     }
     let source = core_source(project)?;
+    let model = compile_elf_model(&source, predictor_config)?;
     for elf in &elfs {
-        let result = run_elf(&source, ElfImage::load(elf)?, max_cycles)?;
+        let result = run_elf_with_model(&model, ElfImage::load(elf)?, max_cycles)?;
         println!(
             "PASS {:<24} {:>5} cycles, {:>5} commits",
             elf.file_name().unwrap_or_default().to_string_lossy(),
             result.cycles,
             result.commits
+        );
+        println!(
+            "METRIC predictor={} workload={} cycles={} commits={}",
+            match predictor_config {
+                0 => "tage",
+                2 => "bimodal",
+                _ => "static",
+            },
+            elf.file_stem().unwrap_or_default().to_string_lossy(),
+            result.cycles,
+            result.commits,
         );
     }
     println!("RV64 ELF tests: {}/{} passed", elfs.len(), elfs.len());

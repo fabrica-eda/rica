@@ -162,8 +162,16 @@ fn rv64c_hint_code_points_remain_legal_no_ops() {
 fn all_compressed_code_points_are_deterministic_and_canonical() {
     let mut simulator = decoder();
     let mut legal = 0;
+    let mut digest = 0xcbf29ce484222325_u64;
     for raw in 0_u16..=u16::MAX {
         let (instruction, illegal) = decode(&mut simulator, raw);
+        for byte in instruction
+            .to_le_bytes()
+            .into_iter()
+            .chain([u8::from(illegal)])
+        {
+            digest = (digest ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+        }
         if illegal {
             assert_eq!(
                 instruction, 0x0000_0013,
@@ -182,6 +190,10 @@ fn all_compressed_code_points_are_deterministic_and_canonical() {
     // This count fixes the intended RV64C/Zca integer subset, including HINT
     // encodings and excluding floating-point and reserved code points.
     assert_eq!(legal, 38_551);
+    // FNV-1a of every little-endian expansion and illegal byte, measured on
+    // the pre-timing-repair decoder. This also checks every immediate/register
+    // bit, which the legality count and canonical opcode checks cannot cover.
+    assert_eq!(digest, 0x1c2f7a0300eecc23);
 }
 
 #[test]

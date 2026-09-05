@@ -12,22 +12,24 @@
 /// address translation and BRAM selection, so related-clock crossings end at
 /// simple registers instead of high-fanout BRAM address logic.
 module HardwareMemory (
-    clk                       : input  'memory clock              ,
-    rst_n                     : input  'memory reset_async_low    ,
-    cpu_instr_address         : input  'memory logic          <32>,
-    cpu_instr_line            : output 'memory logic          <64>,
-    cpu_instr_response_address: output 'memory logic          <32>,
-    cpu_instr_response_valid  : output 'memory logic              ,
-    cpu_data_address          : input  'memory logic          <32>,
-    cpu_data_read             : output 'memory logic          <64>,
-    cpu_data_write            : input  'memory logic          <64>,
-    cpu_data_mask             : input  'memory logic          <8> ,
-    cpu_data_we               : input  'memory logic              ,
-    cpu_data_request_sequence : input  'memory logic              ,
-    cpu_data_response_sequence: output 'memory logic              ,
-    debug_write               : input  'memory logic              ,
-    debug_address             : input  'memory logic          <32>,
-    debug_data                : input  'memory logic          <8> ,
+    clk                        : input  'memory clock              ,
+    rst_n                      : input  'memory reset_async_low    ,
+    cpu_instr_address          : input  'memory logic          <32>,
+    cpu_instr_line             : output 'memory logic          <64>,
+    cpu_instr_request_sequence : input  'memory logic              ,
+    cpu_instr_response_sequence: output 'memory logic              ,
+    cpu_instr_response_address : output 'memory logic          <32>,
+    cpu_instr_response_valid   : output 'memory logic              ,
+    cpu_data_address           : input  'memory logic          <32>,
+    cpu_data_read              : output 'memory logic          <64>,
+    cpu_data_write             : input  'memory logic          <64>,
+    cpu_data_mask              : input  'memory logic          <8> ,
+    cpu_data_we                : input  'memory logic              ,
+    cpu_data_request_sequence  : input  'memory logic              ,
+    cpu_data_response_sequence : output 'memory logic              ,
+    debug_write                : input  'memory logic              ,
+    debug_address              : input  'memory logic          <32>,
+    debug_data                 : input  'memory logic          <8> ,
 ) {
     const BANK_COUNT: u32 = 8;
 
@@ -52,6 +54,8 @@ module HardwareMemory (
     var instr_port_high           : 'memory logic                 ;
     var instr_response_high_q     : 'memory logic                 ;
     var instr_request_address_q   : 'memory logic<32>             ;
+    var instr_request_sequence_q  : 'memory logic                 ;
+    var instr_response_sequence_q : 'memory logic                 ;
     var instr_response_address_q  : 'memory logic<32>             ;
     var instr_response_valid_q    : 'memory logic                 ;
     var debug_write_q             : 'memory logic                 ;
@@ -212,14 +216,15 @@ module HardwareMemory (
             };
         }
 
-        cpu_instr_line             = {
+        cpu_instr_line              = {
             instr_read[7], instr_read[6], instr_read[5], instr_read[4], instr_read[3], instr_read[2], instr_read[1],
             instr_read[0]
         };
-        cpu_instr_response_address = instr_response_address_q;
-        cpu_instr_response_valid   = instr_response_valid_q;
-        cpu_data_read              = data_output_q;
-        cpu_data_response_sequence = data_response_sequence_q;
+        cpu_instr_response_address  = instr_response_address_q;
+        cpu_instr_response_valid    = instr_response_valid_q;
+        cpu_instr_response_sequence = instr_response_sequence_q;
+        cpu_data_read               = data_output_q;
+        cpu_data_response_sequence  = data_response_sequence_q;
     }
 
     // Keep every synchronous RAM read destination scalar inside its generated
@@ -279,41 +284,45 @@ module HardwareMemory (
 
     always_ff (clk, rst_n) {
         if_reset {
-            instr_request_address_q  = 32'h0000_0000;
-            instr_response_address_q = 32'h0000_0000;
-            instr_response_valid_q   = 1'b0;
-            debug_write_q            = 1'b0;
-            debug_address_q          = 32'h0000_0000;
-            debug_data_q             = 8'h00;
-            data_address_q           = 32'h0000_0000;
-            data_write_q             = 64'h0000_0000_0000_0000;
-            data_mask_q              = 8'h00;
-            data_we_q                = 1'b0;
-            data_request_sequence_q  = 1'b0;
-            data_request_handled_q   = 1'b0;
-            data_response_sequence_q = 1'b0;
-            data_output_q            = 64'h0000_0000_0000_0000;
+            instr_request_address_q   = 32'h0000_0000;
+            instr_response_address_q  = 32'h0000_0000;
+            instr_response_valid_q    = 1'b0;
+            instr_request_sequence_q  = 1'b0;
+            instr_response_sequence_q = 1'b0;
+            debug_write_q             = 1'b0;
+            debug_address_q           = 32'h0000_0000;
+            debug_data_q              = 8'h00;
+            data_address_q            = 32'h0000_0000;
+            data_write_q              = 64'h0000_0000_0000_0000;
+            data_mask_q               = 8'h00;
+            data_we_q                 = 1'b0;
+            data_request_sequence_q   = 1'b0;
+            data_request_handled_q    = 1'b0;
+            data_response_sequence_q  = 1'b0;
+            data_output_q             = 64'h0000_0000_0000_0000;
         } else {
             // Capture every request interface before address translation or
             // byte-bank selection. The instruction response tag follows its
             // request register, matching the address sampled by the BRAM one
             // edge later; InstructionBuffer accepts variable tagged latency.
-            instr_request_address_q = cpu_instr_address;
-            debug_write_q           = debug_write;
-            debug_address_q         = debug_address;
-            debug_data_q            = debug_data;
-            data_address_q          = cpu_data_address;
-            data_write_q            = cpu_data_write;
-            data_mask_q             = cpu_data_mask;
-            data_we_q               = cpu_data_we;
-            data_request_sequence_q = cpu_data_request_sequence;
+            instr_request_address_q  = cpu_instr_address;
+            instr_request_sequence_q = cpu_instr_request_sequence;
+            debug_write_q            = debug_write;
+            debug_address_q          = debug_address;
+            debug_data_q             = debug_data;
+            data_address_q           = cpu_data_address;
+            data_write_q             = cpu_data_write;
+            data_mask_q              = cpu_data_mask;
+            data_we_q                = cpu_data_we;
+            data_request_sequence_q  = cpu_data_request_sequence;
             // The bank/high/byte selection cone is registered in the slow
             // domain. Publish its token on the same edge, then let Core's
             // CPU-domain stage capture the stable bundle.
-            data_output_q            = data_read_mux;
-            data_response_sequence_q = data_request_handled_q;
-            instr_response_address_q = {instr_request_address_q[31:3], 3'b000};
-            instr_response_valid_q   = !debug_write_q;
+            data_output_q             = data_read_mux;
+            data_response_sequence_q  = data_request_handled_q;
+            instr_response_address_q  = {instr_request_address_q[31:3], 3'b000};
+            instr_response_sequence_q = instr_request_sequence_q;
+            instr_response_valid_q    = !debug_write_q;
             if data_request_new {
                 data_request_handled_q = data_request_sequence_q;
             }

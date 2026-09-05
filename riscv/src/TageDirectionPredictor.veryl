@@ -20,6 +20,10 @@
 /// The unsigned bimodal counter predicts taken at 2 or 3.
 module TageDirectionPredictor #(
     param SCRUB_ON_RESET: bit = 0,
+    // Keep the same retirement snapshots and base-table forwarding in the
+    // compact configuration. The generate block omits the four tagged RAMs;
+    // constant boundaries disable tagged allocation, training and aging.
+    param USE_TAGE: bit = 1,
 ) (
     clk  : input clock          ,
     rst_n: input reset_async_low,
@@ -494,6 +498,13 @@ module TageDirectionPredictor #(
             response_entry3 = train_packet_tag_data3_q;
         }
 
+        if !USE_TAGE {
+            response_entry0 = 16'd0;
+            response_entry1 = 16'd0;
+            response_entry2 = 16'd0;
+            response_entry3 = 16'd0;
+        }
+
         response_base_pred = response_base_entry[1];
         response_pred0     = !response_entry0[5];
         response_pred1     = !response_entry1[5];
@@ -863,7 +874,7 @@ module TageDirectionPredictor #(
                 }
             }
 
-            train_allocation_attempt = train_mispredict && train_candidate3
+            train_allocation_attempt = USE_TAGE && train_mispredict && train_candidate3
                 && !(classified_hit_weak && train_lm_correct);
             if train_allocation_attempt {
                 if train_alloc_oh[0] {
@@ -900,6 +911,16 @@ module TageDirectionPredictor #(
                 }
             }
         }
+        if !USE_TAGE {
+            train_tag_write0 = 1'b0;
+            train_tag_write1 = 1'b0;
+            train_tag_write2 = 1'b0;
+            train_tag_write3 = 1'b0;
+            train_entry0     = 16'd0;
+            train_entry1     = 16'd0;
+            train_entry2     = 16'd0;
+            train_entry3     = 16'd0;
+        }
     }
 
     // Packed entries require a read-modify-write to clear one usefulness bit.
@@ -908,7 +929,7 @@ module TageDirectionPredictor #(
     // when a same-bank update writes that same row; a different-row update
     // cannot stale the saved word.  Training always owns its bank's port.
     always_comb {
-        age_epoch_pulse = train_valid && (conditional_commit_count_q == 18'h3ffff);
+        age_epoch_pulse = USE_TAGE && train_valid && (conditional_commit_count_q == 18'h3ffff);
 
         // A current S2 training classification stalls the whole background
         // aging row.  Its registered packet owns Port B on the next cycle;
@@ -1038,61 +1059,72 @@ module TageDirectionPredictor #(
         }
     }
 
-    inst tagged_table0: TageTaggedTableMemory (
-        clk           : clk              ,
-        port_a_enable : tag_porta_enable0,
-        port_a_write  : tag_porta_write  ,
-        port_a_address: tag_porta_addr0  ,
-        port_a_data   : 16'd0            ,
-        port_a_read   : tag_read_raw0_q  ,
-        port_b_enable : 1'b1             ,
-        port_b_write  : tag_portb_write0 ,
-        port_b_address: tag_portb_addr0  ,
-        port_b_data   : tag_portb_data0  ,
-        port_b_read   : age_read0_q      ,
-    );
+    if USE_TAGE :g_tagged {
+        inst tagged_table0: TageTaggedTableMemory (
+            clk           : clk              ,
+            port_a_enable : tag_porta_enable0,
+            port_a_write  : tag_porta_write  ,
+            port_a_address: tag_porta_addr0  ,
+            port_a_data   : 16'd0            ,
+            port_a_read   : tag_read_raw0_q  ,
+            port_b_enable : 1'b1             ,
+            port_b_write  : tag_portb_write0 ,
+            port_b_address: tag_portb_addr0  ,
+            port_b_data   : tag_portb_data0  ,
+            port_b_read   : age_read0_q      ,
+        );
 
-    inst tagged_table1: TageTaggedTableMemory (
-        clk           : clk              ,
-        port_a_enable : tag_porta_enable1,
-        port_a_write  : tag_porta_write  ,
-        port_a_address: tag_porta_addr1  ,
-        port_a_data   : 16'd0            ,
-        port_a_read   : tag_read_raw1_q  ,
-        port_b_enable : 1'b1             ,
-        port_b_write  : tag_portb_write1 ,
-        port_b_address: tag_portb_addr1  ,
-        port_b_data   : tag_portb_data1  ,
-        port_b_read   : age_read1_q      ,
-    );
+        inst tagged_table1: TageTaggedTableMemory (
+            clk           : clk              ,
+            port_a_enable : tag_porta_enable1,
+            port_a_write  : tag_porta_write  ,
+            port_a_address: tag_porta_addr1  ,
+            port_a_data   : 16'd0            ,
+            port_a_read   : tag_read_raw1_q  ,
+            port_b_enable : 1'b1             ,
+            port_b_write  : tag_portb_write1 ,
+            port_b_address: tag_portb_addr1  ,
+            port_b_data   : tag_portb_data1  ,
+            port_b_read   : age_read1_q      ,
+        );
 
-    inst tagged_table2: TageTaggedTableMemory (
-        clk           : clk              ,
-        port_a_enable : tag_porta_enable2,
-        port_a_write  : tag_porta_write  ,
-        port_a_address: tag_porta_addr2  ,
-        port_a_data   : 16'd0            ,
-        port_a_read   : tag_read_raw2_q  ,
-        port_b_enable : 1'b1             ,
-        port_b_write  : tag_portb_write2 ,
-        port_b_address: tag_portb_addr2  ,
-        port_b_data   : tag_portb_data2  ,
-        port_b_read   : age_read2_q      ,
-    );
+        inst tagged_table2: TageTaggedTableMemory (
+            clk           : clk              ,
+            port_a_enable : tag_porta_enable2,
+            port_a_write  : tag_porta_write  ,
+            port_a_address: tag_porta_addr2  ,
+            port_a_data   : 16'd0            ,
+            port_a_read   : tag_read_raw2_q  ,
+            port_b_enable : 1'b1             ,
+            port_b_write  : tag_portb_write2 ,
+            port_b_address: tag_portb_addr2  ,
+            port_b_data   : tag_portb_data2  ,
+            port_b_read   : age_read2_q      ,
+        );
 
-    inst tagged_table3: TageTaggedTableMemory (
-        clk           : clk              ,
-        port_a_enable : tag_porta_enable3,
-        port_a_write  : tag_porta_write  ,
-        port_a_address: tag_porta_addr3  ,
-        port_a_data   : 16'd0            ,
-        port_a_read   : tag_read_raw3_q  ,
-        port_b_enable : 1'b1             ,
-        port_b_write  : tag_portb_write3 ,
-        port_b_address: tag_portb_addr3  ,
-        port_b_data   : tag_portb_data3  ,
-        port_b_read   : age_read3_q      ,
-    );
+        inst tagged_table3: TageTaggedTableMemory (
+            clk           : clk              ,
+            port_a_enable : tag_porta_enable3,
+            port_a_write  : tag_porta_write  ,
+            port_a_address: tag_porta_addr3  ,
+            port_a_data   : 16'd0            ,
+            port_a_read   : tag_read_raw3_q  ,
+            port_b_enable : 1'b1             ,
+            port_b_write  : tag_portb_write3 ,
+            port_b_address: tag_portb_addr3  ,
+            port_b_data   : tag_portb_data3  ,
+            port_b_read   : age_read3_q      ,
+        );
+    } else :g_bimodal {
+        assign tag_read_raw0_q = 16'd0;
+        assign tag_read_raw1_q = 16'd0;
+        assign tag_read_raw2_q = 16'd0;
+        assign tag_read_raw3_q = 16'd0;
+        assign age_read0_q     = 16'd0;
+        assign age_read1_q     = 16'd0;
+        assign age_read2_q     = 16'd0;
+        assign age_read3_q     = 16'd0;
+    }
 
     // Bypass metadata is ordinary FF state, not part of either BRAM port.
     // Resetting it prevents an uninitialized collision-select bit while the

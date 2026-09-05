@@ -136,6 +136,23 @@ impl Driver {
         Self::from_simulator(new_simulator())
     }
 
+    fn new_bimodal() -> Self {
+        static IMAGE: OnceLock<NativeProgramImage> = OnceLock::new();
+        let image = IMAGE.get_or_init(|| {
+            SimulatorBuilder::new(&predictor_source(), "BranchPredictor")
+                .param("USE_TAGE", 0)
+                .opt_level(OptLevel::O0)
+                .compile_native()
+                .unwrap()
+                .into_program_image()
+        });
+        Self::from_simulator(
+            SimulatorBuilder::new("", "BranchPredictor")
+                .build_native_from_image(image.clone())
+                .unwrap(),
+        )
+    }
+
     fn new_with_fold_probes() -> Self {
         Self::from_simulator(new_fold_probe_simulator())
     }
@@ -1316,6 +1333,11 @@ fn cold_conditional_hint_appends_not_taken_before_actual_recovery() {
     let cold = driver.request_conditional(pc, fallthrough);
     assert!(!cold.btb_hit);
     assert!(!cold.taken);
+    assert_eq!(
+        driver.get("decision_effect_taken_q"),
+        0,
+        "a BTB miss must latch an explicit not-taken feedback bit",
+    );
 
     // The instruction hint, not the missing BTB kind, contributes the
     // effective frontend direction to speculative history on acceptance.
@@ -1344,6 +1366,11 @@ fn direct_jal_stall_and_caller_suppression_obey_the_wrapper_contract() {
     assert_eq!(predicted.kind, KIND_DIRECT);
     assert!(predicted.taken);
     assert_eq!(predicted.next_pc, target);
+    assert_eq!(
+        driver.get("decision_effect_taken_q"),
+        1,
+        "a non-conditional BTB hit must latch taken feedback",
+    );
 
     // Both synchronous tables and wrapper metadata must hold their complete
     // response while the consumer is stalled.
@@ -1367,38 +1394,57 @@ fn direct_jal_stall_and_caller_suppression_obey_the_wrapper_contract() {
 }
 
 #[test]
-fn fast_miss_holds_under_backpressure_and_pop_captures_on_accept() {
+fn response_tail_captures_backpressure_and_drains_before_held_source_without_a_bubble() {
     let mut driver = Driver::new();
     let held = driver.request(0x2402, 0x2404);
+    assert_eq!(
+        driver.get("response_tail_valid_q"),
+        1,
+        "the stalled source response must transfer into the registered tail",
+    );
+    assert_eq!(driver.get("decision_fast_miss"), 0);
 
+    // The tail is now the ordered public head.  A second lookup may enter the
+    // predictor, but its source response must remain behind the held packet.
     driver.set_u32("request_pc", 0x2602);
     driver.set_u32("request_fallthrough", 0x2604);
     driver.set_u8("request_valid", 1);
-    assert_eq!(driver.get("decision_fast_miss"), 1);
     assert_eq!(driver.get("request_accept"), 1);
     driver.tick();
     driver.set_u8("request_valid", 0);
     assert_eq!(driver.response(), held);
     for _ in 0..2 {
-        assert_eq!(driver.get("request_accept"), 0);
         driver.tick();
         assert_eq!(driver.response(), held);
+        assert_eq!(driver.get("response_tail_valid_q"), 1);
     }
-    // A raw table result waits behind the held decision packet.  Accepting the
-    // direct miss pops it and captures that result into the same register
-    // without an output-stage bubble.
+
+    let following_token = (held.token + 1) & 7;
+    assert_eq!(driver.get("decision_fast_miss"), 1);
+    assert_eq!(driver.get("source_accept"), 0);
+    assert_eq!(driver.get("fast_miss_accept"), 0);
+
+    // A full tail drains without popping the held source on the same edge.
+    // Nevertheless, that source becomes the fall-through public response
+    // immediately after the edge, so accepted packets remain consecutive.
     driver.set_u8("response_accept", 1);
+    driver.tick();
+    assert_eq!(driver.get("response_tail_valid_q"), 0);
+    let following = driver.response();
+    assert_eq!(following.token, following_token);
+    assert_eq!(following.next_pc, 0x2604);
+    assert_eq!(driver.get("source_accept"), 1);
     assert_eq!(driver.get("fast_miss_accept"), 1);
-    assert_eq!(driver.get("raw_response_capture"), 1);
+
+    // Keeping ready asserted accepts B on the very next edge: A and B consume
+    // consecutive clocks even though A was previously backpressured.
     driver.tick();
     driver.set_u8("response_accept", 0);
-    let following = driver.response();
-    assert_eq!(following.token, (held.token + 1) & 7);
-    assert_eq!(following.next_pc, 0x2604);
+    assert_eq!(driver.get("response_valid"), 0);
 }
 
 #[test]
-fn taken_held_decision_cancels_an_already_pending_shadow() {
+fn taken_response_tail_preserves_barrier_while_cancelling_pending_shadows() {
     let mut driver = Driver::new();
     let pc = 0x2e02;
     let fallthrough = pc + 2;
@@ -1447,6 +1493,7 @@ fn taken_held_decision_cancels_an_already_pending_shadow() {
 
     let taken = driver.response();
     assert!(taken.taken);
+    assert_eq!(driver.get("response_tail_valid_q"), 0);
     let reusable_token = (taken.token + 1) & 7;
     assert_eq!(driver.get("decision_valid_q"), 1);
     assert_eq!(driver.get("btb_response_valid"), 1);
@@ -1459,12 +1506,17 @@ fn taken_held_decision_cancels_an_already_pending_shadow() {
     // cancels C, and rolls the token frontier back exactly once.
     driver.tick();
     assert_eq!(driver.response(), taken);
+    assert_eq!(driver.get("response_tail_valid_q"), 1);
+    assert_eq!(driver.get("output_valid_q"), 0);
+    assert_eq!(driver.get("taken_response_pending"), 1);
+    assert_eq!(driver.get("request_accept"), 0);
     assert_eq!(driver.get("decision_valid_q"), 0);
     assert_eq!(driver.get("btb_response_valid"), 0);
     assert_eq!(driver.get("tage_response_valid"), 0);
     assert_eq!(driver.get("allocation_token_q"), u64::from(reusable_token));
 
     driver.accept();
+    assert_eq!(driver.get("response_tail_valid_q"), 0);
     assert_eq!(driver.get("response_valid"), 0);
 }
 
@@ -1599,7 +1651,7 @@ fn aging_rmw_commits_the_alternating_usefulness_clear_to_memory() {
 }
 
 #[test]
-fn recovery_and_discard_reject_a_same_edge_request() {
+fn recovery_and_discard_clear_response_tail_and_reject_same_edge_request() {
     // Recovery clears a younger held response, restores the token frontier to
     // the resolved older instruction, and must not admit the concurrent PC.
     let mut recovering = Driver::new();
@@ -1607,6 +1659,7 @@ fn recovery_and_discard_reject_a_same_edge_request() {
     recovering.accept();
     let younger = recovering.request(0x2a02, 0x2a04);
     assert_eq!(younger.token, (older.token + 1) & 7);
+    assert_eq!(recovering.get("response_tail_valid_q"), 1);
     recovering.set_u8("recover_token", older.token);
     recovering.set_u8("recover_kind", KIND_NONE);
     recovering.set_u32("request_pc", 0x2c02);
@@ -1623,6 +1676,7 @@ fn recovery_and_discard_reject_a_same_edge_request() {
     recovering.tick();
     recovering.set_u8("request_valid", 0);
     recovering.set_u8("recover_valid", 0);
+    assert_eq!(recovering.get("response_tail_valid_q"), 0);
     assert_eq!(recovering.get("response_valid"), 0);
     assert_eq!(recovering.get("decision_valid_q"), 0);
     assert_eq!(recovering.get("output_valid_q"), 0);
@@ -1647,6 +1701,7 @@ fn recovery_and_discard_reject_a_same_edge_request() {
     let mut discarding = Driver::new();
     let held = discarding.request(0x3002, 0x3004);
     assert_eq!(held.token, 0);
+    assert_eq!(discarding.get("response_tail_valid_q"), 1);
     discarding.set_u32("request_pc", 0x3202);
     discarding.set_u32("request_fallthrough", 0x3204);
     discarding.set_u8("request_valid", 1);
@@ -1658,6 +1713,7 @@ fn recovery_and_discard_reject_a_same_edge_request() {
     discarding.tick();
     discarding.set_u8("request_valid", 0);
     discarding.set_u8("discard_all", 0);
+    assert_eq!(discarding.get("response_tail_valid_q"), 0);
     assert_eq!(discarding.get("response_valid"), 0);
     assert_eq!(discarding.get("decision_valid_q"), 0);
     assert_eq!(discarding.get("output_valid_q"), 0);
@@ -1736,7 +1792,15 @@ fn recovery_flushes_tage_slots_only_when_no_future_training_snapshot_is_needed()
 
 #[test]
 fn call_return_ras_uses_compressed_link_instead_of_stale_btb_target() {
-    let mut driver = Driver::new();
+    check_compressed_return(Driver::new());
+}
+
+#[test]
+fn bimodal_call_return_preserves_compressed_ras_link() {
+    check_compressed_return(Driver::new_bimodal());
+}
+
+fn check_compressed_return(mut driver: Driver) {
     let first_call = 0x3002;
     let first_link = first_call + 2;
     let second_call = 0x3482;
@@ -2301,7 +2365,15 @@ fn cancelled_shadow_self_consumes_without_a_replacement_request() {
 
 #[test]
 fn back_to_back_same_index_training_forwards_between_pipeline_packets() {
-    let mut driver = Driver::new();
+    check_same_index_training(Driver::new());
+}
+
+#[test]
+fn bimodal_same_index_training_forwards_between_pipeline_packets() {
+    check_same_index_training(Driver::new_bimodal());
+}
+
+fn check_same_index_training(mut driver: Driver) {
     let pc = 0x5a02;
     let fallthrough = pc + 2;
     let target = 0x5900;
@@ -2337,6 +2409,11 @@ fn back_to_back_same_index_training_forwards_between_pipeline_packets() {
     // S1 packet forwarding must compose both increments (1 -> 2 -> 3).
     let third = driver.request_conditional(pc, fallthrough);
     assert!(third.taken);
+    assert_eq!(
+        driver.get("decision_effect_taken_q"),
+        1,
+        "a conditional BTB hit must latch TAGE's taken direction",
+    );
     driver.accept();
     driver.retire(
         third,
@@ -2355,7 +2432,15 @@ fn back_to_back_same_index_training_forwards_between_pipeline_packets() {
 
 #[test]
 fn interleaved_a_b_a_training_keeps_every_live_token_snapshot_coherent() {
-    let mut driver = Driver::new();
+    check_interleaved_training(Driver::new());
+}
+
+#[test]
+fn bimodal_interleaved_training_keeps_every_live_token_snapshot_coherent() {
+    check_interleaved_training(Driver::new_bimodal());
+}
+
+fn check_interleaved_training(mut driver: Driver) {
     let a_pc = 0x6202;
     let a_fallthrough = a_pc + 2;
     let a_target = 0x6100;

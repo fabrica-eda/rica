@@ -1,0 +1,74 @@
+/// One-cycle, one-wide always-not-taken frontend for the scalar Core.
+/// No history, target RAM, RAS or training snapshots are allocated. In-order
+/// request/response pairing and Core's flush preserve instruction association;
+/// the otherwise internal training token can therefore be constant zero.
+module StaticBranchPredictor (
+    clk                       : input  clock    ,
+    rst_n                     : input  reset    ,
+    ready                     : output logic    ,
+    request_ready             : output logic    ,
+    request_valid             : input  logic    ,
+    request_accept            : output logic    ,
+    request_fallthrough       : input  logic<32>,
+    response_accept           : input  logic    ,
+    response_valid            : output logic    ,
+    response_token            : output logic<3> ,
+    response_kind             : output logic<3> ,
+    response_taken            : output logic    ,
+    response_next_pc          : output logic<32>,
+    response_btb_hit          : output logic    ,
+    response_tage_hit         : output logic    ,
+    response_ras_fallback     : output logic    ,
+    retire_valid              : input  logic    ,
+    retire_kind               : input  logic<3> ,
+    retire_taken              : input  logic    ,
+    recover_valid             : input  logic    ,
+    discard_all               : input  logic    ,
+    conditional_resolved_event: output logic    ,
+    direction_wrong_event     : output logic    ,
+    btb_miss_event            : output logic    ,
+    ras_fallback_event        : output logic    ,
+) {
+    var valid_q      : logic    ;
+    var fallthrough_q: logic<32>;
+    var accept       : logic    ;
+    var flush        : logic    ;
+
+    always_comb {
+        flush                      = recover_valid || discard_all;
+        ready                      = 1'b1;
+        request_ready              = !flush && (!valid_q || response_accept);
+        accept                     = request_valid && request_ready;
+        request_accept             = accept;
+        response_valid             = valid_q && !flush;
+        response_token             = 3'd0;
+        response_kind              = 3'd0;
+        response_taken             = 1'b0;
+        response_next_pc           = fallthrough_q;
+        response_btb_hit           = 1'b0;
+        response_tage_hit          = 1'b0;
+        response_ras_fallback      = 1'b0;
+        conditional_resolved_event = retire_valid && (retire_kind == 3'd1);
+        direction_wrong_event      = conditional_resolved_event && retire_taken;
+        btb_miss_event             = retire_valid && (retire_kind != 3'd0);
+        ras_fallback_event         = 1'b0;
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            valid_q       = 1'b0;
+            fallthrough_q = 32'd0;
+        } else {
+            if flush {
+                valid_q = 1'b0;
+            } else if accept {
+                valid_q = 1'b1;
+            } else if response_accept {
+                valid_q = 1'b0;
+            }
+            if accept {
+                fallthrough_q = request_fallthrough;
+            }
+        }
+    }
+}

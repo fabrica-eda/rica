@@ -1,0 +1,291 @@
+/// Direct-mapped instruction cache with even/odd 64-bit line banks.
+/// INDEX_BITS 7/8/9 gives 2/4/8 KiB of instruction data. Each synchronous bank
+/// reads one line while its second port refills or scrubs. Reading the current
+/// and successor lines together sustains sequential 16/32-bit instruction
+/// windows, including an unaligned 32-bit instruction across a line boundary.
+///
+/// One outstanding tagged memory request is held until its sequence returns.
+/// A redirect may reuse or ignore its fill; FENCE.I discards it and scrubs all
+/// valid bits. Read/write collisions are masked through both read stages, so execution
+/// never depends on the FPGA's read-during-write value.
+module InstructionCache #(
+    param INDEX_BITS: u32 = 7,
+) (
+    clk                     : input  'cpu    clock              ,
+    rst_n                   : input  'cpu    reset_async_low    ,
+    invalidate              : input  'cpu    logic              ,
+    pc                      : input  'cpu    logic          <32>,
+    instruction             : output 'cpu    logic          <32>,
+    instruction_compressed  : output 'cpu    logic              ,
+    instruction_valid       : output 'cpu    logic              ,
+    memory_request_address  : output 'memory logic          <32>,
+    memory_request_sequence : output 'memory logic              ,
+    memory_response_address : input  'memory logic          <32>,
+    memory_response_line    : input  'memory logic          <64>,
+    memory_response_valid   : input  'memory logic              ,
+    memory_response_sequence: input  'memory logic              ,
+) {
+    const ROWS    : u32 = 1 << INDEX_BITS;
+    const TAG_BITS: u32 = 28 - INDEX_BITS;
+    // Four predecoded parcel lengths use otherwise spare EBR width. Keep
+    // the PC step independent of the 32-bit instruction-window data mux.
+    const ENTRY_BITS: u32 = 69 + TAG_BITS;
+
+    var response_address_async : 'cpu logic<32>        ;
+    var response_line_async    : 'cpu logic<64>        ;
+    var response_valid_async   : 'cpu logic            ;
+    var response_sequence_async: 'cpu logic            ;
+    var response_address_q     : 'cpu logic<32>        ;
+    var response_line_q        : 'cpu logic<64>        ;
+    var response_valid_q       : 'cpu logic            ;
+    var response_sequence_q    : 'cpu logic            ;
+    var request_address_q      : 'cpu logic<32>        ;
+    var request_sequence_q     : 'cpu logic            ;
+    var pending_q              : 'cpu logic            ;
+    var proposed_request_q     : 'cpu logic            ;
+    var proposed_next_q        : 'cpu logic            ;
+    var proposed_line_q        : 'cpu logic<32>        ;
+    var proposed_next_line_q   : 'cpu logic<32>        ;
+    var matched_valid_q        : 'cpu logic            ;
+    var matched_entry_q        : 'cpu logic<ENTRY_BITS>;
+    var scrub_q                : 'cpu logic            ;
+    var scrub_row_q            : 'cpu logic<INDEX_BITS>;
+
+    var pc_line           : 'cpu logic<32>            ;
+    var next_line         : 'cpu logic<32>            ;
+    var read_address      : 'cpu logic<32>         [2];
+    var read_index        : 'cpu logic<INDEX_BITS> [2];
+    var read_index_q      : 'cpu logic<INDEX_BITS> [2];
+    var read_valid_q      : 'cpu logic             [2];
+    var sampled_index_q   : 'cpu logic<INDEX_BITS> [2];
+    var sampled_valid_q   : 'cpu logic             [2];
+    var sampled_tag_q     : 'cpu logic<TAG_BITS>   [2];
+    var sampled_hit       : 'cpu logic             [2];
+    var current_bank_hit  : 'cpu logic             [2];
+    var sampled_pair_odd_q: 'cpu logic                ;
+    var pair_odd_q        : 'cpu logic                ;
+    var pair_valid_q      : 'cpu logic                ;
+    var window_next_valid : 'cpu logic                ;
+    var entry             : 'cpu logic<ENTRY_BITS> [2];
+    var bank_hit          : 'cpu logic             [2];
+    var bank_settled      : 'cpu logic             [2];
+    var write_enable      : 'cpu logic             [2];
+    var write_index       : 'cpu logic<INDEX_BITS>    ;
+    var write_entry       : 'cpu logic<ENTRY_BITS>    ;
+    var current_hit       : 'cpu logic                ;
+    var next_hit          : 'cpu logic                ;
+    var current_settled   : 'cpu logic                ;
+    var next_settled      : 'cpu logic                ;
+    var current_data      : 'cpu logic<64>            ;
+    var next_data         : 'cpu logic<64>            ;
+    var current_compressed: 'cpu logic<4>             ;
+    var desired_next      : 'cpu logic                ;
+    var miss_request      : 'cpu logic                ;
+    var fill              : 'cpu logic                ;
+
+    unsafe (cdc) {
+        assign response_address_async  = memory_response_address;
+        assign response_line_async     = memory_response_line;
+        assign response_valid_async    = memory_response_valid;
+        assign response_sequence_async = memory_response_sequence;
+        assign memory_request_address  = request_address_q;
+        assign memory_request_sequence = request_sequence_q;
+    }
+
+    always_comb {
+        pc_line = {pc[31:3], 3'b000};
+        // Bound each carry chain; the successor tag feeds the fetch-valid
+        // handshake and must not wait for a 29-bit ripple increment.
+        next_line[2:0]   = 3'd0;
+        next_line[10:3]  = pc[10:3] + 8'd1;
+        next_line[18:11] = pc[18:11] + ((pc[10:3] == 8'hff) as 8);
+        next_line[26:19] = pc[26:19] + ((pc[18:3] == 16'hffff) as 8);
+        next_line[31:27] = pc[31:27] + ((pc[26:3] == 24'hffffff) as 5);
+        read_address[0]  = pc_line;
+        // The odd current/successor bank always uses PC's row and tag.
+        read_address[1] = {pc[31:4], 1'b1, 3'd0};
+        if pc[3] {
+            read_address[0] = next_line;
+        }
+        for bank in 0..2 {
+            read_index[bank]   = read_address[bank][INDEX_BITS + 3:4];
+            bank_settled[bank] = read_valid_q[bank] && (read_index_q[bank] == read_index[bank]);
+            bank_hit[bank]     = bank_settled[bank] && entry[bank][ENTRY_BITS - 1]
+                && (entry[bank][ENTRY_BITS - 2:68] == read_address[bank][31:INDEX_BITS + 4]);
+            // Compare the demanded line directly with PC, keeping the
+            // successor increment out of the current-hit timing cone.
+            current_bank_hit[bank] = read_valid_q[bank] && (read_index_q[bank] == pc[INDEX_BITS + 3:4])
+                && entry[bank][ENTRY_BITS - 1] && (entry[bank][ENTRY_BITS - 2:68] == pc[31:INDEX_BITS + 4]);
+        }
+        current_hit        = current_bank_hit[0];
+        next_hit           = bank_hit[1];
+        current_settled    = bank_settled[0];
+        next_settled       = bank_settled[1];
+        current_data       = entry[0][63:0];
+        next_data          = entry[1][63:0];
+        current_compressed = entry[0][67:64];
+        if pc[3] {
+            current_hit        = current_bank_hit[1];
+            next_hit           = bank_hit[0];
+            current_settled    = bank_settled[1];
+            next_settled       = bank_settled[0];
+            current_data       = entry[1][63:0];
+            next_data          = entry[0][63:0];
+            current_compressed = entry[1][67:64];
+        }
+        // The preceding stage checks both tags against its captured adjacent
+        // read addresses. Qualify that pair with a current-PC hit and its
+        // starting bank, without adding PC+8 to the fetch-valid handshake.
+        window_next_valid = pair_valid_q && read_valid_q[0] && read_valid_q[1] && (pair_odd_q == pc[3]);
+        instruction_valid = current_hit && !scrub_q && !invalidate
+            && ((pc[2:1] != 2'd3) || current_compressed[3] || window_next_valid);
+        case pc[2:1] {
+            2'd0   : instruction = current_data[31:0];
+            2'd1   : instruction = current_data[47:16];
+            2'd2   : instruction = current_data[63:32];
+            default: {
+                instruction = {next_data[15:0], current_data[63:48]};
+                if current_compressed[3] {
+                    instruction = {16'd0, current_data[63:48]};
+                }
+            }
+        }
+        instruction_compressed = current_compressed[pc[2:1]];
+
+        // The response address/sequence comparison is registered together
+        // with its payload before driving EBR write enables. The request
+        // address remains stable until this accepted entry is installed.
+        fill         = matched_valid_q && pending_q && !scrub_q && !invalidate;
+        desired_next = 1'b0;
+        miss_request = !current_hit && current_settled;
+        if current_hit {
+            desired_next = 1'b1;
+            miss_request = !next_hit && next_settled;
+        }
+        miss_request = miss_request && !pending_q && !proposed_request_q && !scrub_q && !invalidate;
+        // When the demanded line arrives, propose its missing successor on
+        // the same edge. Waiting for the synchronous read to observe the fill
+        // inserts avoidable bubbles into a cold sequential instruction stream.
+        if fill && (request_address_q == pc_line) && next_settled && !next_hit {
+            desired_next = 1'b1;
+            miss_request = 1'b1;
+        }
+        write_index = request_address_q[INDEX_BITS + 3:4];
+        write_entry = matched_entry_q;
+        if scrub_q {
+            write_index = scrub_row_q;
+            write_entry = 0;
+        }
+        for bank in 0..2 {
+            write_enable[bank] = !invalidate && (scrub_q || (fill && (request_address_q[3] == bank as 1)));
+        }
+    }
+
+    for bank in 0..2 :g_bank {
+        #[sv("struo_memory = \"required\"")]
+        var memory     : 'cpu logic<ENTRY_BITS> [ROWS];
+        var read_data  : 'cpu logic<ENTRY_BITS>       ;
+        var read_data_q: 'cpu logic<ENTRY_BITS>       ;
+        assign sampled_hit[bank] = read_data[ENTRY_BITS - 1] && (read_data[ENTRY_BITS - 2:68] == sampled_tag_q[bank]);
+        always_ff (clk) {
+            read_data = memory[read_index[bank]];
+            // Isolate the EBR output from tag comparison and the Core's
+            // fetch handshake. Aligned warm streams still read ahead in
+            // alternating banks; a redirected lookup may wait one extra edge.
+            read_data_q = read_data;
+        }
+        always_ff (clk) {
+            if write_enable[bank] {
+                memory[write_index] = write_entry;
+            }
+        }
+        assign entry[bank] = read_data_q;
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            response_address_q   = 32'd0;
+            response_line_q      = 64'd0;
+            response_valid_q     = 1'b0;
+            response_sequence_q  = 1'b0;
+            request_address_q    = 32'd0;
+            request_sequence_q   = 1'b0;
+            pending_q            = 1'b0;
+            proposed_request_q   = 1'b0;
+            proposed_next_q      = 1'b0;
+            proposed_line_q      = 32'd0;
+            proposed_next_line_q = 32'd0;
+            matched_valid_q      = 1'b0;
+            matched_entry_q      = 0;
+            sampled_pair_odd_q   = 1'b0;
+            pair_odd_q           = 1'b0;
+            pair_valid_q         = 1'b0;
+            scrub_q              = 1'b1;
+            scrub_row_q          = 0;
+            for bank in 0..2 {
+                read_index_q[bank]    = 0;
+                read_valid_q[bank]    = 1'b0;
+                sampled_index_q[bank] = 0;
+                sampled_valid_q[bank] = 1'b0;
+                sampled_tag_q[bank]   = 0;
+            }
+        } else {
+            response_address_q  = response_address_async;
+            response_line_q     = response_line_async;
+            response_valid_q    = response_valid_async;
+            response_sequence_q = response_sequence_async;
+            // Separate miss detection from the held request address/sequence.
+            // Capture both address candidates before selecting one, so a
+            // late tag comparison drives only narrow proposal control.
+            proposed_request_q   = miss_request;
+            proposed_next_q      = desired_next;
+            proposed_line_q      = pc_line;
+            proposed_next_line_q = next_line;
+            sampled_pair_odd_q   = pc[3];
+            pair_odd_q           = sampled_pair_odd_q;
+            pair_valid_q         = sampled_valid_q[0] && sampled_valid_q[1] && sampled_hit[0] && sampled_hit[1];
+            matched_valid_q      = 1'b0;
+            if pending_q && !matched_valid_q && !scrub_q && !invalidate && response_valid_q
+                && (response_address_q == request_address_q) && (response_sequence_q == request_sequence_q) {
+                matched_valid_q = 1'b1;
+                matched_entry_q = {
+                    1'b1, request_address_q[31:INDEX_BITS + 4], response_line_q[49:48] != 2'b11,
+                    response_line_q[33:32] != 2'b11, response_line_q[17:16] != 2'b11, response_line_q[1:0] != 2'b11,
+                    response_line_q
+                };
+            }
+            for bank in 0..2 {
+                sampled_index_q[bank] = read_index[bank];
+                sampled_tag_q[bank]   = read_address[bank][31:INDEX_BITS + 4];
+                sampled_valid_q[bank] = !scrub_q && !invalidate
+                    && !(write_enable[bank] && (write_index == read_index[bank]));
+                read_index_q[bank]    = sampled_index_q[bank];
+                read_valid_q[bank]    = sampled_valid_q[bank] && !scrub_q && !invalidate
+                    && !(write_enable[bank] && (write_index == sampled_index_q[bank]));
+            }
+            if invalidate {
+                scrub_q          = 1'b1;
+                scrub_row_q      = 0;
+                pending_q        = 1'b0;
+                response_valid_q = 1'b0;
+            } else if scrub_q {
+                scrub_row_q = scrub_row_q + 1;
+                if scrub_row_q == ROWS - 1 {
+                    scrub_q = 1'b0;
+                }
+            } else {
+                if fill {
+                    pending_q = 1'b0;
+                }
+                if proposed_request_q && !pending_q {
+                    request_address_q = proposed_line_q;
+                    if proposed_next_q {
+                        request_address_q = proposed_next_line_q;
+                    }
+                    request_sequence_q = !request_sequence_q;
+                    pending_q          = 1'b1;
+                }
+            }
+        }
+    }
+}

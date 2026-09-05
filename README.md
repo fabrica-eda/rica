@@ -3,6 +3,20 @@
 This workspace now contains the RISC-V implementation under `riscv/` and
 the I2C block used to establish host-driven hardware debug under `i2c/`.
 
+The ECP5 RV64 architecture comparison, measurements, and implementation plan
+are recorded in [the architecture plan](riscv/RV64_ARCHITECTURE_PLAN.md).
+The current development build is scalar RV64 with static prediction and a
+4 KiB instruction cache (`HardwareCached4KTestTop`). It now closes Texo's
+routed timing at the mandatory 124.8/62.4 MHz PLL clocks: +64 ps setup and
++290 ps hold. Four RTL-model diagnostics show a 1.470x geometric-mean cycle-count
+speedup, with 140 Rust tests and 1,078 ELF model runs passing.
+The [124.8 MHz report](riscv/RV64_124P8_TIMING.md) records the bitstream,
+reproduction commands, capacity limits, and evidence. The exact image has now
+passed **98/98 physical ELF tests and eleven counters per test**, using
+one-byte JTAG writes through the Windows D2XX bridge. Eight-byte writes have
+a reproducible payload fault; the runner defaults to the verified byte-write
+path. See the [physical verification record](toolchain/measurements/2026-09-05-rv64-124p8-hardware/README.md).
+
 The former fifteen-cycle 250 MHz `Core250` design was a useful synthesis,
 placement, routing, BRAM, PLL, JTAGG, setup, and hold stress case, but it is
 not the CPU architecture being developed here. That frozen design and its
@@ -19,7 +33,9 @@ The nominal CPU target is 125 MHz. The data-sheet-valid board PLL runs at
 throughput, not Fmax alone: consecutive dependent ALU instructions sustain one
 instruction per clock through registered EX bypasses, while load-, shift-, and
 compare-use dependencies wait only for their producing stage. Board BRAM runs
-at 62.4 MHz behind response-token handshakes and a two-line instruction buffer.
+at 62.4 MHz behind response-token handshakes. The selected board configuration
+uses a synchronous L1 instruction cache; a two-line buffer is also available
+for comparisons. FENCE.I invalidates instruction storage and restarts fetch.
 The CPU frontend separately keeps a three-slot head/middle/tail fetch FIFO, so
 the predictor pipeline can remain full without conflating instruction-cache
 capacity with prediction-response capacity.
@@ -37,9 +53,11 @@ is pinned at
 `8938083a2a0e5cd9ae7b74c6b1f6be9c8afec0da593b07478c8385a421e2a12e`
 pass the ordinary and dual-clock RTL models.
 
-The current predictor-enabled source RTL regressions and Struo's proof-signed
-logical mapping transformations pass, but the board map does not yet close
-physical timing. From the exact current 31,450-cell Struo map,
+### Archived September 2 predictor checkpoint
+
+The September 2 predictor-enabled source RTL regressions and Struo's
+proof-signed logical mapping transformations passed, but that board map did
+not close physical timing. From that checkpoint's 31,450-cell Struo map,
 official nextpnr 0.11.1 static seed 5 reaches 89.598 MHz and Texo 0.1.6 reaches
 -1.813 ns setup WNS; both fail the 124.8 MHz target. The nextpnr critical path
 runs from an automatically retimed fetch-line bit to a TAGE write-enable with
@@ -48,7 +66,7 @@ register. The nextpnr result also misses the one-CPU-period memory-to-CPU
 boundary guard (9.205/8.012 ns). Disabling automatic retiming makes the routed
 CPU period 2.038 ns worse, so the unusual retimed path is not catalogued as a
 confirmed synthesis defect. No current bitstream or hardware qualification is
-claimed; the retained hashes and path breakdowns are in
+claimed for that checkpoint; the retained hashes and path breakdowns are in
 [`toolchain/measurements/2026-09-02-rica-qor.md`](toolchain/measurements/2026-09-02-rica-qor.md).
 
 ### Archived pre-predictor hardware checkpoint
@@ -71,9 +89,9 @@ generated
 On the EVN at 124.8 MHz this exact historical bitstream passed all eight
 bundled ELFs, all 51 pinned ACT4 RV64I ELFs, and all 32 pinned ACT4 RV64Zca
 ELFs. The then-current hardware runner also read and validated its six 64-bit
-performance counters after every ELF. A timing-closed predictor-enabled
-bitstream and board run are still required before claiming current physical
-coverage.
+performance counters after every ELF. The current static/L1I image has separate
+timing and physical evidence linked above, including its byte-write loading
+requirement; the historical results do not qualify its eight-byte JTAG path.
 
 Run the I2C regressions with:
 

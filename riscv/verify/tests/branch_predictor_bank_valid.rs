@@ -28,7 +28,10 @@ fn tage_image() -> &'static NativeProgramImage {
     static IMAGE: OnceLock<NativeProgramImage> = OnceLock::new();
     IMAGE.get_or_init(|| {
         SimulatorBuilder::new(
-            &source(&["TageTaggedTableMemory.veryl", "TageDirectionPredictor.veryl"]),
+            &source(&[
+                "TageTaggedTableMemory.veryl",
+                "TageDirectionPredictor.veryl",
+            ]),
             "TageDirectionPredictor",
         )
         .opt_level(OptLevel::O0)
@@ -76,7 +79,13 @@ impl TageDriver {
         ] {
             driver.set_u8(name, 0);
         }
-        for name in ["lookup_token", "snapshot_token", "update_token", "release_token", "squash_token"] {
+        for name in [
+            "lookup_token",
+            "snapshot_token",
+            "update_token",
+            "release_token",
+            "squash_token",
+        ] {
             driver.set_u8(name, 0);
         }
         driver.set_u32("lookup_pc", 0);

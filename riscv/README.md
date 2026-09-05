@@ -1,5 +1,64 @@
 # RISC-V implementation
 
+See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
+architecture study, measured results, and implementation plan.
+The current development build is **scalar RV64, static prediction,
+and a 4 KiB synchronous instruction cache**: `HardwareCached4KTestTop`.
+It closes Texo's routed timing at the mandatory CPU 124.8 MHz / memory
+62.4 MHz clocks, with +64 ps setup and +290 ps hold slack. See the
+[timing and performance report](RV64_124P8_TIMING.md) for the qualified
+bitstream, reproduction command, validation and capacity tradeoffs.
+The exact image passed **98/98 physical ELF tests with eleven counter checks
+per ELF**, loaded through the Windows D2XX bridge with one-byte writes.
+The eight-byte JTAG payload path has an open fault; the runner defaults to
+the verified byte-write workaround. See the
+[physical verification record](../toolchain/measurements/2026-09-05-rv64-124p8-hardware/README.md).
+The [earlier L1I comparison](RV64_L1I_IMPLEMENTATION.md) is historical evidence.
+
+The predictor configurations are available without editing RTL:
+
+| Predictor | Core `BRANCH_PREDICTOR_CONFIG` | Hardware `PREDICTOR_MODE` | Runner flag | Board synthesis top |
+| --- | --- | --- | --- | --- |
+| TAGE + BTB + RAS (existing default) | 0, or 1 with reset scrubbing | 0 | none | `HardwareTestTop` |
+| 2048-entry bimodal + BTB + RAS | 2, or 3 with reset scrubbing | 1 | `--bimodal` | `HardwareBimodalTestTop` |
+| Always not taken, no BTB/RAS | 4 (5 also accepted; no RAM to scrub) | 2 | `--static-predictor` | `HardwareStaticTestTop` |
+
+Hardware wrappers always enable reset scrubbing for the dynamic predictors.
+The architecture plan distinguishes routed timing estimates from qualified
+board operating clocks; none of these new builds has been programmed.
+
+The cached board tops use static prediction and the same memory, PLL and debug
+interface. `ICACHE_INDEX_BITS=7/8/9` selects 2/4/8 KiB in HardwareTestTop and
+HardwareCoreTestTop; zero selects the legacy two-line instruction buffer.
+
+| Instruction cache | Board synthesis top | Hardware-model flags |
+| --- | --- | --- |
+| 2 KiB | `HardwareCached2KTestTop` | `--static-predictor --icache-kib 2` |
+| **4 KiB (timing closed in Texo)** | `HardwareCached4KTestTop` | `--static-predictor --icache-kib 4` |
+| 8 KiB | `HardwareCached8KTestTop` | `--static-predictor --icache-kib 8` |
+
+```sh
+cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --static-predictor --cache-tests --max-cycles 100000
+cargo run --locked --offline -p verify-riscv --bin verify-riscv -- \
+  --static-predictor --icache-kib 4 --hardware-memory-rtl riscv/build/rv64-cache/*.elf
+```
+
+`--icache-kib` requires `--hardware-memory-rtl`; the ordinary Core ELF model
+has immediate instruction memory and does not measure cache performance.
+The cache suite includes self-modifying code and 3/6 KiB capacity probes.
+
+Compare the self-checking integer microbenchmarks with:
+
+```sh
+cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --benchmarks --max-cycles 100000
+cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --bimodal --benchmarks --max-cycles 100000
+cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --static-predictor --benchmarks --max-cycles 100000
+```
+
+Both predictor flags also select that configuration for the bundled ELF suite,
+ACT4, `verify-riscv --rtl-only`, and `verify-riscv --hardware-memory-rtl`.
+Use the board synthesis top in the table with `nextpnr-riscv` for a full-board map.
+
 This directory contains only the CPU being developed and its reusable
 building blocks:
 
@@ -15,6 +74,7 @@ building blocks:
 - `src/BranchTargetBuffer.veryl`: synchronous two-way target/type cache
 - `src/TageDirectionPredictor.veryl`: synchronous bimodal plus four-table TAGE
 - `src/TageTaggedTableMemory.veryl`: canonical dual-port tagged-table storage
+- `src/StaticBranchPredictor.veryl`: one-entry fallthrough response with backpressure and flush
 - `src/CsrFile.veryl`: machine-mode CSR and trap state
 - `src/PerformanceCounter64.veryl`: exact split-carry 64-bit event counter
 - `src/PerformanceEventCounters4.veryl`: four 64-bit pipeline-event counters
@@ -23,6 +83,10 @@ building blocks:
   candidate
 - `src/InstructionBuffer.veryl`: two-line CPU-side instruction buffer and
   halfword-addressable 32-bit instruction window
+- `src/InstructionCache.veryl`: two-bank synchronous 2/4/8 KiB L1I, tagged
+  refill, successor prefetch, parcel-length predecode, and FENCE.I invalidation
+- `src/HardwareCachedTestTop.veryl`: selectable full-board static-predictor
+  configurations for instruction-cache capacity comparisons
 - `src/CompressedDecoderTimingTop.veryl`: registered out-of-context timing
   fixture for the decompressor alone
 - `src/HardwareMemory.veryl`: 256 KiB unified board BRAM running at half the
@@ -266,9 +330,11 @@ WNS; it is not a fresh run of the current Texo dependency.
 CPU run/reset control, and a `tohost` result mailbox. The first physical port
 serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
-the CPU-side instruction buffer exposes a halfword-aligned window spanning up
-to two adjacent lines. After timing closure, routing, and packing
-`riscv/build/riscv-hardware-test-125-predictor.bit`, program it and run the eight
+the CPU-side instruction frontend exposes a halfword-aligned window spanning
+up to two adjacent lines. The hardware runner defaults to the physically
+verified `riscv/build/riscv-hardware-cached-4k-124p8-20260905-ce8.bit`, with
+one-byte masked writes. Its build command and hash are in the
+[124.8 MHz report](RV64_124P8_TIMING.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -297,18 +363,29 @@ cargo run --locked --offline --release -p verify-riscv \
 `tools/windows_d2xx_xvc.py` provides that bridge without replacing the
 FT2232H's Windows D2XX driver. It uses only Python's standard library and
 `ftd2xx.dll`, validates that the selected device is interface A of an
-FT2232H, and defaults to loopback-only listening. For WSL, obtain the Windows
-gateway address with `ip route show default`, then start the script from
-Windows PowerShell with that address explicitly:
+FT2232H, and defaults to loopback-only listening. On the verified Windows 11
+/ Ubuntu-24.04 WSL setup, Windows loopback is reachable from WSL. Start the
+bridge using Windows Python (Linux Python cannot load D2XX):
 
 ```powershell
 python.exe \\wsl.localhost\DISTRO\path\to\rica\riscv\tools\windows_d2xx_xvc.py `
-  --listen WSL_GATEWAY --port 3721
+  --listen 127.0.0.1 --port 3721 --device-index 0
 ```
 
-Use the same `WSL_GATEWAY:3721` with `--xvc`. Do not bind the bridge to
-`0.0.0.0`; JTAG access must remain limited to the WSL virtual network or
-loopback.
+Use `--xvc 127.0.0.1:3721` from WSL. Check the actual Windows/WSL network
+configuration if loopback is unavailable; in mirrored networking, the Linux
+default gateway can be the LAN router rather than the Windows host. For NAT
+networking, bind to the Windows-side WSL virtual interface and use that
+address from WSL. Keep the listener on loopback or the WSL virtual interface.
+
+The hardware runner defaults to **one byte per masked WRITE64 frame**.
+`--write-bytes 1` selects it explicitly; `2`, `4`, and `8` are available for
+diagnosis or separately qualified images. The current 4 KiB bitstream corrupts
+some upper payload bits with eight-byte writes, while byte writes pass the
+same instruction/position probes. Slowing JTAG from 6 MHz to 1 MHz does not
+repair wide writes. This workaround changes ELF loading time; CPU/memory
+clocks remain 124.8/62.4 MHz. See the
+[reproducer and scope of the workaround](../toolchain/mre/rv64-jtag-write64/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;
 `--act4 --act4-suite Zca` selects previously generated Zca ELFs. ER1 carries

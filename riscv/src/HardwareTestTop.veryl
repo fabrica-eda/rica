@@ -4,7 +4,10 @@
 /// while the host fills memory, then reports its self-check result through the
 /// programmed `tohost` address. ER1 returns the selected response bit while
 /// each command frame is scanned; ER2 independently reports PLL lock.
-module HardwareTestTop (
+module HardwareTestTop #(
+    param PREDICTOR_MODE   : u32 = 0,
+    param ICACHE_INDEX_BITS: u32 = 0,
+) (
     clk        : input  'reference clock             ,
     clk_cpu    : input  'cpu       clock             ,
     clk_mem    : input  'memory    clock             ,
@@ -106,48 +109,75 @@ module HardwareTestTop (
         status_bit        : pll_locked        ,
     );
 
-    inst instruction_buffer: InstructionBuffer (
-        clk: clk_cpu,
-        // Loading a new ELF resets the CPU without reconfiguring the FPGA.
-        // Flush cached lines with that same reset so a previous test cannot
-        // execute stale instructions at identical virtual addresses.
-        rst_n                  : cpu_rst_n                    ,
-        pc                     : cpu_pc[31:0]                 ,
-        instruction            : instruction                  ,
-        instruction_compressed : instruction_compressed       ,
-        instruction_valid      : instruction_valid            ,
-        memory_request_address : memory_instr_address         ,
-        memory_response_address: memory_instr_response_address,
-        memory_response_line   : memory_instr_line            ,
-        memory_response_valid  : memory_instr_response_valid  ,
-    );
+    var instruction_flush             : 'cpu    logic;
+    var memory_instr_request_sequence : 'memory logic;
+    var memory_instr_response_sequence: 'memory logic;
+    if ICACHE_INDEX_BITS == 0 :g_buffer {
+        inst instruction_buffer: InstructionBuffer (
+            clk: clk_cpu,
+            // Loading a new ELF resets the CPU without reconfiguring the FPGA.
+            // Flush cached lines with that same reset so a previous test cannot
+            // execute stale instructions at identical virtual addresses.
+            rst_n                  : cpu_rst_n                    ,
+            invalidate             : instruction_flush            ,
+            pc                     : cpu_pc[31:0]                 ,
+            instruction            : instruction                  ,
+            instruction_compressed : instruction_compressed       ,
+            instruction_valid      : instruction_valid            ,
+            memory_request_address : memory_instr_address         ,
+            memory_response_address: memory_instr_response_address,
+            memory_response_line   : memory_instr_line            ,
+            memory_response_valid  : memory_instr_response_valid  ,
+        );
+        assign memory_instr_request_sequence = 1'b0;
+    } else :g_cache {
+        inst instruction_cache: InstructionCache #(
+            INDEX_BITS: ICACHE_INDEX_BITS,
+        ) (
+            clk                     : clk_cpu                       ,
+            rst_n                   : cpu_rst_n                     ,
+            invalidate              : instruction_flush             ,
+            pc                      : cpu_pc[31:0]                  ,
+            instruction             : instruction                   ,
+            instruction_compressed  : instruction_compressed        ,
+            instruction_valid       : instruction_valid             ,
+            memory_request_address  : memory_instr_address          ,
+            memory_request_sequence : memory_instr_request_sequence ,
+            memory_response_address : memory_instr_response_address ,
+            memory_response_line    : memory_instr_line             ,
+            memory_response_valid   : memory_instr_response_valid   ,
+            memory_response_sequence: memory_instr_response_sequence,
+        );
+    }
 
     unsafe (cdc) {
         inst hardware_memory: HardwareMemory (
-            clk                       : clk_mem                      ,
-            rst_n                     : debug_rst_n                  ,
-            cpu_instr_address         : memory_instr_address         ,
-            cpu_instr_line            : memory_instr_line            ,
-            cpu_instr_response_address: memory_instr_response_address,
-            cpu_instr_response_valid  : memory_instr_response_valid  ,
-            cpu_data_address          : data_memory_addr[31:0]       ,
-            cpu_data_read             : data_rdata                   ,
-            cpu_data_write            : data_wdata                   ,
-            cpu_data_mask             : data_wmask                   ,
-            cpu_data_we               : data_we                      ,
-            cpu_data_request_sequence : data_request_sequence        ,
-            cpu_data_response_sequence: data_response_sequence       ,
-            debug_write               : memory_debug_write_q != 2'd0,
-            debug_address             : memory_debug_addr_q          ,
-            debug_data                : memory_debug_data_q          ,
+            clk                        : clk_mem                       ,
+            rst_n                      : debug_rst_n                   ,
+            cpu_instr_address          : memory_instr_address          ,
+            cpu_instr_request_sequence : memory_instr_request_sequence ,
+            cpu_instr_response_sequence: memory_instr_response_sequence,
+            cpu_instr_line             : memory_instr_line             ,
+            cpu_instr_response_address : memory_instr_response_address ,
+            cpu_instr_response_valid   : memory_instr_response_valid   ,
+            cpu_data_address           : data_memory_addr[31:0]        ,
+            cpu_data_read              : data_rdata                    ,
+            cpu_data_write             : data_wdata                    ,
+            cpu_data_mask              : data_wmask                    ,
+            cpu_data_we                : data_we                       ,
+            cpu_data_request_sequence  : data_request_sequence         ,
+            cpu_data_response_sequence : data_response_sequence        ,
+            debug_write                : memory_debug_write_q != 2'd0,
+            debug_address              : memory_debug_addr_q           ,
+            debug_data                 : memory_debug_data_q           ,
         );
     }
 
     inst core: Core #(
-        COMMIT_PAYLOAD        : 0,
-        SYNC_DATA_MEMORY      : 1,
-        RELOCATE_LOW_DATA     : 1,
-        SCRUB_BRANCH_PREDICTOR: 1,
+        COMMIT_PAYLOAD         : 0                     ,
+        SYNC_DATA_MEMORY       : 1                     ,
+        RELOCATE_LOW_DATA      : 1                     ,
+        BRANCH_PREDICTOR_CONFIG: 1 + 2 * PREDICTOR_MODE,
     ) (
         clk                   : clk_cpu                ,
         rst_n                 : cpu_rst_n              ,
@@ -177,6 +207,7 @@ module HardwareTestTop (
         commit_mem_wdata      : unused_commit_mem_wdata,
         commit_mem_wmask      : unused_commit_mem_wmask,
         debug_x31             : debug_x31              ,
+        instruction_flush     : instruction_flush      ,
     );
 
     // PLL lock and TAP reset may assert reset without a running CPU clock.

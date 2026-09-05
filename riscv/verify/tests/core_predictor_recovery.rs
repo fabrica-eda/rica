@@ -16,12 +16,21 @@ fn project_path() -> PathBuf {
         .to_owned()
 }
 
-fn native_image() -> &'static NativeProgramImage {
-    static IMAGE: OnceLock<NativeProgramImage> = OnceLock::new();
-    IMAGE.get_or_init(|| {
+fn native_image(config: u64) -> &'static NativeProgramImage {
+    static TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
+    static BIMODAL: OnceLock<NativeProgramImage> = OnceLock::new();
+    static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
+    let image = match config {
+        0 => &TAGE,
+        2 => &BIMODAL,
+        4 => &STATIC,
+        _ => panic!("unknown predictor configuration: {config}"),
+    };
+    image.get_or_init(|| {
         let source = verify_riscv::core_source(&project_path()).unwrap();
         SimulatorBuilder::new(&source, "Core")
             .param("SYNC_DATA_MEMORY", 1)
+            .param("BRANCH_PREDICTOR_CONFIG", config)
             .opt_level(OptLevel::O0)
             .compile_native()
             .unwrap()
@@ -101,6 +110,7 @@ struct Cycle {
     cm_is_store: bool,
     cm_is_csr: bool,
     memory_wait: bool,
+    instruction_flush: bool,
     data_we: bool,
     redirect_pending: bool,
     branch_redirect: bool,
@@ -139,8 +149,16 @@ struct CoreDriver {
 
 impl CoreDriver {
     fn new(program: impl IntoIterator<Item = (u32, u32)>) -> Self {
+        Self::with_predictor(program, true)
+    }
+
+    fn with_predictor(program: impl IntoIterator<Item = (u32, u32)>, use_tage: bool) -> Self {
+        Self::with_config(program, if use_tage { 0 } else { 2 })
+    }
+
+    fn with_config(program: impl IntoIterator<Item = (u32, u32)>, config: u64) -> Self {
         let simulator = SimulatorBuilder::new("", "Core")
-            .build_native_from_image(native_image().clone())
+            .build_native_from_image(native_image(config).clone())
             .unwrap();
         let mut driver = Self {
             simulator,
@@ -257,6 +275,7 @@ impl CoreDriver {
             cm_is_store: self.value("cm_is_store_q") != 0,
             cm_is_csr: self.value("cm_is_csr_q") != 0,
             memory_wait: self.value("memory_wait") != 0,
+            instruction_flush: self.value("instruction_flush") != 0,
             data_we: self.value("data_we") != 0,
             redirect_pending: self.value("redirect_pending_q") != 0,
             branch_redirect: self.value("branch_redirect_valid") != 0,
@@ -307,8 +326,9 @@ impl CoreDriver {
     }
 }
 
-fn direct_trained_driver() -> CoreDriver {
-    let mut driver = CoreDriver::new([(0, encode_jal(0, 4)), (4, encode_jal(0, -4))]);
+fn direct_trained_driver(use_tage: bool) -> CoreDriver {
+    let mut driver =
+        CoreDriver::with_predictor([(0, encode_jal(0, 4)), (4, encode_jal(0, -4))], use_tage);
     for _ in 0..300 {
         let cycle = driver.step();
         if cycle.cm_valid && cycle.cm_pc == 0 && cycle.predicted_kind == KIND_DIRECT {
@@ -706,7 +726,16 @@ fn pending_cold_jal_redirect_drops_the_wrong_path_jal_ras_action() {
 
 #[test]
 fn memory_wait_defers_ex_exception_discard_until_the_pipeline_advances() {
-    let mut driver = CoreDriver::new([(0, encode_ld(2, 0, 0)), (4, 0xffff_ffff)]);
+    check_exception_during_memory_wait(0);
+}
+
+#[test]
+fn static_memory_wait_defers_exception_discard() {
+    check_exception_during_memory_wait(4);
+}
+
+fn check_exception_during_memory_wait(config: u64) {
+    let mut driver = CoreDriver::with_config([(0, encode_ld(2, 0, 0)), (4, 0xffff_ffff)], config);
     driver.set_data_response_sequence(0);
 
     let mut held_cycles = 0;
@@ -720,20 +749,26 @@ fn memory_wait_defers_ex_exception_discard_until_the_pipeline_advances() {
                 !cycle.discard,
                 "held exception discarded predictor state early"
             );
-            let current_payload = (
-                driver.value("fetch_payload_q"),
-                driver.value("fetch_lookahead_payload_q"),
-                driver.value("fetch_tail_payload_q"),
-            );
+            // The shorter static frontend can enter this stall before the
+            // tail becomes valid. Only occupied entries must preserve data.
+            let current_payload = [
+                ("fetch_valid_q", "fetch_payload_q"),
+                ("fetch_lookahead_valid_q", "fetch_lookahead_payload_q"),
+                ("fetch_tail_valid_q", "fetch_tail_payload_q"),
+            ]
+            .map(|(valid, payload)| {
+                let occupied = driver.value(valid) != 0;
+                (occupied, if occupied { driver.value(payload) } else { 0 })
+            });
             if let Some(snapshot) = valid_payload_snapshot {
                 assert_eq!(
                     current_payload, snapshot,
                     "a valid fetch payload changed while memory_wait held the queue"
                 );
             } else {
-                assert_eq!(driver.value("fetch_valid_q"), 1);
-                assert_eq!(driver.value("fetch_lookahead_valid_q"), 1);
-                assert_eq!(driver.value("fetch_tail_valid_q"), 1);
+                if config == 0 {
+                    assert!(current_payload.iter().all(|(occupied, _)| *occupied));
+                }
                 valid_payload_snapshot = Some(current_payload);
             }
             if held_cycles == 3 {
@@ -766,7 +801,17 @@ fn memory_wait_defers_ex_exception_discard_until_the_pipeline_advances() {
 
 #[test]
 fn memory_wait_defers_ex_mismatch_recovery_until_the_pipeline_advances() {
-    let mut driver = CoreDriver::new([(0, encode_ld(2, 0, 0)), (4, encode_jal(1, 12))]);
+    check_mismatch_during_memory_wait(0);
+}
+
+#[test]
+fn static_memory_wait_defers_redirect_recovery() {
+    check_mismatch_during_memory_wait(4);
+}
+
+fn check_mismatch_during_memory_wait(config: u64) {
+    let mut driver =
+        CoreDriver::with_config([(0, encode_ld(2, 0, 0)), (4, encode_jal(1, 12))], config);
     driver.set_data_response_sequence(0);
 
     let mut held_cycles = 0;
@@ -809,12 +854,107 @@ fn memory_wait_defers_ex_mismatch_recovery_until_the_pipeline_advances() {
 }
 
 #[test]
+fn static_correct_fallthrough_does_not_flush_for_control_kind_or_direction() {
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_addi(1, 0, 1)),
+            (4, encode_branch(1, 1, 1, 12)), // BNE not taken.
+            (8, encode_jal(0, 4)),           // Taken, but next PC is fallthrough.
+            (12, encode_branch(1, 1, 0, 4)), // BEQ taken to fallthrough.
+            (16, encode_addi(3, 0, 7)),
+        ],
+        4,
+    );
+    let mut reached_target = false;
+    for _ in 0..120 {
+        let cycle = driver.step();
+        assert!(
+            !cycle.branch_redirect && !cycle.ex_mismatch && !cycle.recover,
+            "correct static next PC caused a prediction repair"
+        );
+        if cycle.commit_valid && cycle.commit_pc == 16 {
+            assert_eq!((cycle.commit_rd, cycle.commit_data), (3, 7));
+            reached_target = true;
+            break;
+        }
+    }
+    assert!(reached_target, "fallthrough sequence did not commit");
+}
+
+#[test]
+fn static_jalr_to_fallthrough_redirects_without_duplicate_retirement() {
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_addi(2, 0, 8)),
+            (4, (2 << 15) | (1 << 7) | 0x67), // JALR x1, 0(x2), target = PC + 4.
+            (8, encode_addi(3, 1, 7)),
+            (12, encode_jal(0, 0)),
+        ],
+        4,
+    );
+    let mut commits = Vec::new();
+    let mut repairs = 0;
+    for _ in 0..120 {
+        let cycle = driver.step();
+        if cycle.ex_valid && cycle.ex_pc == 4 && cycle.ex_mismatch {
+            repairs += 1;
+        }
+        if cycle.commit_valid && cycle.commit_pc < 12 {
+            commits.push(cycle.commit_pc);
+            if cycle.commit_pc == 8 {
+                assert_eq!((cycle.commit_rd, cycle.commit_data), (3, 15));
+            }
+        }
+    }
+    assert_eq!(commits, [0, 4, 8]);
+    assert_eq!(repairs, 1);
+}
+
+#[test]
+fn static_redirect_drops_wrong_path_memory_and_csr_side_effects() {
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_jal(0, 16)),
+            (4, encode_sd(1, 0, 0)),
+            (8, encode_csrrwi(0, 0x340, 17)),
+            (12, encode_ld(2, 0, 0)),
+            (16, encode_addi(3, 0, 7)),
+            (20, encode_jal(0, 0)),
+        ],
+        4,
+    );
+    let mut reached_target = false;
+    for _ in 0..120 {
+        let cycle = driver.step();
+        assert!(!cycle.data_we, "wrong-path store reached memory");
+        if cycle.commit_valid {
+            assert!(!matches!(cycle.commit_pc, 4 | 8 | 12));
+            if cycle.commit_pc == 16 {
+                assert_eq!((cycle.commit_rd, cycle.commit_data), (3, 7));
+                reached_target = true;
+            }
+        }
+    }
+    assert!(reached_target, "redirect target did not commit");
+    assert_eq!(driver.csr_value("mscratch_q"), 0);
+}
+
+#[test]
 fn stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
+    check_stale_load(true);
+}
+
+#[test]
+fn bimodal_stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
+    check_stale_load(false);
+}
+
+fn check_stale_load(use_tage: bool) {
     // First learn a direct-control BTB entry at PC zero. Replacing that
     // instruction with a load models stale predictor state after executable
     // memory changes: the load itself owns the next-PC repair, but it must
     // still wait for its synchronous data response and retire that response.
-    let mut driver = direct_trained_driver();
+    let mut driver = direct_trained_driver(use_tage);
     driver.program.insert(0, encode_ld(31, 0, 0));
     let load_value = 0x0123_4567_89ab_cdef;
     let mut acknowledged = false;
@@ -858,7 +998,16 @@ fn stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
 
 #[test]
 fn stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
-    let mut driver = direct_trained_driver();
+    check_stale_store(true);
+}
+
+#[test]
+fn bimodal_stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
+    check_stale_store(false);
+}
+
+fn check_stale_store(use_tage: bool) {
+    let mut driver = direct_trained_driver(use_tage);
     driver.program.insert(0, encode_sd(0, 0, 0));
 
     let mut acknowledged = false;
@@ -898,7 +1047,16 @@ fn stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
 
 #[test]
 fn stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
-    let mut driver = direct_trained_driver();
+    check_stale_csr(true);
+}
+
+#[test]
+fn bimodal_stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
+    check_stale_csr(false);
+}
+
+fn check_stale_csr(use_tage: bool) {
+    let mut driver = direct_trained_driver(use_tage);
     driver.program.insert(0, encode_csrrwi(0, 0x340, 7));
 
     for _ in 0..100 {
@@ -913,4 +1071,82 @@ fn stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
         }
     }
     panic!("the stale direct prediction never reached the CSR repair window");
+}
+
+#[test]
+fn fence_i_waits_for_the_older_store_then_retires_once_and_restarts_at_fallthrough() {
+    for config in [0, 2, 4] {
+        let mut driver = CoreDriver::with_config(
+            [
+                (0, encode_sd(0, 0, 0)),
+                (4, 0xffff_9f8f), // FENCE.I: reserved fields must be ignored.
+                (8, encode_addi(5, 0, 17)),
+                (12, encode_jal(0, 0)),
+            ],
+            config,
+        );
+        let mut wait_cycles = 0;
+        let mut flushed = 0;
+        let mut commits = Vec::new();
+        for _ in 0..180 {
+            if wait_cycles >= 12 {
+                driver.acknowledge_data_request();
+            }
+            let cycle = driver.step();
+            if cycle.memory_wait {
+                wait_cycles += 1;
+                assert!(
+                    !cycle.instruction_flush,
+                    "FENCE.I escaped an older LSU wait"
+                );
+            }
+            if cycle.instruction_flush {
+                assert!(wait_cycles >= 12);
+                assert_eq!(cycle.cm_pc, 4);
+                assert!(cycle.retire);
+                flushed += 1;
+            }
+            if cycle.commit_valid && cycle.commit_pc < 12 {
+                commits.push(cycle.commit_pc);
+                if cycle.commit_pc == 8 {
+                    assert_eq!(flushed, 1);
+                    assert_eq!(cycle.commit_rd, 5);
+                    assert_eq!(cycle.commit_data, 17);
+                }
+            }
+        }
+        assert_eq!(flushed, 1, "configuration {config}");
+        assert_eq!(commits, [0, 4, 8], "configuration {config}");
+    }
+}
+
+#[test]
+fn wrong_path_fence_i_neither_invalidates_nor_retires() {
+    for config in [0, 2, 4] {
+        let mut driver = CoreDriver::with_config(
+            [
+                (0, encode_branch(0, 0, 0, 8)),
+                (4, 0x0000_100f),
+                (8, encode_addi(5, 0, 23)),
+                (12, encode_jal(0, 0)),
+            ],
+            config,
+        );
+        let mut committed_target = false;
+        for _ in 0..100 {
+            let cycle = driver.step();
+            assert!(
+                !cycle.instruction_flush,
+                "wrong-path FENCE.I invalidated the cache"
+            );
+            if cycle.commit_valid {
+                assert_ne!(cycle.commit_pc, 4);
+                if cycle.commit_pc == 8 {
+                    assert_eq!(cycle.commit_data, 23);
+                    committed_target = true;
+                }
+            }
+        }
+        assert!(committed_target, "configuration {config}");
+    }
 }

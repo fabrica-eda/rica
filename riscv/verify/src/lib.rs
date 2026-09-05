@@ -3,10 +3,10 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-use celox::{NativeBackend, Simulator, SimulatorBuilder};
+use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 16] = [
+const CORE_SOURCES: [&str; 17] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -23,6 +23,7 @@ const CORE_SOURCES: [&str; 16] = [
     "ShiftHighUnit.veryl",
     "CompletionUnit.veryl",
     "Core.veryl",
+    "StaticBranchPredictor.veryl",
 ];
 
 fn reset_trampoline(entry: u64) -> Result<Vec<u32>, String> {
@@ -191,10 +192,30 @@ pub struct ElfRun {
 
 pub fn run_elf(
     core_source: &str,
+    image: ElfImage,
+    max_cycles: usize,
+) -> Result<ElfRun, Box<dyn Error>> {
+    run_elf_with_model(&compile_elf_model(core_source, 0)?, image, max_cycles)
+}
+
+/// Compile once per configuration, then instantiate fresh state per ELF.
+/// Reusing a simulator would leak predictor RAM training between workloads.
+pub fn compile_elf_model(
+    core_source: &str,
+    predictor_config: u64,
+) -> Result<NativeProgramImage, Box<dyn Error>> {
+    Ok(SimulatorBuilder::new(core_source, "Core")
+        .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
+        .compile_native()?
+        .into_program_image())
+}
+
+pub fn run_elf_with_model(
+    model: &NativeProgramImage,
     mut image: ElfImage,
     max_cycles: usize,
 ) -> Result<ElfRun, Box<dyn Error>> {
-    let mut simulator = SimulatorBuilder::new(core_source, "Core").build_native()?;
+    let mut simulator = SimulatorBuilder::new("", "Core").build_native_from_image(model.clone())?;
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let instruction = simulator.signal("instr");

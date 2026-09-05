@@ -17,6 +17,7 @@
 /// without widening the fetch/decode packets.
 module BranchPredictor #(
     param SCRUB_ON_RESET: bit = 0,
+    param USE_TAGE      : bit = 1,
 ) (
     clk                       : input  clock    ,
     rst_n                     : input  reset    ,
@@ -85,57 +86,79 @@ module BranchPredictor #(
     var retire_slot_btb_identity_stale: logic                           ;
     var retire_slot_ras_fallback      : logic                           ;
 
-    var response_fallthrough_q        : logic<32>;
-    var response_conditional_q        : logic    ;
-    var response_btb_set_q            : logic<7> ;
-    var response_btb_identity_stale_q : logic    ;
-    var table_response_accept         : logic    ;
-    var table_response_cancel         : logic    ;
-    var tables_response_valid         : logic    ;
-    var cancelled_response            : logic    ;
-    var raw_response_capture          : logic    ;
-    var decision_ready                : logic    ;
-    var decision_promote              : logic    ;
-    var decision_squash               : logic    ;
-    var decision_replacement_rollback : logic    ;
-    var decision_fast_miss            : logic    ;
-    var fast_miss_accept              : logic    ;
-    var output_ready                  : logic    ;
-    var issue_ready                   : logic    ;
-    var ingress_ready                 : logic    ;
-    var ingress_accept                : logic    ;
-    var request_fire                  : logic    ;
-    var selected_response_valid       : logic    ;
-    var selected_response_token       : logic<3> ;
-    var selected_response_kind        : logic<3> ;
-    var selected_response_target      : logic<32>;
-    var selected_response_btb_hit     : logic    ;
-    var selected_response_ras_fallback: logic    ;
-    var decision_valid_q              : logic    ;
-    var decision_token_q              : logic<3> ;
-    var decision_kind_q               : logic<3> ;
-    var decision_target_q             : logic<32>;
-    var decision_fallthrough_q        : logic<32>;
-    var decision_btb_hit_q            : logic    ;
-    var decision_btb_way_q            : logic    ;
-    var decision_btb_set_q            : logic<7> ;
-    var decision_btb_plru_q           : logic    ;
-    var decision_ras_fallback_q       : logic    ;
-    var decision_conditional_q        : logic    ;
-    var decision_match_q              : logic<4> ;
-    var decision_weak_q               : logic<4> ;
-    var decision_pred_q               : logic<5> ;
-    var apply_decision_effect         : logic    ;
-    var decision_effect_taken         : logic    ;
-    var output_valid_q                : logic    ;
-    var output_token_q                : logic<3> ;
-    var output_kind_q                 : logic<3> ;
-    var output_taken_q                : logic    ;
-    var output_next_pc_q              : logic<32>;
-    var output_fallthrough_q          : logic<32>;
-    var output_btb_hit_q              : logic    ;
-    var output_tage_hit_q             : logic    ;
-    var output_ras_fallback_q         : logic    ;
+    var response_fallthrough_q       : logic<32>;
+    var response_conditional_q       : logic    ;
+    var response_btb_set_q           : logic<7> ;
+    var response_btb_identity_stale_q: logic    ;
+    struct PredictorResponse {
+        token       : logic<3> ,
+        kind        : logic<3> ,
+        taken       : logic    ,
+        next_pc     : logic<32>,
+        btb_hit     : logic    ,
+        tage_hit    : logic    ,
+        ras_fallback: logic    ,
+    }
+    var source_response_valid         : logic                ;
+    var source_response               : PredictorResponse    ;
+    var response_tail_valid_q         : logic                ;
+    var response_tail_q               : PredictorResponse    ;
+    var response_tail_capture         : logic                ;
+    var source_accept                 : logic                ;
+    var taken_response_pending        : logic                ;
+    var table_response_accept         : logic                ;
+    var table_response_cancel         : logic                ;
+    var tables_response_valid         : logic                ;
+    var cancelled_response            : logic                ;
+    var raw_response_capture          : logic                ;
+    var decision_ready                : logic                ;
+    var decision_promote              : logic                ;
+    var decision_squash               : logic                ;
+    var decision_replacement_rollback : logic                ;
+    var decision_fast_miss            : logic                ;
+    var fast_miss_accept              : logic                ;
+    var output_ready                  : logic                ;
+    var issue_ready                   : logic                ;
+    var ingress_ready                 : logic                ;
+    var ingress_accept                : logic                ;
+    var request_fire                  : logic                ;
+    var selected_response_valid       : logic                ;
+    var selected_response_token       : logic            <3> ;
+    var selected_response_kind        : logic            <3> ;
+    var selected_response_target      : logic            <32>;
+    var selected_response_btb_hit     : logic                ;
+    var selected_response_ras_fallback: logic                ;
+    var selected_response_effect_taken: logic                ;
+    var decision_valid_q              : logic                ;
+    var decision_token_q              : logic            <3> ;
+    var decision_kind_q               : logic            <3> ;
+    var decision_target_q             : logic            <32>;
+    var decision_fallthrough_q        : logic            <32>;
+    var decision_btb_hit_q            : logic                ;
+    var decision_btb_way_q            : logic                ;
+    var decision_btb_set_q            : logic            <7> ;
+    var decision_btb_plru_q           : logic                ;
+    var decision_ras_fallback_q       : logic                ;
+    var decision_conditional_q        : logic                ;
+    // Effective direction is captured with the raw response so the
+    // speculative-history feedback does not reclassify the match metadata.
+    // This payload is intentionally reset-free; decision_valid_q masks it
+    // until a response has been captured.
+    var decision_effect_taken_q: logic    ;
+    var decision_match_q       : logic<4> ;
+    var decision_weak_q        : logic<4> ;
+    var decision_pred_q        : logic<5> ;
+    var apply_decision_effect  : logic    ;
+    var decision_effect_taken  : logic    ;
+    var output_valid_q         : logic    ;
+    var output_token_q         : logic<3> ;
+    var output_kind_q          : logic<3> ;
+    var output_taken_q         : logic    ;
+    var output_next_pc_q       : logic<32>;
+    var output_fallthrough_q   : logic<32>;
+    var output_btb_hit_q       : logic    ;
+    var output_tage_hit_q      : logic    ;
+    var output_ras_fallback_q  : logic    ;
 
     // The external fetch request is decoupled from the synchronous table
     // issue edge by one elastic entry.  In addition to the architectural
@@ -448,6 +471,7 @@ module BranchPredictor #(
     // and token visible to Struo's memory recognizer.
     inst tage: TageDirectionPredictor #(
         SCRUB_ON_RESET: SCRUB_ON_RESET,
+        USE_TAGE      : USE_TAGE      ,
     ) (
         clk                    : clk                         ,
         rst_n                  : rst_n                       ,
@@ -616,15 +640,22 @@ module BranchPredictor #(
         // it into the decision queue.  Mark that pop as cancellation as well,
         // so neither the BTB replacement state nor a TAGE training snapshot is
         // provisionally claimed by a lookup which the wrapper is flushing.
-        table_response_cancel   = (output_valid_q && output_taken_q) || recover_valid || discard_all;
+        // The response tail is a one-entry fall-through skid buffer.  Its
+        // registered occupancy, rather than the external consumer's current
+        // accept, owns the internal response transfer.  A taken response keeps
+        // the cancellation barrier live after it has moved into that tail.
+        source_accept           = !response_tail_valid_q;
+        taken_response_pending  = (output_valid_q && output_taken_q)
+            || (response_tail_valid_q && response_tail_q.taken);
+        table_response_cancel   = taken_response_pending || recover_valid || discard_all;
         cancelled_response      = tables_response_valid && table_response_cancel;
         selected_response_valid = tables_response_valid && !table_response_cancel;
         // Both one-entry pipeline stages support simultaneous pop/push.  The
         // metadata bits feed only the classified output/history registers;
         // readiness, raw table pop, and lookup launch depend on valid bits and
         // the already-registered output direction.
-        output_ready    = !output_valid_q || response_accept;
-        decision_squash = decision_valid_q && output_valid_q && output_taken_q;
+        output_ready    = !output_valid_q || source_accept;
+        decision_squash = decision_valid_q && taken_response_pending;
         // A metadata packet has already advanced the BTB PLRU when it entered
         // the decision queue.  If recovery/discard removes that packet before
         // it becomes externally visible, restore the saved pre-claim bit.  This
@@ -636,7 +667,7 @@ module BranchPredictor #(
         // only when no older output exists; the decision register itself then
         // supplies stable backpressure storage.
         decision_fast_miss   = decision_valid_q && !decision_btb_hit_q && !output_valid_q;
-        fast_miss_accept     = decision_fast_miss && response_accept && !recover_valid && !discard_all;
+        fast_miss_accept     = decision_fast_miss && source_accept && !recover_valid && !discard_all;
         decision_promote     = decision_valid_q && decision_btb_hit_q && output_ready && !decision_squash
             && !recover_valid && !discard_all;
         decision_ready       = !decision_valid_q || decision_promote || fast_miss_accept || decision_squash;
@@ -656,7 +687,7 @@ module BranchPredictor #(
         // the table response is held, then issue it once the table pair is
         // available.  When an ingress entry issues on this edge, it is also
         // legal to enqueue the next request on the same edge.
-        issue_ready   = btb_ready && tage_ready && !recover_valid && !discard_all && !(output_valid_q && output_taken_q)
+        issue_ready   = btb_ready && tage_ready && !recover_valid && !discard_all && !taken_response_pending
             && ((!btb_response_valid && !tage_response_valid) || raw_response_capture);
         request_fire  = ingress_valid_q && issue_ready;
         ingress_ready = !ingress_valid_q || request_fire;
@@ -664,7 +695,7 @@ module BranchPredictor #(
         // requests are not acknowledged until both table memories are ready.
         // The S0 entry hides normal response backpressure, not initialization.
         request_ready  = btb_ready && tage_ready && ingress_ready && !recover_valid && !discard_all
-            && !(output_valid_q && output_taken_q);
+            && !taken_response_pending;
         ingress_accept = request_valid && request_ready;
         request_accept = ingress_accept;
         // Payload registers are elastic storage: their valid bit masks any
@@ -692,6 +723,10 @@ module BranchPredictor #(
         selected_response_target       = btb_response_target;
         selected_response_btb_hit      = btb_response_hit;
         selected_response_ras_fallback = 1'b0;
+        // A BTB miss has no predicted direction.  Non-conditional BTB hits
+        // (JAL/JALR/call/return/coroutine) are always taken; only a
+        // conditional hit consumes TAGE's final direction bit.
+        selected_response_effect_taken = 1'b0;
 
         // speculative_sp_q points at the next push word, so rotate the
         // sixteen effective entries once and select the preceding word by the
@@ -753,6 +788,10 @@ module BranchPredictor #(
                 }
                 default: {}
             }
+            selected_response_effect_taken = 1'b1;
+            if selected_response_kind == 3'd1 {
+                selected_response_effect_taken = tage_response_taken;
+            }
         }
 
         // The fetch instruction, rather than mutable/aliased BTB metadata,
@@ -761,7 +800,7 @@ module BranchPredictor #(
         // miss path is explicitly not-taken, while a stale taken-class entry
         // follows its predicted target and appends taken until recovery.
         apply_decision_effect = decision_promote || fast_miss_accept;
-        decision_effect_taken = decision_history_taken;
+        decision_effect_taken = decision_effect_taken_q;
         if fast_miss_accept {
             decision_effect_taken = 1'b0;
         }
@@ -845,26 +884,65 @@ module BranchPredictor #(
         enqueue_tage_tag3   = (request_pc[9:1] ^ request_pc[18:10] ^ request_pc[27:19] ^ {5'd0, request_pc[31:28]})
             ^ lookup_tag_a_fold.bank3 ^ {lookup_tag_b_fold.bank3, 1'b0};
 
-        // Output ports are leaves of the wrapper logic.  Internal state and
-        // feedback consume the selected signals above, never the port nets.
-        response_valid        = output_valid_q;
-        response_token        = output_token_q;
-        response_kind         = output_kind_q;
-        response_taken        = output_taken_q;
-        response_next_pc      = output_next_pc_q;
-        response_btb_hit      = output_btb_hit_q;
-        response_tage_hit     = output_tage_hit_q;
-        response_ras_fallback = output_ras_fallback_q;
-        if decision_fast_miss {
-            response_valid        = 1'b1;
-            response_token        = decision_token_q;
-            response_kind         = 3'd0;
-            response_taken        = 1'b0;
-            response_next_pc      = decision_fallthrough_q;
-            response_btb_hit      = 1'b0;
-            response_tage_hit     = 1'b0;
-            response_ras_fallback = 1'b0;
+        // Disconnect the unused history network at the compact configuration
+        // boundary. Otherwise its state can remain live through the training
+        // snapshots even after the tagged BRAM instances have been removed.
+        if !USE_TAGE {
+            enqueue_tage_index0 = 9'd0;
+            enqueue_tage_index1 = 9'd0;
+            enqueue_tage_index2 = 9'd0;
+            enqueue_tage_index3 = 9'd0;
+            enqueue_tage_tag0   = 9'd0;
+            enqueue_tage_tag1   = 9'd0;
+            enqueue_tage_tag2   = 9'd0;
+            enqueue_tage_tag3   = 9'd0;
         }
+
+        // First construct the old predictor source response.  Internal state
+        // transfers this packet whenever the registered tail is empty,
+        // independently of external backpressure.
+        source_response_valid        = output_valid_q;
+        source_response.token        = output_token_q;
+        source_response.kind         = output_kind_q;
+        source_response.taken        = output_taken_q;
+        source_response.next_pc      = output_next_pc_q;
+        source_response.btb_hit      = output_btb_hit_q;
+        source_response.tage_hit     = output_tage_hit_q;
+        source_response.ras_fallback = output_ras_fallback_q;
+        if decision_fast_miss {
+            source_response_valid        = 1'b1;
+            source_response.token        = decision_token_q;
+            source_response.kind         = 3'd0;
+            source_response.taken        = 1'b0;
+            source_response.next_pc      = decision_fallthrough_q;
+            source_response.btb_hit      = 1'b0;
+            source_response.tage_hit     = 1'b0;
+            source_response.ras_fallback = 1'b0;
+        }
+
+        // The public interface is fall-through when the tail is empty.  Once
+        // backpressure captures a packet, the tail remains the ordered head
+        // while the old source response is held immediately behind it.
+        response_valid        = source_response_valid;
+        response_token        = source_response.token;
+        response_kind         = source_response.kind;
+        response_taken        = source_response.taken;
+        response_next_pc      = source_response.next_pc;
+        response_btb_hit      = source_response.btb_hit;
+        response_tage_hit     = source_response.tage_hit;
+        response_ras_fallback = source_response.ras_fallback;
+        if response_tail_valid_q {
+            response_valid        = 1'b1;
+            response_token        = response_tail_q.token;
+            response_kind         = response_tail_q.kind;
+            response_taken        = response_tail_q.taken;
+            response_next_pc      = response_tail_q.next_pc;
+            response_btb_hit      = response_tail_q.btb_hit;
+            response_tage_hit     = response_tail_q.tage_hit;
+            response_ras_fallback = response_tail_q.ras_fallback;
+        }
+        response_tail_capture = source_accept && source_response_valid && !response_accept && !recover_valid
+            && !discard_all;
     }
 
     // Only an accepted prediction can feed a same-edge lookup. At request time
@@ -1237,7 +1315,7 @@ module BranchPredictor #(
             }
         }
 
-        if response_accept && output_valid_q {
+        if source_accept && output_valid_q {
             case output_kind_q {
                 3'd4: {
                     speculative_ras_write_valid   = 1'b1;
@@ -1405,9 +1483,44 @@ module BranchPredictor #(
                 output_valid_q = 1'b0;
             } else if decision_promote {
                 output_valid_q = 1'b1;
-            } else if response_accept {
+            } else if source_accept {
                 output_valid_q = 1'b0;
             }
+        }
+    }
+
+    // The tail valid bit is the ready cut.  A full tail may be drained by the
+    // external consumer, but the held source is deliberately not accepted on
+    // that same edge.  It becomes the fall-through public response on the next
+    // cycle, preserving visible throughput without a combinational ready path.
+    always_ff (clk, rst_n) {
+        if_reset {
+            response_tail_valid_q = 1'b0;
+        } else {
+            if recover_valid || discard_all {
+                response_tail_valid_q = 1'b0;
+            } else if response_tail_valid_q {
+                if response_accept {
+                    response_tail_valid_q = 1'b0;
+                }
+            } else if response_tail_capture {
+                response_tail_valid_q = 1'b1;
+            }
+        }
+    }
+
+    // Payload is non-architectural while valid is clear, so it intentionally
+    // has no reset mux.  Old-value semantics capture the source before its
+    // output/decision storage advances on the same edge.
+    always_ff (clk) {
+        if response_tail_capture {
+            response_tail_q.token        = source_response.token;
+            response_tail_q.kind         = source_response.kind;
+            response_tail_q.taken        = source_response.taken;
+            response_tail_q.next_pc      = source_response.next_pc;
+            response_tail_q.btb_hit      = source_response.btb_hit;
+            response_tail_q.tage_hit     = source_response.tage_hit;
+            response_tail_q.ras_fallback = source_response.ras_fallback;
         }
     }
 
@@ -1448,6 +1561,7 @@ module BranchPredictor #(
             decision_btb_plru_q       = btb_response_plru;
             decision_ras_fallback_q   = selected_response_ras_fallback;
             decision_conditional_q    = response_conditional_q;
+            decision_effect_taken_q   = selected_response_effect_taken;
             decision_match_q          = tage_response_match_metadata;
             decision_weak_q           = tage_response_weak_metadata;
             decision_pred_q           = tage_response_pred_metadata;

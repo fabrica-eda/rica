@@ -897,6 +897,7 @@ fn emit_test(
     bus: &mut impl DirectJtag,
     image: &ElfImage,
     run_tck: usize,
+    write_bytes: usize,
     expected_tohost: u64,
     observe_metrics: bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -907,8 +908,8 @@ fn emit_test(
     session.control(2);
 
     for (address_base, start, end) in ranges {
-        for offset in (start..end).step_by(8) {
-            let chunk_end = end.min(offset + 8);
+        for offset in (start..end).step_by(write_bytes) {
+            let chunk_end = end.min(offset + write_bytes);
             let mut bytes = [0_u8; 8];
             bytes[..chunk_end - offset].copy_from_slice(&memory[offset..chunk_end]);
             let valid_bytes = chunk_end - offset;
@@ -966,10 +967,18 @@ fn emit_test(
 fn test_svf(
     image: &ElfImage,
     run_tck: usize,
+    write_bytes: usize,
     expected_tohost: u64,
 ) -> Result<String, Box<dyn Error>> {
     let mut bus = SvfDirect::new();
-    emit_test(&mut bus, image, run_tck, expected_tohost, false)?;
+    emit_test(
+        &mut bus,
+        image,
+        run_tck,
+        write_bytes,
+        expected_tohost,
+        false,
+    )?;
     bus.text.push_str("STATE IDLE;\n");
     Ok(bus.text)
 }
@@ -988,15 +997,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut arguments = env::args_os().skip(1);
     let mut run_tck = DEFAULT_RUN_TCK;
+    // The qualified 4 KiB board image corrupts some upper WRITE64 payload
+    // bits on silicon. Single-byte masked writes pass the same probes while
+    // preserving the CPU/PLL configuration; wider writes require an explicit
+    // selection until the transport is repaired and qualified again.
+    let mut write_bytes = 1_usize;
     let mut expected_tohost = 1_u64;
     let mut program = true;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
-    // Do not silently program the archived pre-predictor image.  A current
-    // hardware run must either build the predictor-qualified artifact below
-    // or name another bitstream explicitly with --bitstream.
-    let mut bitstream = project.join("build/riscv-hardware-test-125-predictor.bit");
+    // Use the exact 124.8 MHz / 4 KiB image physically verified with byte
+    // writes. Other implementations must be selected with --bitstream.
+    let mut bitstream = project.join("build/riscv-hardware-cached-4k-124p8-20260905-ce8.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {
@@ -1006,6 +1019,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .to_str()
                 .ok_or("--run-tck is not valid UTF-8")?
                 .parse()?;
+        } else if argument == "--write-bytes" {
+            write_bytes = arguments
+                .next()
+                .ok_or("--write-bytes requires 1, 2, 4, or 8")?
+                .to_str()
+                .ok_or("--write-bytes is not valid UTF-8")?
+                .parse()?;
+            if ![1, 2, 4, 8].contains(&write_bytes) {
+                return Err("--write-bytes requires 1, 2, 4, or 8".into());
+            }
         } else if argument == "--expect-tohost" {
             let value = arguments.next().ok_or("--expect-tohost requires a value")?;
             let value = value.to_str().ok_or("--expect-tohost is not valid UTF-8")?;
@@ -1081,13 +1104,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             .ok_or("ELF has no valid filename")?;
         if let Some(xvc) = &mut xvc {
             let mut bus = XvcDirect::new();
-            emit_test(&mut bus, &image, run_tck, expected_tohost, true)?;
+            emit_test(
+                &mut bus,
+                &image,
+                run_tck,
+                write_bytes,
+                expected_tohost,
+                true,
+            )?;
             let metrics = metric_values(&xvc.shift(&bus)?)?;
             validate_metrics(name, metrics)?;
             println!("METRIC {name:<22} {}", format_metrics(metrics));
         } else {
             let svf = output_dir.join(format!("{name}.svf"));
-            fs::write(&svf, test_svf(&image, run_tck, expected_tohost)?)?;
+            fs::write(
+                &svf,
+                test_svf(&image, run_tck, write_bytes, expected_tohost)?,
+            )?;
             checked_command(Command::new(&loader).args(["-b", "ecp5_evn"]).arg(&svf))?;
         }
         println!("PASS {name:<24} hardware tohost=0x{expected_tohost:016x}");

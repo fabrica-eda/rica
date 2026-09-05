@@ -145,6 +145,8 @@ fn validated_board_clock_relation(pll: &PllBinding) -> Result<BoardClockRelation
 }
 
 fn csr_register_enable_limit(name: &str) -> Option<usize> {
+    let normalized = name.replacen("ff_board.core.", "ff_core.", 1);
+    let name = normalized.as_str();
     let group = name.split_once('[').map_or(name, |entry| entry.0);
     match group {
         "ff_core.csr_file.mcause_q"
@@ -203,7 +205,15 @@ fn mapped_cell_domain(cell: &str) -> Option<BoardClockDomain> {
         };
         hierarchy = stripped;
     }
-    if hierarchy.starts_with("core.") {
+    hierarchy = hierarchy.strip_prefix("board.").unwrap_or(hierarchy);
+    if [
+        "core.",
+        "g_cache.instruction_cache.",
+        "g_buffer.instruction_buffer.",
+    ]
+    .iter()
+    .any(|prefix| hierarchy.starts_with(prefix))
+    {
         Some(BoardClockDomain::Cpu)
     } else if hierarchy.starts_with("hardware_memory.") {
         Some(BoardClockDomain::Memory)
@@ -254,7 +264,15 @@ fn board_clock_timings(report: &Value) -> Result<(ClockTiming, ClockTiming), Box
             .ok_or("nextpnr critical path has no segment array")?;
 
         let source_domain = segments.first().and_then(|segment| {
-            segment["from"]["cell"]
+            // In nextpnr 0.6 a packed CLK endpoint can carry another cell's
+            // name. The Q endpoint of the clk-to-q arc identifies the actual
+            // launch register, including on newer report formats.
+            let endpoint = if segment["type"] == "clk-to-q" {
+                "to"
+            } else {
+                "from"
+            };
+            segment[endpoint]["cell"]
                 .as_str()
                 .and_then(mapped_cell_domain)
         });
@@ -411,13 +429,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         "TageDirectionPredictor" => ("tage-direction-125.nextpnr.json", 125),
         "Top" => ("riscv-top-125.nextpnr.json", 125),
         "HardwareTestTop" => ("riscv-hardware-test-125.nextpnr.json", 125),
+        "HardwareBimodalTestTop" => ("riscv-hardware-bimodal-test-125.nextpnr.json", 125),
+        "HardwareStaticTestTop" => ("riscv-hardware-static-test-125.nextpnr.json", 125),
+        "HardwareCached2KTestTop" => ("riscv-hardware-cached-2k-test-125.nextpnr.json", 125),
+        "HardwareCached4KTestTop" => ("riscv-hardware-cached-4k-test-125.nextpnr.json", 125),
+        "HardwareCached8KTestTop" => ("riscv-hardware-cached-8k-test-125.nextpnr.json", 125),
         // Keep the standalone ALU diagnostics at their intentionally harder
         // 150 MHz target even though the integrated CPU now targets 125 MHz.
         "FullAluTimingTop" => ("alu-full-single-cycle-150.nextpnr.json", 150),
         "FunnelShiftTimingTop" => ("funnel-shift-single-cycle-150.nextpnr.json", 150),
         _ => {
             return Err(format!(
-                "expected Core, BranchPredictor, TageDirectionPredictor, Top, HardwareTestTop, FullAluTimingTop, or FunnelShiftTimingTop, received {top}"
+                "expected Core, BranchPredictor, TageDirectionPredictor, Top, HardwareTestTop, HardwareBimodalTestTop, HardwareStaticTestTop, HardwareCached2KTestTop, HardwareCached4KTestTop, HardwareCached8KTestTop, FullAluTimingTop, or FunnelShiftTimingTop, received {top}"
             )
             .into());
         }
@@ -427,9 +450,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         "AluTimingTop.veryl",
         "Top.veryl",
         "InstructionBuffer.veryl",
+        "InstructionCache.veryl",
+        "HardwareCachedTestTop.veryl",
         "HardwareMemory.veryl",
         "JtagDebugTransport.veryl",
         "HardwareTestTop.veryl",
+        "HardwareBimodalTestTop.veryl",
+        "HardwareStaticTestTop.veryl",
     ] {
         source.push('\n');
         source.push_str(&fs::read_to_string(project.join("src").join(file))?);
@@ -449,7 +476,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             ..MappingOptions::default()
         },
     )?;
-    if top == "HardwareTestTop" {
+    if !mapped.retiming().equivalence_signed_off {
+        return Err("Struo mapping equivalence was not signed off".into());
+    }
+    let is_board = matches!(
+        top.as_str(),
+        "HardwareTestTop"
+            | "HardwareBimodalTestTop"
+            | "HardwareStaticTestTop"
+            | "HardwareCached2KTestTop"
+            | "HardwareCached4KTestTop"
+            | "HardwareCached8KTestTop"
+    );
+    if is_board {
         mapped.bind_jtagg(&JtaggBinding::with_prefix("jtag"))?;
         let pll = board_pll(project)?;
         mapped.bind_pll(&pll)?;
@@ -461,7 +500,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         mapped = mapped.apply_physical_feedback(&feedback);
     }
-    if top == "HardwareTestTop" {
+    if is_board {
         // Mapping may legitimately absorb a self-hold into D on individual
         // bits. Constrain only FFs that actually retain a routed CE pin;
         // selecting a broad source-level vector would reject mixed-CE groups.
@@ -613,6 +652,14 @@ mod tests {
     #[test]
     fn nextpnr_uses_the_same_csr_ce_limits_as_the_texo_flow() {
         assert_eq!(
+            csr_register_enable_limit("ff_board.core.csr_file.mcause_q[63]"),
+            Some(4)
+        );
+        assert_eq!(
+            csr_register_enable_limit("ff_board.core.csr_file.event_counters.low_q[3][31]"),
+            Some(8)
+        );
+        assert_eq!(
             csr_register_enable_limit("ff_core.csr_file.mcause_q[63]"),
             Some(4)
         );
@@ -634,6 +681,29 @@ mod tests {
             message,
             "Board timing valid: CPU 130.00/125.00 MHz, memory 80.00/62.50 MHz; CPU->memory 7.500/8.000 ns, memory->CPU 7.750/8.000 ns"
         );
+    }
+
+    #[test]
+    fn packed_clock_pin_alias_does_not_misidentify_the_launch_domain() {
+        let mut report = board_report(false, 7.0);
+        for path in report["critical_paths"].as_array_mut().unwrap() {
+            let segments = path["path"].as_array_mut().unwrap();
+            let launch = segments[0]["from"].clone();
+            segments.insert(
+                0,
+                json!({
+                    "type": "clk-to-q", "delay": 0.3,
+                    "from": { "cell": "ff_core.unrelated_packed_clock_pin", "port": "CLK" },
+                    "to": launch,
+                }),
+            );
+        }
+        assert!(validate_board_report_value(&report, synthetic_relation()).is_ok());
+        report["fmax"]["$glbnet$cpu"]["achieved"] = json!(90.0);
+        let error = validate_board_report_value(&report, synthetic_relation())
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("interior timing failed:"));
     }
 
     #[test]
@@ -702,5 +772,38 @@ mod tests {
             Some(BoardClockDomain::Memory)
         );
         assert_eq!(mapped_cell_domain("retime_ff_score.value_q"), None);
+        assert_eq!(
+            mapped_cell_domain("retime_ff_board.core.cm_pc_q[0]"),
+            Some(BoardClockDomain::Cpu)
+        );
+        assert_eq!(
+            mapped_cell_domain("bram_board.hardware_memory.bank_0"),
+            Some(BoardClockDomain::Memory)
+        );
+    }
+
+    #[test]
+    fn cache_only_critical_endpoints_identify_the_cpu_clock() {
+        let mut report = board_report(false, 7.75);
+        for path in report["critical_paths"].as_array_mut().unwrap() {
+            for segment in path["path"].as_array_mut().unwrap() {
+                for endpoint in ["from", "to"] {
+                    if segment[endpoint]["cell"]
+                        .as_str()
+                        .is_some_and(|cell| cell.starts_with("ff_core."))
+                    {
+                        segment[endpoint]["cell"] = Value::String(
+                            "retime_bram_board.g_cache.instruction_cache.g_bank_0.memory"
+                                .to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+        assert!(validate_board_report_value(&report, synthetic_relation()).is_ok());
+        assert_eq!(
+            mapped_cell_domain("ff_board.g_buffer.instruction_buffer.response_line_q[0]"),
+            Some(BoardClockDomain::Cpu)
+        );
     }
 }

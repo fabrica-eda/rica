@@ -29,6 +29,7 @@ interface DecodeBus {
     var is_ecall     : logic    ;
     var is_ebreak    : logic    ;
     var is_mret      : logic    ;
+    var is_fence_i   : logic    ;
     var illegal      : logic    ;
 
     modport core {
