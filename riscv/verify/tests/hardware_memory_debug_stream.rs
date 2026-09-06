@@ -87,10 +87,22 @@ fn consecutive_debug_bytes_survive_both_bram_ports() {
         .parent()
         .unwrap();
     let source = std::fs::read_to_string(project.join("src/HardwareMemory.veryl")).unwrap();
-    check_stream(
-        celox::SimulatorBuilder::new(&source, "HardwareMemory")
-            .build_native()
-            .unwrap(),
-    )
-    .unwrap();
+    let parameterized = source.replace(
+        "module HardwareMemory (",
+        "module HardwareMemory #(param FAST_LSU: u32 = 0,) (",
+    );
+    assert_ne!(source, parameterized);
+    for (label, source) in [("original", source), ("unused-parameter", parameterized)] {
+        for level in [
+            celox::OptLevel::O0,
+            celox::OptLevel::O1,
+            celox::OptLevel::O2,
+        ] {
+            let build = || celox::SimulatorBuilder::new(&source, "HardwareMemory").opt_level(level);
+            check_stream(build().build_native().unwrap())
+                .unwrap_or_else(|error| panic!("native {label} {level:?}: {error}"));
+            check_stream(build().build_wasm().unwrap())
+                .unwrap_or_else(|error| panic!("wasm {label} {level:?}: {error}"));
+        }
+    }
 }

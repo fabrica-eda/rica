@@ -25,7 +25,7 @@ tool. Unconfirmed observations remain excluded until a reproducer is retained.
 | STR-011 | Struo ECP5 mapper | [PR #86](https://github.com/fabrica-eda/struo/pull/86) validated (`eff404d`) and pinned through Texo PR #60 (`893d699`) | integration revision `eb6dd6a` and upstream before PR #86 | INIT-independent dynamic LUT inputs create false timing arcs and unnecessary routing load |
 | CEL-001 | Celox native x86 backend | Historical fix; original Rica MRE/log not retained | before PR #712 | SSA reload materialization could exhaust the register allocator |
 | CEL-002 | Celox SIR optimizer | [PR #736](https://github.com/celox-sim/celox/pull/736) open (`c005d316`); current workflow pins validated 0.3.1 [backport `f5c548d5`](https://github.com/celox-sim/celox/commit/f5c548d5d4becb298f924ab06e1febb9eb3da064) | Celox 0.3.1 and upstream before `c005d316` | Rejecting a >128-bit concat fold can discard operands and make native verification fail |
-| CEL-003 | Celox source-memory simulation | Counterexample retained; component/root cause unresolved | `7bb38a0` and native control at local `4342678` | Adding an unused module parameter shifts consecutive debug bytes by one write |
+| CEL-003 | Celox source-memory simulation | Fixed locally; [PR #755](https://github.com/celox-sim/celox/pull/755) submitted with FF optimization | 0.4.5 `9aa2457` + four vendored crate patches | Shared-clock FF publication order, WASM store spill, native padded array access |
 | TEX-001 | Texo ECP5 STA | Fixed upstream/current pin | before `bcc53c6` | Corner, clock-edge, and margin policy did not correlate with nextpnr |
 | TEX-002 | Texo hold ECO | Fixed upstream/current pin | before `299836dd` | A pin-only FF rebinding could leave an invalid frozen route |
 | TEX-003 | Texo implementation | Fixed upstream/current pin | before `522d7caf` | Successful P&R could emit a functionally wrong configuration |
@@ -579,15 +579,48 @@ adds one unused parameter to the original `HardwareMemory`, with no other RTL
 change. Native simulation passes the original consecutive-byte stream but
 returns the following write's byte at each address in the parameterized form.
 WASM also disagrees with the expected stream, including on the original source.
-This is a confirmed simulation discrepancy; frontend, scheduling and backend
-ownership remain unresolved. Updating to the available local Celox 0.4.4 tree
-did not fix the native failure, and the dependency change was discarded.
+Updating to official Celox 0.4.5 reproduced the same failures. The byte shift
+was isolated to shared-clock FF event assembly: the ordinary tick path
+published one reset group's updates before evaluating the other groups.
+The parameter changes variable/map ordering, exposing this pre-edge sampling
+violation. Merging all evaluations followed by all applications fixes it.
+The fused comb/FF schedule was already correct.
 
-The LSU prototype is archived and supplies no CPU-model IPC result. The normal
-31 RTL files match the physical native-JTCK baseline, whose exact bitstream
-passed 100 distinct ELFs. A native regression protects its consecutive-byte
-loader behavior; the failing parameterized circuit is an explicit reproducer,
-not an ignored qualification test or an adopted CPU change.
+Two independent backend defects also appeared in the expanded matrix. WASM
+lost spill bits when a shifted scalar store covered more than 64 destination
+bits. Native late optimization created aggregate accesses across padded array
+elements even at O0. The fixes use destination coverage for WASM and split
+native accesses at logical element boundaries. In the correctness-only
+baseline, independent negative controls failed when each corresponding fix
+was removed.
+
+The adopted dependency is 0.4.5 `9aa2457` with four
+[vendored crate patches](toolchain/vendor/celox/README.md). Original and
+parameterized memories pass native, Cranelift, interpreter and WASM at all
+three optimization levels (24 cases). The active regression covers both
+source forms at O0/O1/O2 on native and WASM. Struo's separate 0.3.1 dependency
+and optimizer backport are retained.
+
+The follow-up [FF performance work](toolchain/measurements/2026-09-06-celox-ff-performance/README.md)
+reuses the existing dependency scheduler for ordinary multi-group tick events
+and fixes two missed native StateSSA promotion cases. Safe direct updates and
+register values remove unnecessary staging while preserving pre-edge reads.
+The correct merged two-phase unit remains the fallback for adapters without
+source-aware lowering. The fourth crate patch is this optimizer change;
+the three original correctness defects are unchanged.
+
+The fixes and optimization were submitted as
+[Celox PR #755](https://github.com/celox-sim/celox/pull/755), based on current
+`master` `01acba6ec`. The [submission record](toolchain/measurements/2026-09-06-celox-pr/README.md)
+contains the final commit, validation on that base, and the two test-only SV
+exclusions for unsupported four-state FF event signals.
+
+The historical failed LSU run supplies no IPC result. The normal 31 RTL files
+match the physical native-JTCK baseline, whose exact bitstream passed 100
+distinct ELFs. The new [validation record](toolchain/measurements/2026-09-06-celox-memory-fix/README.md)
+separates simulator regressions and the isolated LSU-disabled CPU replay from
+that earlier physical qualification. Fixing the simulator does not resolve
+the independently rejected LSU candidates' routed timing.
 
 ## TEX-001 — ECP5 STA did not correlate with nextpnr
 

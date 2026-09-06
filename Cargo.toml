@@ -1,5 +1,11 @@
 [workspace]
 members = ["i2c/verify", "riscv/verify"]
+exclude = [
+    "toolchain/vendor/celox/celox-frontend-core",
+    "toolchain/vendor/celox/celox-backend-wasm",
+    "toolchain/vendor/celox/celox-backend-x86",
+    "toolchain/vendor/celox/celox-sir-opt",
+]
 default-members = ["riscv/verify"]
 resolver = "3"
 
@@ -10,7 +16,7 @@ rust-version = "1.98"
 [workspace.dependencies]
 serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
-celox = { git = "https://github.com/celox-sim/celox.git", rev = "7bb38a0ce4d66f349d499b270d27375d7c1a01bb" }
+celox = { git = "https://github.com/celox-sim/celox.git", rev = "9aa2457811b3ef2b002e90d2ae4f5aafb0195099" }
 celox03 = { package = "celox", version = "=0.3.1" }
 struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
 struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
@@ -23,6 +29,14 @@ texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "893d699f3
 # Temporary v0.3.1 backport of Celox PR #736. Struo still pins Celox 0.3.1;
 # remove this patch after it migrates to a release containing the fix.
 celox-sir-opt = { git = "https://github.com/celox-sim/celox.git", rev = "f5c548d5d4becb298f924ab06e1febb9eb3da064" }
+
+[patch."https://github.com/celox-sim/celox.git"]
+# Celox 0.4.5 still fails the registered memory stream. Retain these fixes
+# until an upstream release passes the regressions; see toolchain/vendor/celox.
+celox-frontend-core = { path = "toolchain/vendor/celox/celox-frontend-core" }
+celox-backend-wasm = { path = "toolchain/vendor/celox/celox-backend-wasm" }
+celox-backend-x86 = { path = "toolchain/vendor/celox/celox-backend-x86" }
+celox-sir-opt = { path = "toolchain/vendor/celox/celox-sir-opt" }
 
 [profile.release]
 lto = "thin"

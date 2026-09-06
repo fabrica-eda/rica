@@ -1,16 +1,17 @@
 //! Compare an unchanged memory with an otherwise-unused module parameter.
 use std::{error::Error, fs, path::Path};
 
-use celox::SimulatorBuilder;
+use celox::{OptLevel, SimulatorBuilder};
 
 #[path = "../../../riscv/verify/tests/hardware_memory_debug_stream.rs"]
 mod stream;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let expect_unfixed = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => false,
-        [flag] if flag == "--expect-unfixed" => true,
-        _ => return Err("usage: celox-parameterized-memory [--expect-unfixed]".into()),
+    let (expect_unfixed, matrix) = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => (false, false),
+        [flag] if flag == "--expect-unfixed" => (true, false),
+        [flag] if flag == "--matrix" => (false, true),
+        _ => return Err("usage: celox-parameterized-memory [--matrix | --expect-unfixed]".into()),
     };
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../toolchain/mre/celox-parameterized-memory/HardwareMemory.veryl");
@@ -26,6 +27,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         ("original", &original),
         ("unused-parameter", &parameterized),
     ] {
+        if matrix {
+            for level in [OptLevel::O0, OptLevel::O1, OptLevel::O2] {
+                let build = || SimulatorBuilder::new(source, "HardwareMemory").opt_level(level);
+                for (backend, result) in [
+                    (
+                        "interpreter",
+                        stream::check_stream(build().build_interpreter()?),
+                    ),
+                    (
+                        "cranelift",
+                        stream::check_stream(build().build_cranelift()?),
+                    ),
+                    ("native", stream::check_stream(build().build_native()?)),
+                    ("wasm", stream::check_stream(build().build_wasm()?)),
+                ] {
+                    println!("{backend} {label} {level:?}: {result:?}");
+                    all_ok &= result.is_ok();
+                }
+            }
+            continue;
+        }
         let native =
             stream::check_stream(SimulatorBuilder::new(source, "HardwareMemory").build_native()?);
         println!("native {label}: {native:?}");
