@@ -6,6 +6,7 @@ module HardwareCoreTestTop #(
     param PREDICTOR_MODE   : u32 = 0,
     param ICACHE_INDEX_BITS: u32 = 0,
     param FAST_LSU         : u32 = 0,
+    param ENABLE_M         : bit = 0,
 ) (
     clk_cpu         : input  'cpu    clock              ,
     clk_mem         : input  'memory clock              ,
@@ -110,40 +111,62 @@ module HardwareCoreTestTop #(
         );
     }
 
+    var core_data_rdata            : 'cpu logic<64>;
+    var core_data_response_sequence: 'cpu logic    ;
+    if FAST_LSU == 4 :g_load_return {
+        // Split byte-bank selection from Core's load formatting and bypass.
+        // One CPU edge replaces the previous full memory-domain output cycle.
+        var load_sequence_q: 'cpu logic;
+        assign core_data_response_sequence = if data_we ? data_response_sequence : load_sequence_q;
+        always_ff (clk_cpu, cpu_rst_n) {
+            if_reset {
+                core_data_rdata = 64'd0;
+                load_sequence_q = 1'b0;
+            } else {
+                core_data_rdata = data_rdata;
+                load_sequence_q = data_response_sequence;
+            }
+        }
+    } else {
+        assign core_data_rdata             = data_rdata;
+        assign core_data_response_sequence = data_response_sequence;
+    }
+
     inst core: Core #(
+        ENABLE_M               : ENABLE_M              ,
         COMMIT_PAYLOAD         : 1                     ,
         SYNC_DATA_MEMORY       : 1                     ,
         RELOCATE_LOW_DATA      : 1                     ,
         BRANCH_PREDICTOR_CONFIG: 1 + 2 * PREDICTOR_MODE,
     ) (
-        clk                   : clk_cpu               ,
-        rst_n                 : cpu_rst_n             ,
-        instr                 : instruction           ,
-        instr_is_compressed   : instruction_compressed,
-        instr_valid           : instruction_valid     ,
-        data_rdata            : data_rdata            ,
-        data_response_sequence: data_response_sequence,
-        counter_freeze        : 1'b0                  ,
-        debug_counter_index   : 4'd0                  ,
-        debug_counter_data    : unused_debug_counter  ,
-        pc                    : pc                    ,
-        data_addr             : data_addr             ,
-        data_memory_addr      : data_memory_addr      ,
-        data_wdata            : data_wdata            ,
-        data_wmask            : data_wmask            ,
-        data_we               : data_we               ,
-        data_request_sequence : data_request_sequence ,
-        halted                : halted                ,
-        commit_valid          : commit_valid          ,
-        commit_pc             : commit_pc             ,
-        commit_instr          : commit_instr          ,
-        commit_rd             : commit_rd             ,
-        commit_data           : commit_data           ,
-        commit_mem_we         : commit_mem_we         ,
-        commit_mem_addr       : commit_mem_addr       ,
-        commit_mem_wdata      : commit_mem_wdata      ,
-        commit_mem_wmask      : commit_mem_wmask      ,
-        debug_x31             : debug_x31             ,
-        instruction_flush     : instruction_flush     ,
+        clk                   : clk_cpu                    ,
+        rst_n                 : cpu_rst_n                  ,
+        instr                 : instruction                ,
+        instr_is_compressed   : instruction_compressed     ,
+        instr_valid           : instruction_valid          ,
+        data_rdata            : core_data_rdata            ,
+        data_response_sequence: core_data_response_sequence,
+        counter_freeze        : 1'b0                       ,
+        debug_counter_index   : 4'd0                       ,
+        debug_counter_data    : unused_debug_counter       ,
+        pc                    : pc                         ,
+        data_addr             : data_addr                  ,
+        data_memory_addr      : data_memory_addr           ,
+        data_wdata            : data_wdata                 ,
+        data_wmask            : data_wmask                 ,
+        data_we               : data_we                    ,
+        data_request_sequence : data_request_sequence      ,
+        halted                : halted                     ,
+        commit_valid          : commit_valid               ,
+        commit_pc             : commit_pc                  ,
+        commit_instr          : commit_instr               ,
+        commit_rd             : commit_rd                  ,
+        commit_data           : commit_data                ,
+        commit_mem_we         : commit_mem_we              ,
+        commit_mem_addr       : commit_mem_addr            ,
+        commit_mem_wdata      : commit_mem_wdata           ,
+        commit_mem_wmask      : commit_mem_wmask           ,
+        debug_x31             : debug_x31                  ,
+        instruction_flush     : instruction_flush          ,
     );
 }

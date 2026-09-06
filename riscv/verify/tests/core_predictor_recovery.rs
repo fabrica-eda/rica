@@ -22,19 +22,28 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT32: OnceLock<NativeProgramImage> = OnceLock::new();
+    static TAGE_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static BIMODAL_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static STATIC_M: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
         0 => &TAGE,
         2 => &BIMODAL,
         4 => &STATIC,
         8 => &COMPACT,
         24 => &COMPACT32,
+        128 => &TAGE_M,
+        130 => &BIMODAL_M,
+        136 => &COMPACT_M,
+        132 => &STATIC_M,
         _ => panic!("unknown predictor configuration: {config}"),
     };
     image.get_or_init(|| {
         let source = verify_riscv::core_source(&project_path()).unwrap();
         SimulatorBuilder::new(&source, "Core")
             .param("SYNC_DATA_MEMORY", 1)
-            .param("BRANCH_PREDICTOR_CONFIG", config)
+            .param("ENABLE_M", u64::from(config & 128 != 0))
+            .param("BRANCH_PREDICTOR_CONFIG", config & 127)
             .opt_level(OptLevel::O0)
             .compile_native()
             .unwrap()
@@ -1205,5 +1214,160 @@ fn compact_stale_predictions_preserve_load_store_and_csr_effects() {
         check_stale_load(config);
         check_stale_store(config);
         check_stale_csr(config);
+    }
+}
+
+fn encode_muldiv(rd: u32, rs1: u32, rs2: u32, operation: u32) -> u32 {
+    1 << 25 | rs2 << 20 | rs1 << 15 | operation << 12 | rd << 7 | 0x33
+}
+
+#[test]
+fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
+    for config in [128, 130, 132, 136] {
+        let mut driver = CoreDriver::with_config(
+            [
+                (0, encode_addi(1, 0, 123)),
+                (4, encode_addi(2, 0, 7)),
+                (8, encode_muldiv(3, 1, 2, 0)),
+                (12, encode_muldiv(4, 3, 2, 4)),
+                (16, encode_sd(4, 0, 256)),
+                (20, encode_addi(31, 4, 1)),
+                (24, encode_jal(0, 0)),
+            ],
+            config,
+        );
+        let mut commits = BTreeMap::<u32, (usize, u64)>::new();
+        let mut held = 0;
+        for _ in 0..350 {
+            let mul_wait = driver.value("muldiv_wait") != 0;
+            let cycle = driver.step();
+            if mul_wait {
+                held += 1;
+                assert!(!cycle.data_we, "younger store escaped during M execution");
+            }
+            if cycle.memory_wait {
+                driver.acknowledge_data_request();
+            }
+            if cycle.commit_valid && cycle.commit_pc <= 20 {
+                let entry = commits.entry(cycle.commit_pc).or_default();
+                entry.0 += 1;
+                entry.1 = cycle.commit_data;
+            }
+        }
+        assert!(held >= 90);
+        assert_eq!(commits[&8], (1, 861));
+        assert_eq!(commits[&12], (1, 123));
+        assert_eq!(commits[&16].0, 1);
+        assert_eq!(commits[&20], (1, 124));
+    }
+}
+
+#[test]
+fn older_branch_squashes_muldiv_and_younger_csr_store() {
+    for config in [128, 130, 132, 136] {
+        let mut driver = CoreDriver::with_config(
+            [
+                (0, encode_addi(1, 0, 7)),
+                (4, encode_branch(1, 1, 0, 20)),
+                (8, encode_muldiv(31, 1, 0, 4)),
+                (12, encode_csrrwi(0, 0x340, 9)),
+                (16, encode_sd(1, 0, 256)),
+                (20, encode_addi(31, 0, 99)),
+                (24, encode_muldiv(31, 1, 1, 0)),
+                (28, encode_jal(0, 0)),
+            ],
+            config,
+        );
+        let mut result = None;
+        for _ in 0..200 {
+            let cycle = driver.step();
+            assert!(!cycle.data_we);
+            if cycle.commit_valid {
+                assert!(!(8..24).contains(&cycle.commit_pc));
+                if cycle.commit_pc == 24 {
+                    result = Some(cycle.commit_data);
+                }
+            }
+        }
+        assert_eq!(result, Some(49));
+        assert_eq!(driver.csr_value("mscratch_q"), 0);
+    }
+}
+
+#[test]
+fn muldiv_defers_a_younger_exception_until_its_result_retires() {
+    for config in [128, 130, 132, 136] {
+        let mut driver = CoreDriver::with_config(
+            [
+                (0, encode_addi(1, 0, 7)),
+                (4, encode_muldiv(31, 1, 1, 0)),
+                (8, 0xffff_ffff),
+            ],
+            config,
+        );
+        let mut multiply_committed = false;
+        let mut trap = false;
+        for _ in 0..200 {
+            let cycle = driver.step();
+            if driver.value("muldiv_wait") != 0 {
+                assert_eq!(driver.csr_value("mcause_q"), 0);
+            }
+            if cycle.commit_valid && cycle.commit_pc == 4 {
+                assert_eq!(cycle.commit_data, 49);
+                multiply_committed = true;
+            }
+            if driver.csr_value("mcause_q") == 2 {
+                assert!(
+                    multiply_committed
+                        || (driver.value("commit_valid") != 0
+                            && driver.value("commit_pc") == 4
+                            && driver.value("commit_data") == 49)
+                );
+                assert_eq!(driver.value("debug_x31"), 49);
+                assert_eq!(driver.csr_value("mepc_q") << 1, 8);
+                trap = true;
+                break;
+            }
+        }
+        assert!(trap);
+    }
+}
+
+#[test]
+fn stale_prediction_on_muldiv_preserves_its_pending_result() {
+    let mut driver = direct_trained_driver(136);
+    driver.program.insert(0, encode_muldiv(31, 0, 0, 5)); // DIVU by zero.
+    let mut repaired = false;
+    for _ in 0..240 {
+        let cycle = driver.step();
+        if cycle.branch_redirect && cycle.cm_valid && cycle.cm_pc == 0 {
+            repaired = true;
+        }
+        if cycle.commit_valid && cycle.commit_pc == 0 && cycle.commit_rd == 31 {
+            assert!(repaired, "the stale M owner did not repair its prediction");
+            assert_eq!(cycle.commit_data, u64::MAX);
+            return;
+        }
+    }
+    panic!("the repaired M owner never retired its result");
+}
+
+#[test]
+fn misa_reports_m_only_when_enabled() {
+    for config in [8, 136] {
+        let mut driver = CoreDriver::with_config(
+            [(0, 0x3010_2ff3), (4, encode_jal(0, 0))], // CSRRS x31, misa, x0.
+            config,
+        );
+        let expected = 0x8000_0000_0000_0104 | if config & 128 != 0 { 1 << 12 } else { 0 };
+        let mut result = None;
+        for _ in 0..180 {
+            let cycle = driver.step();
+            if cycle.commit_valid && cycle.commit_pc == 0 {
+                result = Some(cycle.commit_data);
+                break;
+            }
+        }
+        assert_eq!(result, Some(expected));
     }
 }

@@ -4,7 +4,9 @@
 /// The implemented state is nevertheless architectural: trap entry records
 /// MEPC/MCAUSE/MTVAL and updates MSTATUS, while MRET restores the interrupt
 /// enable stack and returns to the aligned MEPC value.
-module CsrFile (
+module CsrFile #(
+    param ENABLE_M: bit = 0,
+) (
     clk  : input   clock       ,
     rst_n: input   reset       ,
     csr  : modport CsrBus::file,
@@ -251,6 +253,9 @@ module CsrFile (
             csr_mux_level0[0] = 64'd0;
             // RV64 with fixed base-integer and compressed extensions.
             csr_mux_level0[1] = 64'h8000_0000_0000_0104;
+            if ENABLE_M {
+                csr_mux_level0[1][12] = 1'b1;
+            }
             csr_mux_level0[2] = mscratch_q;
             csr_mux_level0[3] = {60'd0, mcause_q};
             // Standard read-only machine identity CSRs for hart zero.

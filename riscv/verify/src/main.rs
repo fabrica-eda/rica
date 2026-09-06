@@ -723,6 +723,7 @@ fn verify_hardware_memory_elf(
     elf: &Path,
     label: &str,
     coincident_order: CoincidentEdgeOrder,
+    max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let image = ElfImage::load(elf)?;
     let elf_bytes = fs::read(elf)?;
@@ -787,7 +788,7 @@ fn verify_hardware_memory_elf(
     let mut commits = 0_usize;
     let mut first_commit_cycle = None;
     let mut reset_entries = 0_usize;
-    for cycle in 1..=100_000 {
+    for cycle in 1..=max_cycles {
         // Celox exposes one event per tick, so it cannot apply both related
         // clock edges atomically. Run every image in both serializations: one
         // prevents a same-edge request shortcut, the other prevents a
@@ -924,6 +925,8 @@ fn verify_hardware_memory_rtl(
     predictor_config: u64,
     icache_index_bits: u64,
     fast_lsu: u64,
+    enable_m: bool,
+    max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -938,6 +941,7 @@ fn verify_hardware_memory_rtl(
         .param("PREDICTOR_MODE", predictor_config / 2)
         .param("ICACHE_INDEX_BITS", icache_index_bits)
         .param("FAST_LSU", fast_lsu)
+        .param("ENABLE_M", u64::from(enable_m))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -961,6 +965,7 @@ fn verify_hardware_memory_rtl(
                     &project.join("build/rv64i-subset").join(&label),
                     &label,
                     order,
+                    max_cycles,
                 )?;
             }
         }
@@ -971,7 +976,7 @@ fn verify_hardware_memory_rtl(
                 CoincidentEdgeOrder::MemoryThenCpu,
                 CoincidentEdgeOrder::CpuThenMemory,
             ] {
-                verify_hardware_memory_elf(&model, elf, &label, order)?;
+                verify_hardware_memory_elf(&model, elf, &label, order, max_cycles)?;
             }
         }
     }
@@ -1440,15 +1445,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     if cache_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
         return Err("--icache-kib requires --hardware-memory-rtl".into());
     }
+    let enable_m = arguments.iter().any(|arg| arg == "--m-extension");
+    if enable_m && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
+        return Err("--m-extension requires --hardware-memory-rtl".into());
+    }
+    let cycle_option = arguments.iter().position(|arg| arg == "--max-cycles");
+    let max_cycles = if let Some(index) = cycle_option {
+        let count = arguments
+            .get(index + 1)
+            .ok_or("--max-cycles requires a value")?
+            .parse::<usize>()?;
+        if count == 0 {
+            return Err("--max-cycles must be positive".into());
+        }
+        count
+    } else {
+        100_000
+    };
+    if cycle_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
+        return Err("--max-cycles requires --hardware-memory-rtl".into());
+    }
     let lsu_option = arguments.iter().position(|arg| arg == "--fast-lsu");
     let fast_lsu = if let Some(index) = lsu_option {
         match arguments.get(index + 1).map(String::as_str) {
             Some("0") => 0,
             Some("1") => 1,
             Some("2") => 2,
+            Some("3") => 3,
+            Some("4") => 4,
+            Some("5") => 5,
             _ => {
                 return Err(
-                    "--fast-lsu requires 0 (original), 1 (store/forwarding) or 2 (store only)"
+                    "--fast-lsu requires 0 (original), 1 (store/forwarding), 2 (store only), 3 (direct load), 4 (CPU-registered load), or 5 (read prefetch)"
                         .into(),
                 );
             }
@@ -1477,6 +1505,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter(|(index, argument)| {
                 verify_riscv::predictor_option(argument).is_none()
                     && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
+                    && argument.as_str() != "--m-extension"
+                    && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
             })
             .map(|(_, argument)| PathBuf::from(argument))
@@ -1487,6 +1517,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             predictor_config,
             icache_index_bits,
             fast_lsu,
+            enable_m,
+            max_cycles,
         );
     }
     if predictor_config != 0 && !rtl_only {

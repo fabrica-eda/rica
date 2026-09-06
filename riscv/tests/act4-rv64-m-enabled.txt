@@ -1,0 +1,14 @@
+# Complete pinned ACT4 RV64M catalog.
+M-div-00
+M-divu-00
+M-divuw-00
+M-divw-00
+M-mul-00
+M-mulh-00
+M-mulhsu-00
+M-mulhu-00
+M-mulw-00
+M-rem-00
+M-remu-00
+M-remuw-00
+M-remw-00

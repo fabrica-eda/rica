@@ -58,7 +58,8 @@ cursor.
 
 The focused predictor regression currently passes 60/60 cases: 23 model
 cases, 36 source-RTL cases, and one complete reset-scrub case. The Core
-predictor-recovery integration suite separately passes 11/11 cases.
+predictor-recovery integration suite now has 29 cases, including M ownership,
+dependencies and cancellation under all four main predictor configurations.
 
 These recovery tests deliberately model the present scalar in-order core. Its
 predictor may recover from the committed GHR/RAS frontier because older control
@@ -74,12 +75,15 @@ The same ELF contract is supported by the direct-JTAG hardware harness:
 cargo run --locked --offline --release -p verify-riscv --bin hardware-riscv-tests
 ```
 
-The default command programs the qualified compact 64-entry BTB/RAS + 4 KiB image,
-`build/riscv-hardware-compact-4k-124p8-20260906-jtag-falling.bit`, uses eight-byte
-writes and runs all eight bundled tests. Its [hardware record](../RV64_JTAG_FIX.md)
-covers 100 distinct ELFs, 134 executions and all eleven counters at CPU
-124.8 MHz / memory 62.4 MHz, with CPU/memory setup +9 ps and hold +290 ps. Select other images
-explicitly after their timing and functional checks pass.
+The default command programs the qualified compact 64-entry BTB/RAS + 4 KiB
+image with M enabled and shortened loads,
+`build/riscv-hardware-compact-m-load-4k-124p8-20260907.bit`, uses eight-byte
+writes and runs all eight bundled tests. Its [hardware record](../RV64_LOAD_M_PLAN.md)
+covers 133 distinct ELFs and 165 executions with all eleven counters at CPU
+124.8 MHz / memory 62.4 MHz. Nominal setup is +206 ps and hold +290 ps;
+setup remains +6 ps after the additional 200 ps reserve.
+The updated default runner passed eight more basic ELFs (173 executions total).
+Select other images explicitly after their timing and functional checks pass.
 `--no-program` reuses the programmed image,
 `--bitstream path` selects another image, and `--run-tck count` changes the CPU
 execution window. `--expect-tohost value` selects an exact diagnostic mailbox
@@ -131,15 +135,15 @@ git submodule update --init
 ```
 
 ACT4 generates self-checking ELFs with expected results derived from the Sail
-model. Rica's configuration enables the base integer and Zca compressed
-suites. From the pinned submodule, generate each catalog with:
+model. Rica's configurations enable the base integer, integer Zca compressed, and
+M multiply/divide suites. M has a separate `rica-rv64im` work directory. From the pinned submodule, generate each catalog with:
 
 ```sh
 cd third_party/riscv-arch-test
-.venv/bin/act ../../riscv/act4/test_config.yaml \
-  --workdir work --test-dir tests --jobs 0 --extensions I
-.venv/bin/act ../../riscv/act4/test_config.yaml \
-  --workdir work --test-dir tests --jobs 0 --extensions Zca
+uv run --offline act ../../riscv/act4/test_config.yaml \
+  --workdir work --test-dir tests --extensions I
+uv run --offline act ../../riscv/act4/test_config.yaml \
+  --workdir work --test-dir tests --extensions Zca
 ```
 
 Run the complete RV64I catalog through Rica's runner with:
@@ -156,6 +160,22 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- \
   --act4 --act4-suite Zca --act4-elf-dir path/to/act4/elfs
 ```
 
+Build and run the M catalog with its separate Sail/UDB configuration:
+
+```sh
+# In third_party/riscv-arch-test; install its pinned dependencies first.
+uv run --offline act ../../riscv/act4/test_config_m.yaml \
+  --workdir work --test-dir tests --extensions M --fast
+# In the Rica root; this enables M automatically in the Core model.
+cargo run --locked --offline --release -p verify-riscv --bin rv64-riscv-tests -- \
+  --act4-suite M --max-cycles 1000000
+```
+
+The M configuration declares M 2.0 and its required Zmmul 1.0 subset, with
+`misa.M` fixed on. All 13 generated M ELFs pass both clock orders in the
+board-memory model and the qualified physical M image. Build environment
+versions and source/ELF hashes are in the [measurement record](../../toolchain/measurements/2026-09-06-rv64-load-margin-m/README.md).
+
 The pinned revision is `f7ba06c3d1a01428b172fe851ab56931a0624fee`.
 Its 32 generated Zca ELFs have SHA-256 set digest
 `8938083a2a0e5cd9ae7b74c6b1f6be9c8afec0da593b07478c8385a421e2a12e`
@@ -163,9 +183,9 @@ and pass both the ordinary Core simulator and the dual-clock synchronous
 HardwareMemory model with no ignored tests. The digest is the SHA-256 of the
 sorted `sha256sum` output for all 32 ELF files.
 
-The runner discovers the selected suite's `I-*-00.S` or `Zca-*-00.S` files
+The runner discovers the selected suite's `I-*-00.S`, `M-*-00.S` or `Zca-*-00.S` files
 directly from the submodule. The reviewed lists are
-`act4-rv64-enabled.txt` and `act4-rv64-zca-enabled.txt`. All 51 RV64I tests and
+`act4-rv64-enabled.txt`, `act4-rv64-m-enabled.txt` and `act4-rv64-zca-enabled.txt`. All 51 RV64I tests and
 all 32 Zca tests in the pinned catalogs pass both the ordinary Core simulator
 and the synchronous HardwareMemory RTL model. The latter runs every ELF with
 coincident memory/CPU edges serialized in both `mem->cpu` and `cpu->mem` order,
@@ -187,7 +207,7 @@ silently alter their instruction streams. They currently cover:
 - `ADDIW`, `ADDW`, `SUBW`
 - `SLL`, `SRL`, `SRA` and their immediate and W forms
 - `FENCE` for the current in-order, uncached memory interface
-- `FENCE.I` for the current uncached instruction interface
+- `FENCE.I`, including instruction-cache invalidation in the board-memory model
 - `ECALL`, `EBREAK`, `MRET`, illegal-instruction traps, and the implemented
   machine-mode CSRs through the Zicsr register and immediate forms
 - RV64 `mcycle`/`minstret`, their read-only `cycle`/`instret` aliases, and the
@@ -201,6 +221,14 @@ silently alter their instruction streams. They currently cover:
   `C.EBREAK`, stack-pointer forms, and mixed 16/32-bit fetches
 - a 32-bit instruction beginning at `PC[1] = 1`, including one that crosses an
   eight-byte instruction-memory line boundary
+
+Additional bundled suites are selected with `--memory-tests`, `--m-tests`
+and `--m-benchmarks`. See [memory workloads](rv64-memory/README.md),
+[M correctness cases](rv64-m/README.md), and
+[equal-work M performance comparisons](rv64-m-benchmarks/README.md).
+M includes `MUL`, `MULH`, `MULHSU`, `MULHU`, `MULW`, `DIV`, `DIVU`, `REM`,
+`REMU`, `DIVW`, `DIVUW`, `REMW`, and `REMUW`. Source-RTL tests additionally
+check illegal reserved word encodings and all M encodings with M disabled.
 
 Passing the pinned catalog is a regression result rather than an external
 certification claim. A bundled test reports through `tohost` and then enters a

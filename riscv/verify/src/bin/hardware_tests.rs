@@ -25,6 +25,7 @@ type HardwareMemoryImage = (Vec<u8>, Vec<MemoryRange>);
 #[derive(Clone, Copy)]
 enum Act4Suite {
     I,
+    M,
     Zca,
 }
 
@@ -32,14 +33,16 @@ impl Act4Suite {
     fn parse(value: &str) -> Result<Self, Box<dyn Error>> {
         match value.to_ascii_lowercase().as_str() {
             "i" => Ok(Self::I),
+            "m" => Ok(Self::M),
             "zca" => Ok(Self::Zca),
-            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I or Zca").into()),
+            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I, M or Zca").into()),
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             Self::I => "I",
+            Self::M => "M",
             Self::Zca => "Zca",
         }
     }
@@ -47,6 +50,7 @@ impl Act4Suite {
     fn enabled_file(self) -> &'static str {
         match self {
             Self::I => "act4-rv64-enabled.txt",
+            Self::M => "act4-rv64-m-enabled.txt",
             Self::Zca => "act4-rv64-zca-enabled.txt",
         }
     }
@@ -155,7 +159,11 @@ fn act4_elfs(project: &Path, suite: Act4Suite) -> Result<Vec<PathBuf>, Box<dyn E
     let elf_dir = project
         .parent()
         .ok_or("riscv directory has no parent")?
-        .join("third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i")
+        .join(if matches!(suite, Act4Suite::M) {
+            "third_party/riscv-arch-test/work/rica-rv64im/elfs/rv64i"
+        } else {
+            "third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i"
+        })
         .join(suite.name());
     if !source_dir.is_dir() {
         return Err(format!(
@@ -1007,7 +1015,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut xvc_address = None::<String>;
     // CPU/memory stay at 124.8/62.4 MHz. This exact image repairs the JTAG
     // boundary race; qualification is recorded in RV64_JTAG_FIX.md.
-    let mut bitstream = project.join("build/riscv-hardware-compact-store-4k-124p8-20260906.bit");
+    let mut bitstream = project.join("build/riscv-hardware-compact-m-load-4k-124p8-20260907.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {
@@ -1040,7 +1048,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if argument == "--act4" {
             act4 = true;
         } else if argument == "--act4-suite" {
-            let value = arguments.next().ok_or("--act4-suite requires I or Zca")?;
+            let value = arguments
+                .next()
+                .ok_or("--act4-suite requires I, M or Zca")?;
             act4_suite =
                 Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
             act4 = true;

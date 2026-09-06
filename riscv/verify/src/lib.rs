@@ -6,7 +6,7 @@ use std::path::Path;
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 18] = [
+const CORE_SOURCES: [&str; 19] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -19,6 +19,7 @@ const CORE_SOURCES: [&str; 18] = [
     "BranchPredictor.veryl",
     "CsrFile.veryl",
     "ExecuteUnit.veryl",
+    "MulDivUnit.veryl",
     "ShiftUnit.veryl",
     "ShiftHighUnit.veryl",
     "CompletionUnit.veryl",
@@ -231,7 +232,16 @@ pub fn compile_elf_model(
     core_source: &str,
     predictor_config: u64,
 ) -> Result<NativeProgramImage, Box<dyn Error>> {
+    compile_elf_model_with_m(core_source, predictor_config, false)
+}
+
+pub fn compile_elf_model_with_m(
+    core_source: &str,
+    predictor_config: u64,
+    enable_m: bool,
+) -> Result<NativeProgramImage, Box<dyn Error>> {
     Ok(SimulatorBuilder::new(core_source, "Core")
+        .param("ENABLE_M", u64::from(enable_m))
         .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
         .compile_native()?
         .into_program_image())

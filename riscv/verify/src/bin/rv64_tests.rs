@@ -6,13 +6,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use verify_riscv::{ElfImage, compile_elf_model, core_source, run_elf_with_model};
+use verify_riscv::{ElfImage, compile_elf_model_with_m, core_source, run_elf_with_model};
 
 const DEFAULT_MAX_CYCLES: usize = 20_000;
 
 #[derive(Clone, Copy)]
 enum Act4Suite {
     I,
+    M,
     Zca,
 }
 
@@ -20,14 +21,16 @@ impl Act4Suite {
     fn parse(value: &str) -> Result<Self, Box<dyn Error>> {
         match value.to_ascii_lowercase().as_str() {
             "i" => Ok(Self::I),
+            "m" => Ok(Self::M),
             "zca" => Ok(Self::Zca),
-            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I or Zca").into()),
+            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I, M or Zca").into()),
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             Self::I => "I",
+            Self::M => "M",
             Self::Zca => "Zca",
         }
     }
@@ -35,6 +38,7 @@ impl Act4Suite {
     fn enabled_file(self) -> &'static str {
         match self {
             Self::I => "act4-rv64-enabled.txt",
+            Self::M => "act4-rv64-m-enabled.txt",
             Self::Zca => "act4-rv64-zca-enabled.txt",
         }
     }
@@ -115,7 +119,11 @@ fn build_elfs(project: &Path, suite: &str) -> Result<Vec<PathBuf>, Box<dyn Error
         checked_command(
             Command::new(&assembler)
                 .arg("-triple=riscv64-unknown-none-elf")
-                .arg("-mattr=+i,+c,+zicsr,+zifencei")
+                .arg(if suite.starts_with("rv64-m") {
+                    "-mattr=+i,+m,+c,+zicsr,+zifencei"
+                } else {
+                    "-mattr=+i,+c,+zicsr,+zifencei"
+                })
                 .arg("-filetype=obj")
                 .arg("-I")
                 .arg(&tests)
@@ -235,6 +243,7 @@ fn run_act4(
     suite: Act4Suite,
     max_cycles: usize,
     predictor_config: u64,
+    enable_m: bool,
 ) -> Result<(), Box<dyn Error>> {
     let repository = project.parent().ok_or("riscv directory has no parent")?;
     let source_dir = repository
@@ -270,7 +279,7 @@ fn run_act4(
         .transpose()?;
     let model = source
         .as_deref()
-        .map(|source| compile_elf_model(source, predictor_config))
+        .map(|source| compile_elf_model_with_m(source, predictor_config, enable_m))
         .transpose()?;
     let mut passed = 0;
     let mut ignored = 0;
@@ -333,12 +342,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut benchmarks = false;
     let mut cache_tests = false;
     let mut predictor_tests = false;
+    let mut memory_tests = false;
+    let mut m_tests = false;
+    let mut m_benchmarks = false;
+    let mut enable_m = false;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
-    let mut act4_elf_dir = project
-        .parent()
-        .unwrap()
-        .join("third_party/riscv-arch-test/work/rica-rv64i/elfs");
+    let mut act4_elf_dir = None::<PathBuf>;
     let mut act4_enabled = None::<PathBuf>;
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
@@ -351,6 +361,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             benchmarks = true;
         } else if argument == "--cache-tests" {
             cache_tests = true;
+        } else if argument == "--m-extension" {
+            enable_m = true;
+        } else if argument == "--m-benchmarks" {
+            m_benchmarks = true;
+            enable_m = true;
+        } else if argument == "--m-tests" {
+            m_tests = true;
+            enable_m = true;
+        } else if argument == "--memory-tests" {
+            memory_tests = true;
         } else if argument == "--predictor-tests" {
             predictor_tests = true;
         } else if argument == "--max-cycles" {
@@ -362,15 +382,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if argument == "--act4" {
             act4 = true;
         } else if argument == "--act4-suite" {
-            let value = arguments.next().ok_or("--act4-suite requires I or Zca")?;
+            let value = arguments
+                .next()
+                .ok_or("--act4-suite requires I, M or Zca")?;
             act4_suite =
                 Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
             act4 = true;
         } else if argument == "--act4-elf-dir" {
-            act4_elf_dir = arguments
-                .next()
-                .ok_or("--act4-elf-dir requires a value")?
-                .into();
+            act4_elf_dir = Some(
+                arguments
+                    .next()
+                    .ok_or("--act4-elf-dir requires a value")?
+                    .into(),
+            );
         } else if argument == "--act4-enabled" {
             act4_enabled = Some(
                 arguments
@@ -383,7 +407,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
     if act4 {
-        if benchmarks || cache_tests || predictor_tests {
+        if benchmarks || cache_tests || predictor_tests || memory_tests || m_tests || m_benchmarks {
             return Err("bundled diagnostic suites cannot be combined with --act4".into());
         }
         if !requested_elfs.is_empty() {
@@ -391,6 +415,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let act4_enabled =
             act4_enabled.unwrap_or_else(|| project.join("tests").join(act4_suite.enabled_file()));
+        enable_m |= matches!(act4_suite, Act4Suite::M);
+        let act4_elf_dir = act4_elf_dir.unwrap_or_else(|| {
+            project
+                .parent()
+                .unwrap()
+                .join(if matches!(act4_suite, Act4Suite::M) {
+                    "third_party/riscv-arch-test/work/rica-rv64im/elfs"
+                } else {
+                    "third_party/riscv-arch-test/work/rica-rv64i/elfs"
+                })
+        });
         return run_act4(
             project,
             &act4_elf_dir,
@@ -398,23 +433,43 @@ fn main() -> Result<(), Box<dyn Error>> {
             act4_suite,
             max_cycles,
             predictor_config,
+            enable_m,
         );
     }
-    if [benchmarks, cache_tests, predictor_tests]
-        .into_iter()
-        .filter(|selected| *selected)
-        .count()
+    if [
+        benchmarks,
+        cache_tests,
+        predictor_tests,
+        memory_tests,
+        m_tests,
+        m_benchmarks,
+    ]
+    .into_iter()
+    .filter(|selected| *selected)
+    .count()
         > 1
     {
         return Err("select only one bundled diagnostic suite".into());
     }
-    let elfs = if benchmarks || cache_tests || predictor_tests {
+    let elfs = if benchmarks
+        || cache_tests
+        || predictor_tests
+        || memory_tests
+        || m_tests
+        || m_benchmarks
+    {
         if !requested_elfs.is_empty() {
             return Err("bundled diagnostic suites cannot be combined with positional ELFs".into());
         }
         build_elfs(
             project,
-            if predictor_tests {
+            if m_benchmarks {
+                "rv64-m-benchmarks"
+            } else if m_tests {
+                "rv64-m"
+            } else if memory_tests {
+                "rv64-memory"
+            } else if predictor_tests {
                 "rv64-predictor"
             } else if cache_tests {
                 "rv64-cache"
@@ -431,7 +486,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("no RV64 ELF tests were supplied".into());
     }
     let source = core_source(project)?;
-    let model = compile_elf_model(&source, predictor_config)?;
+    let model = verify_riscv::compile_elf_model_with_m(&source, predictor_config, enable_m)?;
     for elf in &elfs {
         let result = run_elf_with_model(&model, ElfImage::load(elf)?, max_cycles)?;
         println!(

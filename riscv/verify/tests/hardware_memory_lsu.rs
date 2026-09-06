@@ -4,7 +4,7 @@ use std::{fs, path::Path, sync::OnceLock};
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 
 fn image(fast: u64) -> &'static NativeProgramImage {
-    static IMAGES: [OnceLock<NativeProgramImage>; 3] = [const { OnceLock::new() }; 3];
+    static IMAGES: [OnceLock<NativeProgramImage>; 6] = [const { OnceLock::new() }; 6];
     IMAGES[fast as usize].get_or_init(|| {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let source = fs::read_to_string(project.join("src/HardwareMemory.veryl")).unwrap();
@@ -94,7 +94,7 @@ impl Memory {
 
 #[test]
 fn stores_and_matching_loads_complete_on_the_physical_write_or_forward_edge() {
-    for fast in 0..=2 {
+    for fast in 0..=5 {
         let mut mem = Memory::new(fast);
         for offset in 0..8 {
             let address = 0x1fff8 + offset;
@@ -105,7 +105,7 @@ fn stores_and_matching_loads_complete_on_the_physical_write_or_forward_edge() {
             );
             let (edges, result) = mem.request(address, None);
             assert_eq!(result, data);
-            assert_eq!(edges, if fast == 1 { 2 } else { 3 });
+            assert_eq!(edges, if fast == 1 || fast >= 3 { 2 } else { 3 });
             // A response is a held bundle, including after the ordinary RAM
             // output catches up with the forwarded value one edge later.
             for _ in 0..4 {
@@ -122,7 +122,7 @@ fn stores_and_matching_loads_complete_on_the_physical_write_or_forward_edge() {
 
 #[test]
 fn partial_overlapping_and_wrapping_writes_match_byte_memory() {
-    for fast in 0..=2 {
+    for fast in 0..=5 {
         let mut mem = Memory::new(fast);
         let mut expected = vec![0_u8; 1 << 18];
         // Initialize all bytes that the randomized unaligned loads can read.
@@ -160,7 +160,7 @@ fn partial_overlapping_and_wrapping_writes_match_byte_memory() {
 
 #[test]
 fn consecutive_debug_bytes_keep_the_registered_address_and_data_together() {
-    for fast in 0..=2 {
+    for fast in 0..=5 {
         let mut mem = Memory::new(fast);
         for base in [0_u32, 0x8000_0000, 0x8001_ff00] {
             for byte in 0..32 {
@@ -198,7 +198,7 @@ fn consecutive_debug_bytes_keep_the_registered_address_and_data_together() {
 
 #[test]
 fn token_holds_do_not_repeat_writes_and_debug_loading_invalidates_forwarding() {
-    for fast in 0..=2 {
+    for fast in 0..=5 {
         let mut mem = Memory::new(fast);
         let data = 0x0123456789abcdef;
         mem.request(0x300, Some((data, 255)));
@@ -216,13 +216,16 @@ fn token_holds_do_not_repeat_writes_and_debug_loading_invalidates_forwarding() {
         mem.tick();
         mem.tick();
         let (edges, result) = mem.request(0x300, None);
-        assert_eq!(edges, 3);
+        assert_eq!(edges, if fast >= 3 { 2 } else { 3 });
         assert_eq!(result, 0x0123456755abcdef);
         mem.set("rst_n", 0);
         mem.tick();
         mem.sequence = 0;
         mem.set("cpu_data_request_sequence", 0);
         mem.set("rst_n", 1);
-        assert_eq!(mem.request(0x300, None), (3, 0x0123456755abcdef));
+        assert_eq!(
+            mem.request(0x300, None),
+            (if fast >= 3 { 2 } else { 3 }, 0x0123456755abcdef)
+        );
     }
 }

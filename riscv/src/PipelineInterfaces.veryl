@@ -11,6 +11,7 @@ interface DecodeBus {
     var use_rs1      : logic    ;
     var use_rs2      : logic    ;
     var write_enable : logic    ;
+    var is_muldiv    : logic    ;
     var is_load      : logic    ;
     var load_size    : logic<2> ;
     var load_unsigned: logic    ;

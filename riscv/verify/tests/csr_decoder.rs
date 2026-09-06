@@ -4,14 +4,16 @@ use std::path::PathBuf;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 
 const TEST_TOP: &str = r#"
-module CsrDecoderTestTop (
+module CsrDecoderTestTop #(
+    param ENABLE_M: bit = 0,
+) (
     instr    : input  logic<32>,
     csr_index: output logic<4> ,
     csr_write: output logic    ,
     illegal  : output logic    ,
 ) {
     inst decode_bus: DecodeBus;
-    inst decoder: Decoder (
+    inst decoder: Decoder #(ENABLE_M: ENABLE_M) (
         decode: decode_bus,
     );
 
@@ -42,6 +44,10 @@ fn value(simulator: &mut Simulator<NativeBackend>, name: &str) -> u64 {
 }
 
 fn decoder() -> Simulator<NativeBackend> {
+    decoder_with_m(false)
+}
+
+fn decoder_with_m(enable_m: bool) -> Simulator<NativeBackend> {
     let riscv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -53,8 +59,27 @@ fn decoder() -> Simulator<NativeBackend> {
     ]
     .join("\n");
     SimulatorBuilder::new(&source, "CsrDecoderTestTop")
+        .param("ENABLE_M", u64::from(enable_m))
         .build_native()
         .unwrap()
+}
+
+#[test]
+fn m_encodings_and_reserved_word_operations_have_exact_legality() {
+    for enabled in [false, true] {
+        let mut simulator = decoder_with_m(enabled);
+        for opcode in [0x33, 0x3b] {
+            for funct3 in 0..8 {
+                let instruction = 1 << 25 | 2 << 20 | 1 << 15 | funct3 << 12 | 3 << 7 | opcode;
+                let (_, _, illegal) = decode(&mut simulator, instruction);
+                let valid_m = enabled && (opcode == 0x33 || funct3 == 0 || funct3 >= 4);
+                assert_eq!(
+                    illegal, !valid_m,
+                    "enabled={enabled}, instruction={instruction:08x}"
+                );
+            }
+        }
+    }
 }
 
 fn decode(simulator: &mut Simulator<NativeBackend>, instruction: u32) -> (u8, bool, bool) {

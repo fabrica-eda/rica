@@ -6,6 +6,7 @@
 /// load-use plus two-stage shift/compare dependencies stall once.
 module Core #(
     param COMMIT_PAYLOAD   : bit = 1,
+    param ENABLE_M         : bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
     param RELOCATE_LOW_DATA: bit = 0,
     // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
@@ -302,7 +303,15 @@ module Core #(
     var rx_result_can_bypass    : logic    ;
     var decode_execution_hazard : logic    ;
     var rx_execution_hazard_q   : logic    ;
+    var backend_wait            : logic    ;
     var memory_wait             : logic    ;
+    var muldiv_wait             : logic    ;
+    var muldiv_start            : logic    ;
+    var muldiv_done             : logic    ;
+    var muldiv_result           : logic<64>;
+    var cm_muldiv_pending_q     : logic    ;
+    var rx_is_muldiv_q          : logic    ;
+    var ex_is_muldiv_q          : logic    ;
     var data_request_sequence_q : logic    ;
     var csr_source              : logic<64>;
     var csr_write_value         : logic<64>;
@@ -384,7 +393,7 @@ module Core #(
         write_enable  : rf_write_enable        ,
         write_address : wb_rd_q                ,
         write_data    : wb_result_q            ,
-        read_enable   : !memory_wait           ,
+        read_enable   : !backend_wait          ,
         read_address_a: fd_q.instruction[19:15],
         read_address_b: fd_q.instruction[24:20],
         read_data_a   : rf_read_data_a         ,
@@ -392,7 +401,28 @@ module Core #(
     );
 
     inst decode_bus: DecodeBus;
-    inst decoder: Decoder (
+    if ENABLE_M :g_muldiv {
+        inst unit: MulDivUnit (
+            clk      : clk                                             ,
+            rst_n    : rst_n                                           ,
+            start    : muldiv_start                                    ,
+            cancel   : redirect_discards_cm                            ,
+            consume  : muldiv_done && cm_valid_q && cm_muldiv_pending_q,
+            operation: ex_raw_instr_q[14:12]                           ,
+            word_op  : ex_word_op_q                                    ,
+            operand_a: alu_operand_a                                   ,
+            operand_b: alu_operand_b                                   ,
+            done     : muldiv_done                                     ,
+            result   : muldiv_result                                   ,
+        );
+    } else {
+        assign muldiv_done   = 1'b0;
+        assign muldiv_result = 64'd0;
+    }
+
+    inst decoder: Decoder #(
+        ENABLE_M: ENABLE_M,
+    ) (
         decode: decode_bus,
     );
 
@@ -403,7 +433,9 @@ module Core #(
     );
 
     inst csr_bus : CsrBus;
-    inst csr_file: CsrFile (
+    inst csr_file: CsrFile #(
+        ENABLE_M: ENABLE_M,
+    ) (
         clk  : clk    ,
         rst_n: rst_n  ,
         csr  : csr_bus,
@@ -878,23 +910,29 @@ module Core #(
         // A pending older redirect makes the current completion-stage memory
         // operation wrong-path work. It must be flushed immediately instead
         // of stalling the pipeline and thereby dropping the redirect.
-        memory_wait = SYNC_DATA_MEMORY && !redirect_discards_cm && cm_valid_q && (cm_is_load_q || cm_is_store_q)
+        memory_wait  = SYNC_DATA_MEMORY && !redirect_discards_cm && cm_valid_q && (cm_is_load_q || cm_is_store_q)
             && (data_response_sequence != data_request_sequence_q);
+        muldiv_wait  = ENABLE_M && cm_valid_q && cm_muldiv_pending_q && !redirect_discards_cm;
+        backend_wait = memory_wait || muldiv_wait;
+
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
         // younger instruction without a compare-result-to-CSR timing path.
-        cm_trap_event      = cm_valid_q && cm_exception_q && !memory_wait && !redirect_pending_q;
-        cm_mret_event      = cm_valid_q && cm_is_mret_q && !memory_wait && !redirect_pending_q;
-        cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !memory_wait && !redirect_pending_q;
+        cm_trap_event      = cm_valid_q && cm_exception_q && !backend_wait && !redirect_pending_q;
+        cm_mret_event      = cm_valid_q && cm_is_mret_q && !backend_wait && !redirect_pending_q;
+        cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_wait && !redirect_pending_q;
         instruction_flush  = cm_fence_i_event;
         cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event;
+        muldiv_start       = ENABLE_M && ex_valid_q && ex_is_muldiv_q && !backend_wait && !redirect_pending_q
+            && !branch_redirect_valid && !cm_system_redirect && !ex_exception;
+
         // This is the architectural retirement boundary: a successful CM
         // instruction transfers to WB here. A pending taken branch explicitly
         // discards its wrong-path CM follower; JAL itself remains retireable.
-        cm_retire_event      = cm_valid_q && !cm_exception_q && !memory_wait
+        cm_retire_event      = cm_valid_q && !cm_exception_q && !backend_wait
             && !(redirect_pending_q && redirect_flush_wb_q);
         csr_bus.write_index  = cm_csr_index_q;
-        csr_bus.write_enable = cm_valid_q && cm_is_csr_q && cm_csr_write_q && !cm_exception_q && !memory_wait
+        csr_bus.write_enable = cm_valid_q && cm_is_csr_q && cm_csr_write_q && !cm_exception_q && !backend_wait
             && !redirect_discards_cm;
         // CSR read/modify/write operates on the value captured for this
         // instruction in EX, not on a free-running counter's newer CM value.
@@ -914,7 +952,7 @@ module Core #(
         csr_bus.trap_value   = cm_exception_value_q;
         csr_bus.mret         = cm_mret_event;
 
-        redirect_valid = !memory_wait && !redirect_pending_q
+        redirect_valid = !backend_wait && !redirect_pending_q
             && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
         // An EX-owned prediction repair redirects only younger frontend work.
         // Its instruction becomes the next CM owner and must retain memory or
@@ -949,7 +987,7 @@ module Core #(
         // that pair becomes RX/EX.  The registered bit makes the eventual
         // stall decision identical, but removes two register-index compares
         // from predictor request and fetch-cursor control.
-        rx_result_can_bypass    = rx_write_enable_q && !rx_is_load_q
+        rx_result_can_bypass    = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
             && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8) || (rx_alu_op_q == 4'd9)
                 || (rx_alu_op_q == 4'd11)) && (rx_rd_q != 5'd0);
         decode_operand_match_rx = fd_q.valid && rx_valid_q && rx_write_enable_q && (rx_rd_q != 5'd0)
@@ -972,20 +1010,20 @@ module Core #(
         // frontend is already blocked by redirect_pending_q.  Keeping the raw
         // EX redirect out of this handshake avoids extending forwarding and
         // redirect arithmetic into every predictor state/control endpoint.
-        predictor_response_accept   = predictor_response_valid && fetch_q.valid && !memory_wait && !redirect_pending_q
+        predictor_response_accept   = predictor_response_valid && fetch_q.valid && !backend_wait && !redirect_pending_q
             && !ex_exception && !(ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) && !execution_hazard;
         predictor_frontend_redirect = predictor_response_accept && predictor_response_taken;
         // Keep the current InstructionBuffer tag hit out of the wide fetch
         // payload mux.  An invalid candidate may refresh masked payload, but
         // only the semantic predictor handshake advances the fetch cursor.
-        fetch_candidate_offer   = !memory_wait && !redirect_pending_q && !ex_exception
+        fetch_candidate_offer   = !backend_wait && !redirect_pending_q && !ex_exception
             && !(ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) && !execution_hazard
             && (!fetch_q.valid || !fetch_lookahead_q.valid || !fetch_tail_valid_q || predictor_response_accept)
             && !predictor_frontend_redirect;
         fetch_payload_capture   = fetch_candidate_offer && predictor_request_ready;
         fetch_queue_push_valid  = fetch_payload_capture && fetch_packet.valid;
         predictor_request_valid = fetch_packet.valid && fetch_candidate_offer;
-        fetch_queue_advance     = !memory_wait && !redirect_pending_q && !ex_exception
+        fetch_queue_advance     = !backend_wait && !redirect_pending_q && !ex_exception
             && !(ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) && !predictor_wait && !execution_hazard
             && !predictor_frontend_redirect;
 
@@ -1019,7 +1057,7 @@ module Core #(
             predictor_recover_taken       = predictor_recover_q.taken;
             predictor_recover_fallthrough = predictor_recover_q.fallthrough;
         }
-        predictor_discard_all = !memory_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
+        predictor_discard_all = !backend_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
             && (ex_exception || (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)));
 
         // Present the four raw cycle predicates independently. CsrFile samples
@@ -1030,7 +1068,7 @@ module Core #(
         // These are control events, not a CPI decomposition: a redirect event
         // can coincide with retirement.
         csr_bus.retire            = cm_retire_event;
-        csr_bus.stall_dependency  = execution_hazard;
+        csr_bus.stall_dependency  = execution_hazard || muldiv_wait;
         csr_bus.stall_memory_wait = memory_wait;
         // Count the same generation/application cycles as the raw redirect
         // predicates, but one cycle later from the registered maintenance
@@ -1146,7 +1184,7 @@ module Core #(
             // The semantic handshakes already exclude memory/dependency
             // waits and architectural flushes. Do not repeat those predicates
             // in a priority mux on the late instruction-valid -> PC path.
-            if !memory_wait && redirect_pending_q {
+            if !backend_wait && redirect_pending_q {
                 fetch_line_q   = pending_redirect_target[31:3];
                 fetch_parcel_q = pending_redirect_target[2:1];
             } else if predictor_frontend_redirect && !predictor_wait {
@@ -1209,7 +1247,7 @@ module Core #(
             fetch_valid_q           = 1'b0;
             fetch_lookahead_valid_q = 1'b0;
             fetch_tail_valid_q      = 1'b0;
-        } else if !memory_wait {
+        } else if !backend_wait {
             if redirect_pending_q || ex_exception || (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) {
                 fetch_valid_q           = 1'b0;
                 fetch_lookahead_valid_q = 1'b0;
@@ -1232,6 +1270,23 @@ module Core #(
                 fetch_valid_q           = fetch_lookahead_valid_q || fetch_queue_push_valid;
                 fetch_lookahead_valid_q = fetch_tail_valid_q || (fetch_lookahead_valid_q && fetch_queue_push_valid);
                 fetch_tail_valid_q      = fetch_tail_valid_q && fetch_queue_push_valid;
+            }
+        }
+    }
+
+    // Pending M results are invisible to consumers while the backend is held.
+    // Refresh that payload until done, so only a small result mux crosses this
+    // boundary. The completion edge reads the last registered M result.
+    always_ff (clk, rst_n) {
+        if_reset {
+            cm_arithmetic_q = 64'd0;
+        } else if ENABLE_M && muldiv_wait {
+            cm_arithmetic_q = muldiv_result;
+        } else if ENABLE_M || !backend_wait {
+            if ex_is_csr_q {
+                cm_arithmetic_q = csr_bus.read_data;
+            } else {
+                cm_arithmetic_q = execute_bus.arithmetic;
             }
         }
     }
@@ -1272,6 +1327,9 @@ module Core #(
             rx_use_rs2_q           = 1'b0;
             rx_write_enable_q      = 1'b0;
             rx_is_load_q           = 1'b0;
+            rx_is_muldiv_q         = 1'b0;
+            ex_is_muldiv_q         = 1'b0;
+            cm_muldiv_pending_q    = 1'b0;
             rx_load_size_q         = 2'b11;
             rx_load_unsigned_q     = 1'b0;
             rx_is_store_q          = 1'b0;
@@ -1365,7 +1423,6 @@ module Core #(
             cm_control_fallthrough_q = 1'b0;
             cm_branch_equal_q        = 4'b0000;
             cm_redirect_target_q     = 32'h0000_0000;
-            cm_arithmetic_q          = 64'h0000_0000_0000_0000;
             cm_shift_low_q           = 64'h0000_0000_0000_0000;
             cm_shift_amount_q        = 3'b000;
             cm_shift_arithmetic_q    = 1'b0;
@@ -1424,7 +1481,7 @@ module Core #(
             // while the owner waits in CM.  The completion edge below then
             // advances that owner to WB and applies the saved frontend target.
             // Older redirects never enter this hold case.
-            if memory_wait && redirect_pending_q && redirect_preserve_cm_q {
+            if backend_wait && redirect_pending_q && redirect_preserve_cm_q {
                 redirect_pending_q     = 1'b1;
                 redirect_preserve_cm_q = 1'b1;
             } else {
@@ -1467,7 +1524,10 @@ module Core #(
                 debug_x31_q = wb_result_q;
             }
 
-            if memory_wait {
+            if backend_wait {
+                if muldiv_wait && muldiv_done {
+                    cm_muldiv_pending_q = 1'b0;
+                }
                 // Hold every younger stage and discard the premature WB
                 // transfer until the memory-domain response token changes.
                 wb_valid_q = 1'b0;
@@ -1503,15 +1563,16 @@ module Core #(
                 // Exceptions enter CM so trap state and redirect are both
                 // registered full-cycle side effects; WB suppresses them.
                 // MRET remains a normally retired instruction.
-                cm_valid_q         = ex_valid_q;
-                cm_pc_q            = ex_pc_q;
-                cm_raw_instr_q     = ex_raw_instr_q;
-                cm_rd_q            = ex_rd_q;
-                cm_write_enable_q  = ex_write_enable_q;
-                cm_is_load_q       = ex_is_load_q;
-                cm_load_size_q     = ex_load_size_q;
-                cm_load_unsigned_q = ex_load_unsigned_q;
-                cm_is_store_q      = ex_is_store_q;
+                cm_valid_q          = ex_valid_q;
+                cm_muldiv_pending_q = ex_is_muldiv_q;
+                cm_pc_q             = ex_pc_q;
+                cm_raw_instr_q      = ex_raw_instr_q;
+                cm_rd_q             = ex_rd_q;
+                cm_write_enable_q   = ex_write_enable_q;
+                cm_is_load_q        = ex_is_load_q;
+                cm_load_size_q      = ex_load_size_q;
+                cm_load_unsigned_q  = ex_load_unsigned_q;
+                cm_is_store_q       = ex_is_store_q;
                 // Only an older CM redirect makes the current EX memory
                 // instruction wrong-path.  A prediction-kind repair owned by
                 // this same load/store redirects younger fetch but must not
@@ -1544,11 +1605,6 @@ module Core #(
                     cm_linear_match_q  = ex_kind_match_q
                         && ((ex_link_q && (ex_predicted_next_pc_q == ex_redirect_target))
                             || (!ex_link_q && (ex_predicted_next_pc_q == ex_fallthrough_pc_q)));
-                }
-                if ex_is_csr_q {
-                    cm_arithmetic_q = csr_bus.read_data;
-                } else {
-                    cm_arithmetic_q = execute_bus.arithmetic;
                 }
                 cm_shift_low_q = execute_bus.shift_result;
                 if ex_word_op_q {
@@ -1607,7 +1663,7 @@ module Core #(
                 // not start behind a four-bit opcode equality comparator.
                 ex_subtract_q            = rx_alu_op_q == 4'd1;
                 ex_write_enable_q        = rx_write_enable_q;
-                ex_can_bypass_q          = rx_write_enable_q && !rx_is_load_q
+                ex_can_bypass_q          = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
                     && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8)
                         || (rx_alu_op_q == 4'd9) || (rx_alu_op_q == 4'd11)) && (rx_rd_q != 5'd0);
                 ex_is_load_q             = rx_is_load_q;
@@ -1622,6 +1678,7 @@ module Core #(
                 ex_static_redirect_q     = rx_is_jalr_q || (rx_is_jal_q && !rx_control_fallthrough);
                 ex_control_fallthrough_q = rx_control_fallthrough;
                 ex_is_csr_q              = rx_is_csr_q;
+                ex_is_muldiv_q           = rx_is_muldiv_q;
                 ex_csr_op_q              = rx_csr_op_q;
                 ex_csr_use_imm_q         = rx_csr_use_imm_q;
                 ex_csr_immediate_q       = rx_rs1_q;
@@ -1721,6 +1778,7 @@ module Core #(
                     rx_is_jal_q            = decode_bus.is_jal;
                     rx_is_jalr_q           = decode_bus.is_jalr;
                     rx_is_csr_q            = decode_bus.is_csr;
+                    rx_is_muldiv_q         = decode_bus.is_muldiv;
                     rx_csr_op_q            = decode_bus.csr_op;
                     rx_csr_use_imm_q       = decode_bus.csr_use_imm;
                     rx_csr_write_q         = decode_bus.csr_write;

@@ -2,25 +2,32 @@
 
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
-The current development build is **scalar RV64, a compact 64-entry BTB with
-2-bit direction prediction and an eight-entry RAS, plus a 4 KiB synchronous
-instruction cache**: `HardwareCompactStore4KTestTop` (`FAST_LSU=2`).
-Stores respond on the BRAM write edge, and the instruction cache proposes
-PC+16 when its prefetched successor returns. CPU **124.8 MHz / memory
-62.4 MHz** is retained, with **+6 ps setup / +290 ps hold** in normal STA.
-This includes 515 JTCK setup/hold paths at 6 MHz and the same four explicit
-external/CDC exceptions.
+The current development build is **scalar RV64 with the full M integer
+multiply/divide extension**, a compact 64-entry BTB with 2-bit direction
+prediction and an eight-entry RAS, plus a 4 KiB synchronous instruction cache:
+`HardwareCompactM4KTestTop` (`FAST_LSU=5`, `ENABLE_M=1`).
+The LSU presents its held read address to BRAM one memory edge earlier while
+retaining the registered response. Stores still complete on their write edge.
 
-The exact image passed **100/100 distinct physical ELFs, 118 executions** with
-repeats and eleven counter checks per run, using Windows D2XX and eight-byte
-writes. Physical `load_store` throughput rose **10.4%**, from 29.5507 to
-32.6291 MIPS; `call_nested` improved **5.6%**. Other diagnostic medians did not
-regress. The hardware runner defaults to this image and eight-byte WRITE64.
-The finalized RTL/tool build reproduced the same bitstream hash. The updated
-default runner also passed all eight basic ELFs (126 total physical executions).
+CPU **124.8 MHz / memory 62.4 MHz** is retained. Normal STA gives **+206 ps
+nominal setup / +290 ps hold**, including 515 JTCK setup/hold paths at 6 MHz
+and the same four explicit external/CDC exceptions. With an extra 200 ps
+setup uncertainty, the reported setup margin is **+6 ps**.
+The exact bitstream passed **133 distinct physical ELFs, 165 executions** with
+repeats and all eleven counter checks, using Windows D2XX and eight-byte writes.
+The updated default runner passed eight more basic ELFs (173 executions total).
 
-See the [current implementation, IPC and validation](RV64_LSU_REFILL.md),
-[previous JTCK and LSU trials](RV64_JTCK_LSU_PLAN.md), and
+Against the preceding FAST_LSU=2 design at the same clock, the four fixed
+microbenchmarks improve **2.78% geometrically**; array sum improves **13.9%**
+and pointer chasing **16.2%**. On identical 256-pair inputs, M multiplication
+and division finish **7.16x / 9.04x** faster than the bundled software reference
+routines. These are workload measurements, not universal speedup claims.
+The no-flag Core/model remains an M-disabled comparison; the hardware runner
+selects the qualified M image.
+
+See the [implementation, IPC, timing and next steps](RV64_LOAD_M_PLAN.md),
+[measurement evidence](../toolchain/measurements/2026-09-06-rv64-load-margin-m/README.md),
+[previous store/refill result](RV64_LSU_REFILL.md), and
 [earlier JTAG cause and repair](RV64_JTAG_FIX.md). New placements require the
 checked bitgen flow and physical tests of the exact resulting hash.
 The [compact predictor study](RV64_COMPACT_PREDICTOR.md),
@@ -34,7 +41,7 @@ The predictor configurations are available without editing RTL:
 | TAGE + BTB + RAS (existing default) | 0, or 1 with reset scrubbing | 0 | none | `HardwareTestTop` |
 | 2048-entry bimodal + BTB + RAS | 2, or 3 with reset scrubbing | 1 | `--bimodal` | `HardwareBimodalTestTop` |
 | Always not taken, no BTB/RAS | 4 (5 also accepted; no RAM to scrub) | 2 | `--static-predictor` | `HardwareStaticTestTop` |
-| **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor --fast-lsu 2` (hardware-memory RTL) | `HardwareCompactStore4KTestTop` |
+| **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --m-extension` (hardware-memory RTL) | `HardwareCompactM4KTestTop` |
 | Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
 | Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
 | Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |
@@ -82,7 +89,8 @@ building blocks:
 - `src/PipelineInterfaces.veryl`: typed decode and execute stage contracts
 - `src/CompressedDecoder.veryl`: RV64C/Zca integer decompressor to canonical
   32-bit RV64I instructions
-- `src/Decoder.veryl`: canonical RV64I-subset instruction decoder
+- `src/Decoder.veryl`: canonical integer decoder with optional full RV64M
+- `src/MulDivUnit.veryl`: iterative radix-4 multiplication and restoring division
 - `src/ExecuteUnit.veryl`: two-slice carry-select integer ALU
 - `src/Core.veryl`: scalar one-wide pipeline state, hazard control, forwarding,
   traps, and commit
@@ -139,6 +147,8 @@ The current overlapped implementation has:
 - one empty EX predecessor for each CSR instruction, keeping architectural
   CSR ordering and counter carry logic out of the ordinary ALU path
 - response-token-driven data-memory waits; no fixed load/store cycle count
+- optional M operations hold younger pipeline stages until completion; older
+  redirects cancel the operation, and dependent consumers receive only its result
 - a 124.8 MHz CPU domain and 62.4 MHz BRAM domain with registered bundled-data
   crossings
 - pipelined 16-bit comparison chunks completed in EX2, keeping the comparison
@@ -214,7 +224,7 @@ writes its 64-bit value.
 | ---: | ---: | --- |
 | — | 0 | `mcycle` |
 | — | 1 | `minstret` |
-| 0 | 2 | dependency bubble |
+| 0 | 2 | dependency bubble, including M-unit wait when enabled |
 | 1 | 3 | data-memory wait |
 | 2 | 4 | redirect generation/application |
 | 3 | 5 | empty fetch/decode front end |
@@ -244,7 +254,7 @@ data-sheet range, so neither is used. The board disables unused commit payload
 registers while retaining `commit_valid` for its heartbeat; the verification
 build keeps the full architectural commit trace.
 
-The production timing flow checks ordinary per-domain paths and applies a
+The earlier nextpnr-based timing flow checks ordinary per-domain paths and applies a
 separate one-CPU-period setup guard to both divided-clock boundaries. Although
 memory runs at half the CPU frequency, the board's zero-phase clock contract
 can have an intervening CPU edge, so both directions must meet the 8.012 ns CPU
@@ -258,8 +268,8 @@ domain. The response toggle changes only with that registered data, so
 load/store completion follows the actual response rather than an assumed
 pipeline length.
 
-The current predictor-enabled physical implementation does not close this
-target. The exact current 31,450-cell board map reaches 89.598 MHz with
+The earlier full-TAGE physical implementation did not close this
+target. Its 31,450-cell board map reaches 89.598 MHz with
 official nextpnr 0.11.1 static seed 5. Its worst path runs from an automatically
 retimed `fetch_line_q[20]` bit to a tagged TAGE table `WEA`, with 2.000 ns of
 logic and 9.161 ns of routing. It also fails the one-CPU-period memory-to-CPU
@@ -314,6 +324,25 @@ dual-clock synchronous HardwareMemory model. The Zca ELF set digest is
 `8938083a2a0e5cd9ae7b74c6b1f6be9c8afec0da593b07478c8385a421e2a12e`.
 Existing `--act4` invocations continue to select the RV64I catalog.
 
+`--act4-suite M` selects the complete 13-test RV64M catalog, enables M in the
+Core model, and uses the separate `act4/test_config_m.yaml` configuration.
+The custom `--m-tests` suite checks every instruction and corner case;
+`--memory-tests` and `--m-benchmarks` build the added memory and equal-work
+arithmetic workloads:
+
+```sh
+cargo run --locked --offline --release -p verify-riscv --bin rv64-riscv-tests -- --m-tests --max-cycles 1000000
+cargo run --locked --offline --release -p verify-riscv --bin rv64-riscv-tests -- --memory-tests --max-cycles 1000000
+cargo run --locked --offline --release -p verify-riscv --bin rv64-riscv-tests -- --m-benchmarks --max-cycles 1000000
+cargo run --locked --offline --release -p verify-riscv --bin verify-riscv -- \
+  --hardware-memory-rtl --compact-predictor --icache-kib 4 --fast-lsu 5 \
+  --m-extension --max-cycles 1000000 riscv/build/rv64-m/*.elf
+```
+
+The implemented compressed subset is integer Zca. Adding M does not add
+floating-point, atomic or supervisor-mode instructions. `ENABLE_M=0` rejects
+M opcodes and leaves `misa.M` clear; `ENABLE_M=1` makes it read-only one.
+
 The dual-clock harness deliberately runs every supplied ELF twice, serializing
 coincident edges as both `mem->cpu` and `cpu->mem`. This prevents either a
 same-edge request or response shortcut from hiding a handshake bug:
@@ -352,9 +381,9 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-compact-store-4k-124p8-20260906.bit`,
+verified `riscv/build/riscv-hardware-compact-m-load-4k-124p8-20260907.bit`,
 with eight-byte masked writes. Its build command, hash and checked bitgen flow
-are in the [JTCK/LSU report](RV64_JTCK_LSU_PLAN.md). Program it and run the eight
+are in the [load/M report](RV64_LOAD_M_PLAN.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -399,15 +428,16 @@ networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
 The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
-`riscv-hardware-compact-store-4k-124p8-20260906.bit`.
+`riscv-hardware-compact-m-load-4k-124p8-20260907.bit`.
 `--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
-CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](RV64_JTCK_LSU_PLAN.md)
+CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](RV64_LOAD_M_PLAN.md)
 and [historical failure reproducer](../toolchain/mre/rv64-jtag-write64/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;
-`--act4 --act4-suite Zca` selects previously generated Zca ELFs. ER1 carries
+`--act4 --act4-suite Zca` selects previously generated Zca ELFs, and
+`--act4 --act4-suite M` selects the 13 M ELFs for an M-enabled image. ER1 carries
 fixed 128-bit commands (8-byte masked memory writes, control, and response
 selection), while JTDO1 returns one stable selected response bit throughout
 each scan. ECP5's

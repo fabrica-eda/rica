@@ -1,5 +1,7 @@
 /// Combinational decoder for the currently implemented RV64I subset.
-module Decoder (
+module Decoder #(
+    param ENABLE_M: bit = 0,
+) (
     decode: modport DecodeBus::decoder,
 ) {
     var opcode              : logic<7> ;
@@ -55,6 +57,7 @@ module Decoder (
         decode.use_rs2       = 1'b0;
         decode.write_enable  = 1'b0;
         decode.is_load       = 1'b0;
+        decode.is_muldiv     = 1'b0;
         decode.load_size     = 2'b11;
         decode.load_unsigned = 1'b0;
         decode.is_store      = 1'b0;
@@ -571,5 +574,15 @@ module Decoder (
         decode.write_enable = legal_u_jump || legal_integer || decode.is_csr
             || ((opcode == 7'b1100111) && (funct3 == 3'b000)) || ((opcode == 7'b0000011) && (funct3 != 3'b111));
         decode.word_op      = legal_integer && ((opcode == 7'b0011011) || (opcode == 7'b0111011));
+        if ENABLE_M && (funct7 == 7'b0000001)
+            && ((opcode == 7'b0110011) || ((opcode == 7'b0111011) && ((funct3 == 3'd0) || funct3[2]))) {
+            decode.is_muldiv    = 1'b1;
+            decode.use_rs1      = 1'b1;
+            decode.use_rs2      = 1'b1;
+            decode.write_enable = 1'b1;
+            decode.word_op      = opcode[3];
+            decode.alu_op       = 4'd0;
+            decode.illegal      = 1'b0;
+        }
     }
 }

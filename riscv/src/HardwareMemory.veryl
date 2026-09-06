@@ -11,8 +11,11 @@
 /// LSU, and stopped-CPU debug request bundles once in the memory domain before
 /// address translation and BRAM selection, so related-clock crossings end at
 /// simple registers instead of high-fanout BRAM address logic.
+/// FAST_LSU=5 presents the CPU's held LSU address directly to port B one edge
+/// earlier. The request token and store data/mask remain registered, stores
+/// execute once, and the load response still passes through data_output_q.
 module HardwareMemory #(
-    // 0: original; 1: early store/forwarding; 2: early stores only.
+    // 0: original; 1: early store/forwarding; 2: early stores; 3/4: direct load return; 5: read port prefetch.
     param FAST_LSU: u32 = 0,
 ) (
     clk                        : input  'memory clock              ,
@@ -92,6 +95,12 @@ module HardwareMemory #(
             debug_physical = {6'h3f, debug_address_q[11:0]};
         }
         data_physical = data_address_q[17:0];
+        if FAST_LSU == 5 {
+            // Core holds the address until acknowledgment. Read the held
+            // request one edge ahead of its registered token; stores still
+            // use the registered data/mask and are performed only once.
+            data_physical = cpu_data_address[17:0];
+        }
         if debug_write_q {
             instr_port_physical = debug_physical;
         } else {
@@ -236,7 +245,12 @@ module HardwareMemory #(
         cpu_instr_response_valid    = instr_response_valid_q;
         cpu_instr_response_sequence = instr_response_sequence_q;
         cpu_data_read               = data_output_q;
-        cpu_data_response_sequence  = data_response_sequence_q;
+        if (FAST_LSU == 3) || (FAST_LSU == 4) {
+            // BRAM outputs and their bank/byte selectors update together.
+            // The related CPU clock captures this bundle after the RAM edge.
+            cpu_data_read = data_read_mux;
+        }
+        cpu_data_response_sequence = data_response_sequence_q;
     }
 
     // Keep every synchronous RAM read destination scalar inside its generated
@@ -341,7 +355,7 @@ module HardwareMemory #(
                     // A store is acknowledged on the same edge that writes
                     // every enabled byte bank. No uncompleted store retires,
                     // so FENCE/FENCE.I and terminal tohost keep their ordering.
-                    if data_we_q || recent_store_hit {
+                    if data_we_q || recent_store_hit || (FAST_LSU >= 3) {
                         data_response_sequence_q = data_request_sequence_q;
                     }
                     if recent_store_hit {
@@ -384,6 +398,9 @@ module HardwareMemory #(
     always_ff (clk) {
         instr_response_high_q  = instr_port_physical[17];
         data_response_offset_q = data_address_q[2:0];
+        if FAST_LSU == 5 {
+            data_response_offset_q = cpu_data_address[2:0];
+        }
         for bank in 0..BANK_COUNT {
             data_response_high_q[bank] = data_read_row[bank][14];
         }
