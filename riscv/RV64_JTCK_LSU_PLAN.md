@@ -142,6 +142,10 @@ CPU clockの生成IRでWORKING領域を参照する命令は59→10、メモリc
 
 上流へは[Celox PR #755](https://github.com/celox-sim/celox/pull/755)として提出した。
 最新masterを基準に関連回帰を再確認し、正当性修正とFF最適化をまとめた。
+同PRは2026-09-06にマージされ、CIと2つのベンチマークworkflowが成功した。
+Ricaもマージコミット`4c2c227e`へ固定先を変更し、4つのローカル差し替えを外した。
+[上流版への移行記録](../toolchain/measurements/2026-09-06-celox-upstream/README.md)に
+依存先の照合と、パッチなしでの回帰検証を残す。
 
 ## 再現する際の入口
 

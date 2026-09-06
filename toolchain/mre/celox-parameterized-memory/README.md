@@ -1,20 +1,22 @@
 # Parameter declaration changes the memory simulation
 
-**Resolved locally on 2026-09-06:** Celox was updated from 0.4.2 to the official
+**Fixed upstream and adopted on 2026-09-06:**
+[Celox PR #755](https://github.com/celox-sim/celox/pull/755) merged as
+`4c2c227ebfb908e294726e1af80421d976bc69fd`. Rica now pins that commit directly;
+the four local Cargo overrides and copied crates have been removed. See the
+[upstream adoption record](../../measurements/2026-09-06-celox-upstream/README.md).
+
+The initial local fix updated Celox from 0.4.2 to the official
 0.4.5 revision `9aa2457811b3ef2b002e90d2ae4f5aafb0195099`. The update alone
-failed identically. Three fixes are now applied through the
-[vendored crates and upstream patch](../../vendor/celox/README.md).
+failed identically. Three fixes were initially applied through the
+[archived local patch](../../vendor/celox/README.md).
 The source pair passes all 24 backend/optimization combinations with these
 fixes. [Evidence and validation](../../measurements/2026-09-06-celox-memory-fix/README.md)
 includes the before/after logs and negative controls.
 
-Submitted upstream as [Celox PR #755](https://github.com/celox-sim/celox/pull/755),
-including the subsequent FF optimization. The pinned local implementation is
-retained while upstream review is pending.
-
 A subsequent [FF optimization and performance comparison](../../measurements/2026-09-06-celox-ff-performance/README.md)
 removes unnecessary staging through dependency scheduling and native StateSSA
-promotion. There are now four patched crates. The original three correctness
+promotion. This added a fourth crate to the patch. The original three correctness
 fixes remain in place, including the merged-phase fallback for other frontends.
 
 ## Reproducer

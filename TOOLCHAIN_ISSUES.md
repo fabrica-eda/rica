@@ -25,7 +25,7 @@ tool. Unconfirmed observations remain excluded until a reproducer is retained.
 | STR-011 | Struo ECP5 mapper | [PR #86](https://github.com/fabrica-eda/struo/pull/86) validated (`eff404d`) and pinned through Texo PR #60 (`893d699`) | integration revision `eb6dd6a` and upstream before PR #86 | INIT-independent dynamic LUT inputs create false timing arcs and unnecessary routing load |
 | CEL-001 | Celox native x86 backend | Historical fix; original Rica MRE/log not retained | before PR #712 | SSA reload materialization could exhaust the register allocator |
 | CEL-002 | Celox SIR optimizer | [PR #736](https://github.com/celox-sim/celox/pull/736) open (`c005d316`); current workflow pins validated 0.3.1 [backport `f5c548d5`](https://github.com/celox-sim/celox/commit/f5c548d5d4becb298f924ab06e1febb9eb3da064) | Celox 0.3.1 and upstream before `c005d316` | Rejecting a >128-bit concat fold can discard operands and make native verification fail |
-| CEL-003 | Celox source-memory simulation | Fixed locally; [PR #755](https://github.com/celox-sim/celox/pull/755) submitted with FF optimization | 0.4.5 `9aa2457` + four vendored crate patches | Shared-clock FF publication order, WASM store spill, native padded array access |
+| CEL-003 | Celox source-memory simulation | Fixed upstream; [PR #755](https://github.com/celox-sim/celox/pull/755) merged and pinned at `4c2c227e` | 0.4.5 before `4c2c227e` | Shared-clock FF publication order, WASM store spill, native padded array access |
 | TEX-001 | Texo ECP5 STA | Fixed upstream/current pin | before `bcc53c6` | Corner, clock-edge, and margin policy did not correlate with nextpnr |
 | TEX-002 | Texo hold ECO | Fixed upstream/current pin | before `299836dd` | A pin-only FF rebinding could leave an invalid frozen route |
 | TEX-003 | Texo implementation | Fixed upstream/current pin | before `522d7caf` | Successful P&R could emit a functionally wrong configuration |
@@ -594,7 +594,7 @@ native accesses at logical element boundaries. In the correctness-only
 baseline, independent negative controls failed when each corresponding fix
 was removed.
 
-The adopted dependency is 0.4.5 `9aa2457` with four
+The initial local fix used 0.4.5 `9aa2457` with four
 [vendored crate patches](toolchain/vendor/celox/README.md). Original and
 parameterized memories pass native, Cranelift, interpreter and WASM at all
 three optimization levels (24 cases). The active regression covers both
@@ -610,10 +610,19 @@ source-aware lowering. The fourth crate patch is this optimizer change;
 the three original correctness defects are unchanged.
 
 The fixes and optimization were submitted as
-[Celox PR #755](https://github.com/celox-sim/celox/pull/755), based on current
+[Celox PR #755](https://github.com/celox-sim/celox/pull/755), based on
 `master` `01acba6ec`. The [submission record](toolchain/measurements/2026-09-06-celox-pr/README.md)
 contains the final commit, validation on that base, and the two test-only SV
 exclusions for unsupported four-state FF event signals.
+
+PR #755 was merged on 2026-09-06 after CI and both benchmark workflows
+succeeded. Rica now pins the merge commit `4c2c227ebfb908e294726e1af80421d976bc69fd`
+directly, with all four local Cargo overrides and crate copies removed.
+The merge tree is identical to the tested PR head. The historical patch and
+manifests remain for reproducing earlier measurements; Struo's separate 0.3.1
+optimizer backport is unchanged. See the
+[upstream adoption record](toolchain/measurements/2026-09-06-celox-upstream/README.md)
+for CI details and downstream validation without local patches.
 
 The historical failed LSU run supplies no IPC result. The normal 31 RTL files
 match the physical native-JTCK baseline, whose exact bitstream passed 100
