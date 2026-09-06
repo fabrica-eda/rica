@@ -172,3 +172,19 @@ PNRが合格した後に`tools/check_integrated_jtck_sta.py`で構造と追加ST
 
 現時点で100／250 psの余裕確保と実機IPC向上は未達。STA未達を許可したbitstreamや
 クロックを下げた結果で、今回の高速化を達成したとは扱わない。
+
+### 修正済みモデルでのstore短縮再評価
+
+Celox上流版への移行後、隔離した試作の`FAST_LSU=2`を固定100 ELFs × 2 clock実行順で
+比較し、**200回すべて合格**した。通常版とLSU無効版の400回の対照実行も合格済み。
+`load_store`のモデル実行区間は4,659→4,145 cycles（11.032%短縮）、
+`call_nested`は17,013→15,989 cycles（6.019%短縮）。実機IPCの更新値ではない。
+
+一方で5 ELFsは4〜76 cycles増加した。代表の圧縮storeでは、メモリ待ちが111 cycles
+減る一方、frontend emptyが171 cycles増えていた。追加の12トレース実行で
+commit列・値と計測前後のcyclesを照合した。BTB miss／direction wrongの数と
+命令メモリへの要求アドレス列・件数は変わらず、要求の発行時刻が変わっていた。
+
+次はこの5本でcacheの補充と次要求の発行時刻を調べる。発行条件の修正箇所は未特定。
+配置配線後のSTA・同一SHAでの実機検証も残っているため、試作を通常RTLへ戻す条件は
+変えない。[再評価と全観測値](../toolchain/measurements/2026-09-06-rv64-store-only-recheck/README.md)を参照。
