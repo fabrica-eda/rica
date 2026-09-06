@@ -43,6 +43,8 @@ module InstructionCache #(
     var request_sequence_q     : 'cpu logic            ;
     var pending_q              : 'cpu logic            ;
     var proposed_request_q     : 'cpu logic            ;
+    var proposed_ahead_q       : 'cpu logic            ;
+    var proposed_ahead_line_q  : 'cpu logic<32>        ;
     var proposed_next_q        : 'cpu logic            ;
     var proposed_line_q        : 'cpu logic<32>        ;
     var proposed_next_line_q   : 'cpu logic<32>        ;
@@ -52,6 +54,8 @@ module InstructionCache #(
     var scrub_row_q            : 'cpu logic<INDEX_BITS>;
 
     var pc_line           : 'cpu logic<32>            ;
+    var ahead_line        : 'cpu logic<32>            ;
+    var desired_ahead     : 'cpu logic                ;
     var next_line         : 'cpu logic<32>            ;
     var read_address      : 'cpu logic<32>         [2];
     var read_index        : 'cpu logic<INDEX_BITS> [2];
@@ -105,7 +109,17 @@ module InstructionCache #(
         next_line[26:23] = pc[26:23] + ((pc[22:3] == 20'hfffff) as 4);
         next_line[30:27] = pc[30:27] + ((pc[26:3] == 24'hffffff) as 4);
         next_line[31]    = pc[31] ^ (pc[30:3] == 28'hfffffff);
-        read_address[0]  = pc_line;
+        // A returned successor can trigger the following line before PC
+        // advances and the synchronous tag banks settle on their next row.
+        ahead_line[3:0]   = pc_line[3:0];
+        ahead_line[7:4]   = pc[7:4] + 4'd1;
+        ahead_line[11:8]  = pc[11:8] + ((pc[7:4] == 4'hf) as 4);
+        ahead_line[15:12] = pc[15:12] + ((pc[11:4] == 8'hff) as 4);
+        ahead_line[19:16] = pc[19:16] + ((pc[15:4] == 12'hfff) as 4);
+        ahead_line[23:20] = pc[23:20] + ((pc[19:4] == 16'hffff) as 4);
+        ahead_line[27:24] = pc[27:24] + ((pc[23:4] == 20'hfffff) as 4);
+        ahead_line[31:28] = pc[31:28] + ((pc[27:4] == 24'hffffff) as 4);
+        read_address[0]   = pc_line;
         // The odd current/successor bank always uses PC's row and tag.
         read_address[1] = {pc[31:4], 1'b1, 3'd0};
         if pc[3] {
@@ -159,9 +173,10 @@ module InstructionCache #(
         // The response address/sequence comparison is registered together
         // with its payload before driving EBR write enables. The request
         // address remains stable until this accepted entry is installed.
-        fill         = matched_valid_q && pending_q && !scrub_q && !invalidate;
-        desired_next = 1'b0;
-        miss_request = !current_hit && current_settled;
+        fill          = matched_valid_q && pending_q && !scrub_q && !invalidate;
+        desired_next  = 1'b0;
+        desired_ahead = 1'b0;
+        miss_request  = !current_hit && current_settled;
         if current_hit {
             desired_next = 1'b1;
             miss_request = !next_hit && next_settled;
@@ -173,6 +188,12 @@ module InstructionCache #(
         if fill && (request_address_q == pc_line) && next_settled && !next_hit {
             desired_next = 1'b1;
             miss_request = 1'b1;
+        }
+        // This speculative read is bounded to PC+16. If PC remains stopped,
+        // its completion cannot trigger another request beyond that window.
+        if fill && current_hit && (request_address_q == next_line) {
+            desired_ahead = 1'b1;
+            miss_request  = 1'b1;
         }
         write_index = request_address_q[INDEX_BITS + 3:4];
         write_entry = matched_entry_q;
@@ -208,24 +229,26 @@ module InstructionCache #(
 
     always_ff (clk, rst_n) {
         if_reset {
-            response_address_q   = 32'd0;
-            response_line_q      = 64'd0;
-            response_valid_q     = 1'b0;
-            response_sequence_q  = 1'b0;
-            request_address_q    = 32'd0;
-            request_sequence_q   = 1'b0;
-            pending_q            = 1'b0;
-            proposed_request_q   = 1'b0;
-            proposed_next_q      = 1'b0;
-            proposed_line_q      = 32'd0;
-            proposed_next_line_q = 32'd0;
-            matched_valid_q      = 1'b0;
-            matched_entry_q      = 0;
-            sampled_pair_odd_q   = 1'b0;
-            pair_odd_q           = 1'b0;
-            pair_valid_q         = 1'b0;
-            scrub_q              = 1'b1;
-            scrub_row_q          = 0;
+            response_address_q    = 32'd0;
+            response_line_q       = 64'd0;
+            response_valid_q      = 1'b0;
+            response_sequence_q   = 1'b0;
+            request_address_q     = 32'd0;
+            request_sequence_q    = 1'b0;
+            pending_q             = 1'b0;
+            proposed_request_q    = 1'b0;
+            proposed_next_q       = 1'b0;
+            proposed_ahead_q      = 1'b0;
+            proposed_ahead_line_q = 32'd0;
+            proposed_line_q       = 32'd0;
+            proposed_next_line_q  = 32'd0;
+            matched_valid_q       = 1'b0;
+            matched_entry_q       = 0;
+            sampled_pair_odd_q    = 1'b0;
+            pair_odd_q            = 1'b0;
+            pair_valid_q          = 1'b0;
+            scrub_q               = 1'b1;
+            scrub_row_q           = 0;
             for bank in 0..2 {
                 read_index_q[bank]    = 0;
                 read_valid_q[bank]    = 1'b0;
@@ -241,14 +264,16 @@ module InstructionCache #(
             // Separate miss detection from the held request address/sequence.
             // Capture both address candidates before selecting one, so a
             // late tag comparison drives only narrow proposal control.
-            proposed_request_q   = miss_request;
-            proposed_next_q      = desired_next;
-            proposed_line_q      = pc_line;
-            proposed_next_line_q = next_line;
-            sampled_pair_odd_q   = pc[3];
-            pair_odd_q           = sampled_pair_odd_q;
-            pair_valid_q         = sampled_valid_q[0] && sampled_valid_q[1] && sampled_hit[0] && sampled_hit[1];
-            matched_valid_q      = 1'b0;
+            proposed_request_q    = miss_request;
+            proposed_next_q       = desired_next;
+            proposed_ahead_q      = desired_ahead;
+            proposed_ahead_line_q = ahead_line;
+            proposed_line_q       = pc_line;
+            proposed_next_line_q  = next_line;
+            sampled_pair_odd_q    = pc[3];
+            pair_odd_q            = sampled_pair_odd_q;
+            pair_valid_q          = sampled_valid_q[0] && sampled_valid_q[1] && sampled_hit[0] && sampled_hit[1];
+            matched_valid_q       = 1'b0;
             if pending_q && !matched_valid_q && !scrub_q && !invalidate && response_valid_q
                 && (response_address_q == request_address_q) && (response_sequence_q == request_sequence_q) {
                 matched_valid_q = 1'b1;
@@ -285,6 +310,9 @@ module InstructionCache #(
                     request_address_q = proposed_line_q;
                     if proposed_next_q {
                         request_address_q = proposed_next_line_q;
+                    }
+                    if proposed_ahead_q {
+                        request_address_q = proposed_ahead_line_q;
                     }
                     request_sequence_q = !request_sequence_q;
                     pending_q          = 1'b1;

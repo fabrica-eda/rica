@@ -525,3 +525,26 @@ fn stopping_and_reloading_the_cpu_scrubs_previously_warm_lines() {
     assert_eq!(driver.fetch(0xa000), 0x0060_0513);
     assert_eq!(driver.fetch(0xa008), 0x0070_0513);
 }
+
+#[test]
+fn held_pc_prefetches_exactly_two_successor_lines_including_address_wrap() {
+    for base in [0x4000_u32, 0x4008, 0xffff_fff0, 0xffff_fff8] {
+        let lines = [base, base.wrapping_add(8), base.wrapping_add(16)];
+        let mut driver = Driver::new(7, lines.map(|address| (address, NOPS)));
+        assert_eq!(driver.fetch(base + 4), 0x13);
+        for _ in 0..80 {
+            driver.step();
+            assert!(driver.valid(), "prefetch disturbed the held current line");
+            assert_eq!(driver.value("instruction"), 0x13);
+        }
+        assert_eq!(
+            driver
+                .requests
+                .iter()
+                .map(|(address, _)| *address)
+                .collect::<Vec<_>>(),
+            lines,
+            "prefetch must reach PC+16 and stop while PC is held"
+        );
+    }
+}

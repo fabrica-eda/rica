@@ -5,6 +5,7 @@
 module HardwareCoreTestTop #(
     param PREDICTOR_MODE   : u32 = 0,
     param ICACHE_INDEX_BITS: u32 = 0,
+    param FAST_LSU         : u32 = 0,
 ) (
     clk_cpu         : input  'cpu    clock              ,
     clk_mem         : input  'memory clock              ,
@@ -85,7 +86,9 @@ module HardwareCoreTestTop #(
     }
 
     unsafe (cdc) {
-        inst hardware_memory: HardwareMemory (
+        inst hardware_memory: HardwareMemory #(
+            FAST_LSU: FAST_LSU,
+        ) (
             clk                        : clk_mem                       ,
             rst_n                      : rst_n                         ,
             cpu_instr_address          : memory_instr_address          ,

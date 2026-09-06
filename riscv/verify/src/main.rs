@@ -923,6 +923,7 @@ fn verify_hardware_memory_rtl(
     requested_elfs: &[PathBuf],
     predictor_config: u64,
     icache_index_bits: u64,
+    fast_lsu: u64,
 ) -> Result<(), Box<dyn Error>> {
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -936,6 +937,7 @@ fn verify_hardware_memory_rtl(
     let model = SimulatorBuilder::new(&source, "HardwareCoreTestTop")
         .param("PREDICTOR_MODE", predictor_config / 2)
         .param("ICACHE_INDEX_BITS", icache_index_bits)
+        .param("FAST_LSU", fast_lsu)
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1438,6 +1440,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     if cache_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
         return Err("--icache-kib requires --hardware-memory-rtl".into());
     }
+    let lsu_option = arguments.iter().position(|arg| arg == "--fast-lsu");
+    let fast_lsu = if let Some(index) = lsu_option {
+        match arguments.get(index + 1).map(String::as_str) {
+            Some("0") => 0,
+            Some("1") => 1,
+            Some("2") => 2,
+            _ => {
+                return Err(
+                    "--fast-lsu requires 0 (original), 1 (store/forwarding) or 2 (store only)"
+                        .into(),
+                );
+            }
+        }
+    } else {
+        0
+    };
+    if lsu_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
+        return Err("--fast-lsu requires --hardware-memory-rtl".into());
+    }
     let map_only = arguments.iter().any(|argument| argument == "--map-only");
     let post_map = arguments.iter().any(|argument| argument == "--post-map");
     let register_file_only = arguments
@@ -1456,6 +1477,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter(|(index, argument)| {
                 verify_riscv::predictor_option(argument).is_none()
                     && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
+                    && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
             })
             .map(|(_, argument)| PathBuf::from(argument))
             .collect::<Vec<_>>();
@@ -1464,6 +1486,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             &requested_elfs,
             predictor_config,
             icache_index_bits,
+            fast_lsu,
         );
     }
     if predictor_config != 0 && !rtl_only {

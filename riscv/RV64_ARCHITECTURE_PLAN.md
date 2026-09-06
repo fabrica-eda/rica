@@ -9,11 +9,12 @@
 目標周波数を下げて採用条件を満たしたことにはしない。
 
 2026-09-06の採用構成は**単発行インオーダーRV64＋64行BTB・2-bit方向予測・8段RAS＋4 KiB L1I**。
-`HardwareCompact4KTestTop` のJTAG修正版はCPU／メモリsetup **+9 ps**／hold **+290 ps**、
-JTAG内部515経路も6 MHzでsetup／holdが成立した。
-**実機100/100 ELFs、反復込み134実行と各11カウンタが合格**し、8-byte書込みへ復帰した。
-CPU性能は先の小型予測器認定版から0～1 cycleの差。元の4診断で静的版に対して約1.223倍。
-[アーキテクチャ評価](RV64_COMPACT_PREDICTOR.md)と[JTAG原因・修正・現行IPC](RV64_JTAG_FIX.md)を参照。
+現在は`HardwareCompactStore4KTestTop`でstore応答を短縮し、補充時のPC+16先読みを加えた。
+CPU 124.8 MHz／メモリ62.4 MHz、通常STAのsetup **+6 ps**／hold **+290 ps**。
+**実機100/100 ELFs・118実行が合格**し、直前版に対してload/store処理率が10.4%、
+ネストした呼出しが5.6%向上した。
+[現在の実装・IPC・再現手順](RV64_LSU_REFILL.md)、
+[小型予測器の評価](RV64_COMPACT_PREDICTOR.md)、[以前のJTAG修正](RV64_JTAG_FIX.md)を参照。
 
 次の改良でも124.8 MHzを維持し、CPU／メモリSTA、JTAG追加ゲート、実機回帰を通す。
 JTAGG内部の公式launch/captureモデル、reset recovery/removalとCDCの解析は別途残る。

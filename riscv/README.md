@@ -4,24 +4,27 @@ See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
 The current development build is **scalar RV64, a compact 64-entry BTB with
 2-bit direction prediction and an eight-entry RAS, plus a 4 KiB synchronous
-instruction cache**: `HardwareCompact4KTestTop`.
-The current native-JTCK build retains the mandatory CPU **124.8 MHz / memory
-62.4 MHz**, with **+1 ps setup / +290 ps hold** in normal STA. This includes
-515 JTCK setup/hold paths at 6 MHz; their slacks and edges match the supplemental
-audit on the same checkpoint. Four explicit external/CDC exceptions remain.
-The exact image passed **100/100 distinct physical ELFs**, **118 executions** with repeats and eleven
-counter checks each, using Windows D2XX and eight-byte writes.
+instruction cache**: `HardwareCompactStore4KTestTop` (`FAST_LSU=2`).
+Stores respond on the BRAM write edge, and the instruction cache proposes
+PC+16 when its prefetched successor returns. CPU **124.8 MHz / memory
+62.4 MHz** is retained, with **+6 ps setup / +290 ps hold** in normal STA.
+This includes 515 JTCK setup/hold paths at 6 MHz and the same four explicit
+external/CDC exceptions.
 
-The hardware runner defaults to this image and **eight-byte WRITE64**; the
-updated default also passed the basic eight ELFs.
-Falling-edge reception and registered controls repair the earlier zero-response
-failure; all 48 former WRITE64 corruption probes also pass. The original four
-diagnostic medians differ from the previous compact image by only 0–1 cycle.
-See the [current JTCK, IPC and LSU comparison](RV64_JTCK_LSU_PLAN.md),
-[earlier cause and repair](RV64_JTAG_FIX.md) and
-[architecture/performance study](RV64_COMPACT_PREDICTOR.md). New placements
-require the checked bitgen flow and physical tests of the exact resulting hash.
-The [static 4 KiB timing record](RV64_124P8_TIMING.md) and
+The exact image passed **100/100 distinct physical ELFs, 118 executions** with
+repeats and eleven counter checks per run, using Windows D2XX and eight-byte
+writes. Physical `load_store` throughput rose **10.4%**, from 29.5507 to
+32.6291 MIPS; `call_nested` improved **5.6%**. Other diagnostic medians did not
+regress. The hardware runner defaults to this image and eight-byte WRITE64.
+The finalized RTL/tool build reproduced the same bitstream hash. The updated
+default runner also passed all eight basic ELFs (126 total physical executions).
+
+See the [current implementation, IPC and validation](RV64_LSU_REFILL.md),
+[previous JTCK and LSU trials](RV64_JTCK_LSU_PLAN.md), and
+[earlier JTAG cause and repair](RV64_JTAG_FIX.md). New placements require the
+checked bitgen flow and physical tests of the exact resulting hash.
+The [compact predictor study](RV64_COMPACT_PREDICTOR.md),
+[static 4 KiB timing record](RV64_124P8_TIMING.md), and
 [earlier L1I comparison](RV64_L1I_IMPLEMENTATION.md) remain historical baselines.
 
 The predictor configurations are available without editing RTL:
@@ -31,7 +34,7 @@ The predictor configurations are available without editing RTL:
 | TAGE + BTB + RAS (existing default) | 0, or 1 with reset scrubbing | 0 | none | `HardwareTestTop` |
 | 2048-entry bimodal + BTB + RAS | 2, or 3 with reset scrubbing | 1 | `--bimodal` | `HardwareBimodalTestTop` |
 | Always not taken, no BTB/RAS | 4 (5 also accepted; no RAM to scrub) | 2 | `--static-predictor` | `HardwareStaticTestTop` |
-| **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor` | `HardwareCompact4KTestTop` |
+| **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor --fast-lsu 2` (hardware-memory RTL) | `HardwareCompactStore4KTestTop` |
 | Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
 | Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
 | Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |
@@ -349,7 +352,7 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-compact-4k-124p8-20260906-native-jtck.bit`,
+verified `riscv/build/riscv-hardware-compact-store-4k-124p8-20260906.bit`,
 with eight-byte masked writes. Its build command, hash and checked bitgen flow
 are in the [JTCK/LSU report](RV64_JTCK_LSU_PLAN.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
@@ -396,7 +399,7 @@ networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
 The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
-`riscv-hardware-compact-4k-124p8-20260906-native-jtck.bit`.
+`riscv-hardware-compact-store-4k-124p8-20260906.bit`.
 `--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;

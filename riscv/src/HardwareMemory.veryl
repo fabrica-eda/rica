@@ -11,7 +11,10 @@
 /// LSU, and stopped-CPU debug request bundles once in the memory domain before
 /// address translation and BRAM selection, so related-clock crossings end at
 /// simple registers instead of high-fanout BRAM address logic.
-module HardwareMemory (
+module HardwareMemory #(
+    // 0: original; 1: early store/forwarding; 2: early stores only.
+    param FAST_LSU: u32 = 0,
+) (
     clk                        : input  'memory clock              ,
     rst_n                      : input  'memory reset_async_low    ,
     cpu_instr_address          : input  'memory logic          <32>,
@@ -74,6 +77,10 @@ module HardwareMemory (
     var data_response_sequence_q  : 'memory logic                 ;
     var data_output_q             : 'memory logic<64>             ;
     var data_request_new          : 'memory logic                 ;
+    var recent_store_valid_q      : 'memory logic                 ;
+    var recent_store_address_q    : 'memory logic<18>             ;
+    var recent_store_data_q       : 'memory logic<64>             ;
+    var recent_store_hit          : 'memory logic                 ;
 
     always_comb {
         instr_physical = instr_request_address_q[17:0];
@@ -172,6 +179,11 @@ module HardwareMemory (
         }
 
         data_request_new = data_request_sequence_q != data_request_handled_q;
+        // One full-width, physically completed store. Partial or intervening
+        // stores invalidate the entry; other/overlapping loads use the RAM.
+        // Compare the actual BRAM address, including its 256 KiB aliasing.
+        recent_store_hit = (FAST_LSU == 1) && recent_store_valid_q && !data_we_q
+            && (data_physical == recent_store_address_q);
 
         for bank in 0..BANK_COUNT {
             store_bank_data[bank] = store_data_request_rotated[bank step 8];
@@ -325,8 +337,48 @@ module HardwareMemory (
             instr_response_valid_q    = !debug_write_q;
             if data_request_new {
                 data_request_handled_q = data_request_sequence_q;
+                if FAST_LSU != 0 {
+                    // A store is acknowledged on the same edge that writes
+                    // every enabled byte bank. No uncompleted store retires,
+                    // so FENCE/FENCE.I and terminal tohost keep their ordering.
+                    if data_we_q || recent_store_hit {
+                        data_response_sequence_q = data_request_sequence_q;
+                    }
+                    if recent_store_hit {
+                        data_output_q = recent_store_data_q;
+                    }
+
+                }
+            }
+
+        }
+    }
+
+    // Omit the entire entry when disabled; reset-only payload FFs otherwise
+    // survive synthesis even though FAST_LSU masks their outputs.
+    if FAST_LSU == 1 :g_recent_store {
+        always_ff (clk, rst_n) {
+            if_reset {
+                recent_store_valid_q   = 1'b0;
+                recent_store_address_q = 18'd0;
+                recent_store_data_q    = 64'd0;
+            } else {
+                if data_request_new && data_we_q {
+                    recent_store_valid_q   = data_mask_q == 8'hff;
+                    recent_store_address_q = data_physical;
+                    recent_store_data_q    = data_write_q;
+                }
+                // Debug writes occur with the CPU stopped. Never reuse the
+                // saved word after any byte has been changed by the loader.
+                if debug_write_q {
+                    recent_store_valid_q = 1'b0;
+                }
             }
         }
+    } else {
+        assign recent_store_valid_q   = 1'b0;
+        assign recent_store_address_q = 18'd0;
+        assign recent_store_data_q    = 64'd0;
     }
 
     always_ff (clk) {

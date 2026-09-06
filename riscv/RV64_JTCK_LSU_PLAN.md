@@ -2,10 +2,14 @@
 
 2026-09-06。対象はECP5 LFE5UM5G-85F EVN、CABGA381、speed grade 8。
 CPU **124.8 MHz**／メモリ **62.4 MHz**を維持する。
-JTCKの通常STAへの統合を採用した。タイミング余裕とLSUの改善案も実装・比較したが、
-高速化候補は配線後のタイミングが未達のため採用しない。今回、実機のIPC向上は達成していない。
+**最新（store＋補充改善）:** CPU 124.8 MHzを維持してsetup +6 ps／hold +290 ps、
+実機100 ELFs・118実行が合格した。`load_store`の処理率は10.4%、`call_nested`は5.6%向上。
+[採用実装・実測IPC・再現手順](RV64_LSU_REFILL.md)を現在の判断とする。
 
-## 採用した変更と実機結果
+以下はそれ以前のJTCK統合・LSU試行・シミュレータ修正の記録。
+当時の未達や既定パスは、その試行時点の状態を示す。
+
+## 比較基準版のJTCK統合と実機結果
 
 Texo [PR #62](https://github.com/fabrica-eda/texo/pull/62) はマージ済み。
 `jtagg.JTCK` をセル・出力ピンで指定する内部クロック制約を追加し、6 MHzのJTCKを
@@ -159,7 +163,7 @@ Ricaもマージコミット`4c2c227e`へ固定先を変更し、4つのロー�
 PNRが合格した後に`tools/check_integrated_jtck_sta.py`で構造と追加STAを照合し、
 通常の`texo bitgen`で生成する。CPUモデルと実機はその候補のSHAを固定して検査する。
 
-## 次の判断
+## 先行試行からの方針
 
 1. **124.8 MHzで実機合格した既定版を保持する。** JTCK制約・4境界の検査・通常bitgenを
    今後の候補にも必須にする。
@@ -170,7 +174,7 @@ PNRが合格した後に`tools/check_integrated_jtck_sta.py`で構造と追加ST
    増加は1 LUT。固定クロックのsetup／hold、モデル、同一SHAの実機100 ELFsをすべて
    通したうえで、`load_store`の総cyclesと他診断の退行を判定する。
 
-現時点で100／250 psの余裕確保と実機IPC向上は未達。STA未達を許可したbitstreamや
+この先行試行では100／250 psの余裕確保と実機IPC向上は未達だった。STA未達を許可したbitstreamや
 クロックを下げた結果で、今回の高速化を達成したとは扱わない。
 
 ### 修正済みモデルでのstore短縮再評価
@@ -185,6 +189,6 @@ Celox上流版への移行後、隔離した試作の`FAST_LSU=2`を固定100 EL
 commit列・値と計測前後のcyclesを照合した。BTB miss／direction wrongの数と
 命令メモリへの要求アドレス列・件数は変わらず、要求の発行時刻が変わっていた。
 
-次はこの5本でcacheの補充と次要求の発行時刻を調べる。発行条件の修正箇所は未特定。
+この時点では5本の補充・次要求の発行条件が未特定だった。現在は冒頭の採用記録に原因と修正を記す。
 配置配線後のSTA・同一SHAでの実機検証も残っているため、試作を通常RTLへ戻す条件は
 変えない。[再評価と全観測値](../toolchain/measurements/2026-09-06-rv64-store-only-recheck/README.md)を参照。

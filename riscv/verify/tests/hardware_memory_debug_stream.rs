@@ -87,22 +87,31 @@ fn consecutive_debug_bytes_survive_both_bram_ports() {
         .parent()
         .unwrap();
     let source = std::fs::read_to_string(project.join("src/HardwareMemory.veryl")).unwrap();
-    let parameterized = source.replace(
-        "module HardwareMemory (",
-        "module HardwareMemory #(param FAST_LSU: u32 = 0,) (",
+    let parameterized = source.replacen(
+        "module HardwareMemory #(",
+        "module HardwareMemory #(param UNUSED_DEBUG_REGRESSION: u32 = 0,",
+        1,
     );
     assert_ne!(source, parameterized);
-    for (label, source) in [("original", source), ("unused-parameter", parameterized)] {
-        for level in [
-            celox::OptLevel::O0,
-            celox::OptLevel::O1,
-            celox::OptLevel::O2,
-        ] {
-            let build = || celox::SimulatorBuilder::new(&source, "HardwareMemory").opt_level(level);
-            check_stream(build().build_native().unwrap())
-                .unwrap_or_else(|error| panic!("native {label} {level:?}: {error}"));
-            check_stream(build().build_wasm().unwrap())
-                .unwrap_or_else(|error| panic!("wasm {label} {level:?}: {error}"));
+    for fast_lsu in [0, 2] {
+        for (label, source) in [("current", &source), ("unused-parameter", &parameterized)] {
+            for level in [
+                celox::OptLevel::O0,
+                celox::OptLevel::O1,
+                celox::OptLevel::O2,
+            ] {
+                let build = || {
+                    celox::SimulatorBuilder::new(source, "HardwareMemory")
+                        .param("FAST_LSU", fast_lsu)
+                        .opt_level(level)
+                };
+                check_stream(build().build_native().unwrap()).unwrap_or_else(|error| {
+                    panic!("native {label} LSU={fast_lsu} {level:?}: {error}")
+                });
+                check_stream(build().build_wasm().unwrap()).unwrap_or_else(|error| {
+                    panic!("wasm {label} LSU={fast_lsu} {level:?}: {error}")
+                });
+            }
         }
     }
 }
