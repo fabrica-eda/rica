@@ -295,7 +295,7 @@ This checks Struo's proof-signed internal mapping transformations, but it is
 not a complete mapped functional comparison. Passing `--post-map` additionally
 runs the expensive ECP5-primitive simulation. The old deterministic
 true-dual-port rejection and 512-way read-mux overflow have focused fixes; the
-current Struo integration pin is `eb6dd6ac184b2783e4738edd369a991131b3de7b`.
+current Struo integration pin is `eff404dff0c4806064e2a4e0f59564b1079c001d`.
 An interactive complete release-mode post-map native build was stopped after
 more than five minutes without a bounded completion signal; it is not a
 required default gate and is tracked conservatively by STR-007 in
@@ -536,7 +536,7 @@ The command automatically downloads and verifies the corrected ECP5 v4 target
 pack; no local architecture override is needed. The pinned Texo revision is
 `7b372da4997c924b48cc09327ef006b7af753e65`: Texo 0.1.6 plus the final head of
 [PR #59](https://github.com/fabrica-eda/texo/pull/59), with every internal
-Struo dependency locked to Rica's `eb6dd6ac184b2783e4738edd369a991131b3de7b`
+Struo dependency locked to Rica's `eff404dff0c4806064e2a4e0f59564b1079c001d`
 integration revision. A fresh run at that exact pin implemented 30,095 cells,
 31,588 nets, and 367,697 PIPs in 271.19 seconds, but failed setup with
 -1.813 ns WNS and -0.870057 us TNS across 1,687 endpoints. Mapping equivalence
