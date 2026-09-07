@@ -2,32 +2,36 @@
 
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
-The current development build is **scalar RV64 with the full M integer
+The current board build is **scalar RV64 with the full M integer
 multiply/divide extension**, a compact 64-entry BTB with 2-bit direction
 prediction and an eight-entry RAS, plus a 4 KiB synchronous instruction cache:
-`HardwareCompactM4KTestTop` (`FAST_LSU=5`, `ENABLE_M=1`).
-The LSU presents its held read address to BRAM one memory edge earlier while
-retaining the registered response. Stores still complete on their write edge.
+`HardwareCompactDspM4KTestTop` (`FAST_LSU=5`, `ENABLE_M=1`, `M_USE_DSP=1`).
+Sixteen DSP partial products and a seven-stage external pipeline replace the
+radix-4 multiplier; division retains the iterative implementation.
 
-CPU **124.8 MHz / memory 62.4 MHz** is retained. Normal STA gives **+206 ps
-nominal setup / +290 ps hold**, including 515 JTCK setup/hold paths at 6 MHz
-and the same four explicit external/CDC exceptions. With an extra 200 ps
-setup uncertainty, the reported setup margin is **+6 ps**.
-The exact bitstream passed **133 distinct physical ELFs, 165 executions** with
-repeats and all eleven counter checks, using Windows D2XX and eight-byte writes.
-The updated default runner passed eight more basic ELFs (173 executions total).
+CPU **124.8 MHz / memory 62.4 MHz** is retained. STA gives **+224 ps nominal
+setup / +4 ps hold**; after an extra 200 ps setup uncertainty, setup is **+24 ps**.
+The 16,956 setup/hold checks include 515 JTCK paths at 6 MHz and the same four
+reviewed external/CDC exceptions. The hold margin is small and is the next
+placement/routing improvement to pursue.
 
-Against the preceding FAST_LSU=2 design at the same clock, the four fixed
-microbenchmarks improve **2.78% geometrically**; array sum improves **13.9%**
-and pointer chasing **16.2%**. On identical 256-pair inputs, M multiplication
-and division finish **7.16x / 9.04x** faster than the bundled software reference
-routines. These are workload measurements, not universal speedup claims.
-The no-flag Core/model remains an M-disabled comparison; the hardware runner
-selects the qualified M image.
+The exact bitstream passed **133 distinct physical ELFs and 32 repetitions**
+using Windows D2XX and eight-byte writes; the updated default runner passed
+eight more basic ELFs (**173 executions total**). On the same multiplication ELF,
+median cycles fall **16,294 → 10,147 (1.6058x faster)**. IPC rises from
+**0.158340 to 0.254262**, or **19.7609 → 31.7319 MIPS** at 124.8 MHz.
+Division and the principal non-M workloads retain their previous performance.
+These measurements include startup and checks. The CPU model passes the same
+133 ELFs in both clock orders, but its multiplication cycle count differs from
+hardware; performance figures here use the physical frozen CSR counters.
 
-See the [implementation, IPC, timing and next steps](RV64_LOAD_M_PLAN.md),
-[measurement evidence](../toolchain/measurements/2026-09-06-rv64-load-margin-m/README.md),
-[previous store/refill result](RV64_LSU_REFILL.md), and
+The no-flag Core/model remains an M-disabled comparison. Select the current
+model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
+--fast-lsu 5 --dsp-multiplier`. The hardware runner selects the qualified DSP image.
+
+See the [DSP implementation, IPC, timing and next steps](RV64_DSP_PLAN.md),
+[measurement evidence](../toolchain/measurements/2026-09-07-rv64-dsp/README.md),
+[previous radix-4 M result](RV64_LOAD_M_PLAN.md), and
 [earlier JTAG cause and repair](RV64_JTAG_FIX.md). New placements require the
 checked bitgen flow and physical tests of the exact resulting hash.
 The [compact predictor study](RV64_COMPACT_PREDICTOR.md),
@@ -42,6 +46,7 @@ The predictor configurations are available without editing RTL:
 | 2048-entry bimodal + BTB + RAS | 2, or 3 with reset scrubbing | 1 | `--bimodal` | `HardwareBimodalTestTop` |
 | Always not taken, no BTB/RAS | 4 (5 also accepted; no RAM to scrub) | 2 | `--static-predictor` | `HardwareStaticTestTop` |
 | **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --m-extension` (hardware-memory RTL) | `HardwareCompactM4KTestTop` |
+| **Compact predictor + DSP M multiplier** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier` (hardware-memory RTL) | `HardwareCompactDspM4KTestTop` |
 | Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
 | Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
 | Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |
@@ -381,7 +386,7 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-compact-m-load-4k-124p8-20260907.bit`,
+verified `riscv/build/riscv-hardware-compact-dsp-m-4k-124p8-20260907.bit`,
 with eight-byte masked writes. Its build command, hash and checked bitgen flow
 are in the [load/M report](RV64_LOAD_M_PLAN.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
@@ -428,7 +433,7 @@ networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
 The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
-`riscv-hardware-compact-m-load-4k-124p8-20260907.bit`.
+`riscv-hardware-compact-dsp-m-4k-124p8-20260907.bit`.
 `--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
@@ -479,7 +484,7 @@ trails by one CPU cycle without putting those LED pads directly on the
 CPU's combinational output path. The PLL lock alone releases CPU reset; the
 generic SW4 input is not required for autonomous bring-up.
 The selected compact build is reproduced from the command recorded in
-[native JTCK evidence](../toolchain/measurements/2026-09-06-rv64-native-jtck/baseline-pnr.json).
+[DSP qualification evidence](../toolchain/measurements/2026-09-07-rv64-dsp/cpu-07-start.json).
 The following legacy TAGE command records the earlier timing comparison;
 it is not the selected compact implementation. It uses the same PLL binding:
 
