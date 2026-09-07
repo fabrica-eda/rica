@@ -1,7 +1,9 @@
 /// RV64M execution outside the single-cycle ALU. Radix-four multiplication
 /// consumes two multiplier bits per cycle; restoring division consumes one.
 /// Result and done remain stable until consumed. Cancel discards speculative work.
-module MulDivUnit (
+module MulDivUnit #(
+    param USE_DSP: bit = 0,
+) (
     clk      : input  clock              ,
     rst_n    : input  reset_async_low    ,
     start    : input  logic              ,
@@ -23,6 +25,7 @@ module MulDivUnit (
     const DIV_SIGN  : u32 = 6;
     const FORMAT    : u32 = 7;
     const DONE      : u32 = 8;
+    const DSP_WAIT  : u32 = 9;
 
     var state_q          : logic<4> ;
     var operation_q      : logic<3> ;
@@ -47,6 +50,18 @@ module MulDivUnit (
     var division_step    : logic<65>;
     var division_result  : logic<64>;
     var division_negative: logic    ;
+    var dsp_product      : logic<128>;
+
+    if USE_DSP :g_dsp {
+        inst multiplier: DspMultiply64 (
+            clk,
+            a: a_q,
+            b: b_q,
+            product: dsp_product,
+        );
+    } else {
+        assign dsp_product = 128'd0;
+    }
 
     always_comb {
         normalized_a = operand_a;
@@ -130,18 +145,37 @@ module MulDivUnit (
                         divisor_zero_q = b_q == 64'd0;
                         state_q        = DIVIDE;
                     } else {
-                        low_q    = a_q;
-                        triple_q = {2'd0, b_q} + {1'b0, b_q, 1'b0};
-                        count_q  = 6'd31;
-                        state_q  = MULTIPLY;
+                        if USE_DSP {
+                            count_q = 6'd6;
+                            state_q = DSP_WAIT;
+                        } else {
+                            low_q    = a_q;
+                            triple_q = {2'd0, b_q} + {1'b0, b_q, 1'b0};
+                            count_q  = 6'd31;
+                            state_q  = MULTIPLY;
+                        }
+                    }
+                }
+                DSP_WAIT: {
+                    if USE_DSP {
+                        // These payloads are unowned until the final wait
+                        // cycle. Keep the terminal count off their write mux.
+                        high_q = dsp_product[127:64];
+                        low_q  = dsp_product[63:0];
+                        count_q = count_q - 6'd1;
+                        if count_q == 6'd0 {
+                            state_q = MUL_SIGN_A;
+                        }
                     }
                 }
                 MULTIPLY: {
-                    high_q  = product_step[65:2];
-                    low_q   = {product_step[1:0], low_q[63:2]};
-                    count_q = count_q - 6'd1;
-                    if count_q == 6'd0 {
-                        state_q = MUL_SIGN_A;
+                    if !USE_DSP {
+                        high_q  = product_step[65:2];
+                        low_q   = {product_step[1:0], low_q[63:2]};
+                        count_q = count_q - 6'd1;
+                        if count_q == 6'd0 {
+                            state_q = MUL_SIGN_A;
+                        }
                     }
                 }
                 MUL_SIGN_A: {

@@ -6,7 +6,7 @@ use std::path::Path;
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
-const CORE_SOURCES: [&str; 19] = [
+const CORE_SOURCES: [&str; 20] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -20,6 +20,7 @@ const CORE_SOURCES: [&str; 19] = [
     "CsrFile.veryl",
     "ExecuteUnit.veryl",
     "MulDivUnit.veryl",
+    "DspMultiply64.veryl",
     "ShiftUnit.veryl",
     "ShiftHighUnit.veryl",
     "CompletionUnit.veryl",

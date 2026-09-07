@@ -72,7 +72,7 @@ fn run_current<B: SimBackend>(mut simulator: Simulator<B>) -> Result<Observation
     })
 }
 
-fn value_03(simulator: &mut celox03::Simulator, name: &str) -> u32 {
+fn value_mapped(simulator: &mut celox::Simulator, name: &str) -> u32 {
     simulator
         .get(simulator.signal(name))
         .to_u32_digits()
@@ -81,7 +81,7 @@ fn value_03(simulator: &mut celox03::Simulator, name: &str) -> u32 {
         .unwrap_or(0)
 }
 
-fn run_mapped(mut simulator: celox03::Simulator) -> Result<Observation, Box<dyn Error>> {
+fn run_mapped(mut simulator: celox::Simulator) -> Result<Observation, Box<dyn Error>> {
     let clock = simulator.event("clk");
     let reset = simulator.signal("rst_n");
     let capture = simulator.signal("raw_response_capture");
@@ -96,8 +96,8 @@ fn run_mapped(mut simulator: celox03::Simulator) -> Result<Observation, Box<dyn 
     })?;
     simulator.tick(clock)?;
 
-    let reset_current = value_03(&mut simulator, "current_value");
-    let reset_metadata = value_03(&mut simulator, "current_metadata");
+    let reset_current = value_mapped(&mut simulator, "current_value");
+    let reset_metadata = value_mapped(&mut simulator, "current_metadata");
     if reset_current != OLD_VALUE || reset_metadata != 0 {
         return Err(format!(
             "mapped reset produced current={reset_current}, metadata={reset_metadata}"
@@ -113,10 +113,10 @@ fn run_mapped(mut simulator: celox03::Simulator) -> Result<Observation, Box<dyn 
     simulator.tick(clock)?;
 
     Ok(Observation {
-        current: value_03(&mut simulator, "current_value"),
-        captured: value_03(&mut simulator, "captured_value"),
-        current_metadata: value_03(&mut simulator, "current_metadata"),
-        captured_metadata: value_03(&mut simulator, "captured_metadata"),
+        current: value_mapped(&mut simulator, "current_value"),
+        captured: value_mapped(&mut simulator, "captured_value"),
+        current_metadata: value_mapped(&mut simulator, "current_metadata"),
+        captured_metadata: value_mapped(&mut simulator, "captured_metadata"),
     })
 }
 

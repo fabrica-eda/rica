@@ -5,26 +5,19 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.98.1"
 
 [workspace.dependencies]
 serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
-# PR #755: shared-clock FF correctness and staging optimization, WASM spill,
-# and native padded-array access fixes. No local Celox 0.4.5 patches are needed.
-celox = { git = "https://github.com/celox-sim/celox.git", rev = "4c2c227ebfb908e294726e1af80421d976bc69fd" }
-celox03 = { package = "celox", version = "=0.3.1" }
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "eff404dff0c4806064e2a4e0f59564b1079c001d" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "893d699f3624e8ff23e00e0264cfd87e9ed1ba2c" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "893d699f3624e8ff23e00e0264cfd87e9ed1ba2c" }
-
-[patch.crates-io]
-# Temporary v0.3.1 backport of Celox PR #736. Struo still pins Celox 0.3.1;
-# remove this patch after it migrates to a release containing the fix.
-celox-sir-opt = { git = "https://github.com/celox-sim/celox.git", rev = "f5c548d5d4becb298f924ab06e1febb9eb3da064" }
+# Shared-clock FF correctness and SplitCoalescedStores access-order fix (PR #762).
+celox = { git = "https://github.com/celox-sim/celox.git", rev = "7ff0dd2b8c4a92efd9a1aabe376240c6dff3f9c9" }
+struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
+struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
+struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
+struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "acdfe43e849448da39ce77e812a96b929cf73f18" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "acdfe43e849448da39ce77e812a96b929cf73f18" }
 
 [profile.release]
 lto = "thin"

@@ -11,7 +11,7 @@ const SOURCE: &str = include_str!("../../src/JtagDebugTransport.veryl");
 
 enum Model {
     Rtl(Simulator<NativeBackend>),
-    Mapped(celox03::Simulator<celox03::NativeBackend>),
+    Mapped(celox::Simulator<celox::NativeBackend>),
 }
 
 impl Model {

@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::Path;
 
-use celox03::{NativeBackend, Simulator};
+use celox::{NativeBackend, Simulator};
 use struo_celox::ecp5_simulator;
 use struo_frontend_veryl::analyze_and_lower;
 use struo_synth::synthesize;
@@ -28,7 +28,7 @@ impl Board {
 
     fn run(&mut self, cycles: usize) {
         for _ in 0..cycles {
-            if self.cycles % 2 == 0 {
+            if self.cycles.is_multiple_of(2) {
                 self.tick("clk_mem");
             }
             self.tick("clk_cpu");

@@ -1013,9 +1013,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
-    // CPU/memory stay at 124.8/62.4 MHz. This exact image repairs the JTAG
-    // boundary race; qualification is recorded in RV64_JTAG_FIX.md.
-    let mut bitstream = project.join("build/riscv-hardware-compact-m-load-4k-124p8-20260907.bit");
+    // CPU/memory stay at 124.8/62.4 MHz. This DSP multiplier image passed
+    // STA with 200 ps setup reserve and physical qualification in RV64_DSP_PLAN.md.
+    let mut bitstream = project.join("build/riscv-hardware-compact-dsp-m-4k-124p8-20260907.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

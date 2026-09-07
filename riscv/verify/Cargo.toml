@@ -8,7 +8,6 @@ default-run = "verify-riscv"
 
 [dependencies]
 celox.workspace = true
-celox03.workspace = true
 object.workspace = true
 serde_json.workspace = true
 struo-celox.workspace = true

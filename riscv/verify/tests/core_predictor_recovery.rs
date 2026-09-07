@@ -26,6 +26,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static BIMODAL_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_DSP_M: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
         0 => &TAGE,
         2 => &BIMODAL,
@@ -36,6 +37,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         130 => &BIMODAL_M,
         136 => &COMPACT_M,
         132 => &STATIC_M,
+        392 => &COMPACT_DSP_M,
         _ => panic!("unknown predictor configuration: {config}"),
     };
     image.get_or_init(|| {
@@ -43,6 +45,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         SimulatorBuilder::new(&source, "Core")
             .param("SYNC_DATA_MEMORY", 1)
             .param("ENABLE_M", u64::from(config & 128 != 0))
+            .param("M_USE_DSP", u64::from(config & 256 != 0))
             .param("BRANCH_PREDICTOR_CONFIG", config & 127)
             .opt_level(OptLevel::O0)
             .compile_native()
@@ -1223,7 +1226,7 @@ fn encode_muldiv(rd: u32, rs1: u32, rs2: u32, operation: u32) -> u32 {
 
 #[test]
 fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
-    for config in [128, 130, 132, 136] {
+    for config in [128, 130, 132, 136, 392] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 123)),
@@ -1254,7 +1257,7 @@ fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
                 entry.1 = cycle.commit_data;
             }
         }
-        assert!(held >= 90);
+        assert!(held >= if config & 256 != 0 { 75 } else { 90 });
         assert_eq!(commits[&8], (1, 861));
         assert_eq!(commits[&12], (1, 123));
         assert_eq!(commits[&16].0, 1);
@@ -1264,7 +1267,7 @@ fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
 
 #[test]
 fn older_branch_squashes_muldiv_and_younger_csr_store() {
-    for config in [128, 130, 132, 136] {
+    for config in [128, 130, 132, 136, 392] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 7)),
@@ -1296,7 +1299,7 @@ fn older_branch_squashes_muldiv_and_younger_csr_store() {
 
 #[test]
 fn muldiv_defers_a_younger_exception_until_its_result_retires() {
-    for config in [128, 130, 132, 136] {
+    for config in [128, 130, 132, 136, 392] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 7)),

@@ -701,7 +701,7 @@ define_verifier!(
     value_native,
     celox::Simulator<celox::NativeBackend>
 );
-define_verifier!(verify_post_map, value_post_map, celox03::Simulator);
+define_verifier!(verify_post_map, value_post_map, celox::Simulator);
 
 #[derive(Clone, Copy)]
 enum CoincidentEdgeOrder {
@@ -919,15 +919,27 @@ fn verify_hardware_memory_elf(
     .into())
 }
 
-fn verify_hardware_memory_rtl(
-    project: &Path,
-    requested_elfs: &[PathBuf],
+struct HardwareModelConfig {
     predictor_config: u64,
     icache_index_bits: u64,
     fast_lsu: u64,
     enable_m: bool,
+    use_dsp: bool,
+}
+
+fn verify_hardware_memory_rtl(
+    project: &Path,
+    requested_elfs: &[PathBuf],
+    config: HardwareModelConfig,
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
+    let HardwareModelConfig {
+        predictor_config,
+        icache_index_bits,
+        fast_lsu,
+        enable_m,
+        use_dsp,
+    } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
         verify_riscv::core_source(project)?,
@@ -942,6 +954,7 @@ fn verify_hardware_memory_rtl(
         .param("ICACHE_INDEX_BITS", icache_index_bits)
         .param("FAST_LSU", fast_lsu)
         .param("ENABLE_M", u64::from(enable_m))
+        .param("M_USE_DSP", u64::from(use_dsp))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1445,7 +1458,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     if cache_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
         return Err("--icache-kib requires --hardware-memory-rtl".into());
     }
-    let enable_m = arguments.iter().any(|arg| arg == "--m-extension");
+    let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
+    let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
     if enable_m && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
         return Err("--m-extension requires --hardware-memory-rtl".into());
     }
@@ -1506,6 +1520,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 verify_riscv::predictor_option(argument).is_none()
                     && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
                     && argument.as_str() != "--m-extension"
+                    && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
             })
@@ -1514,10 +1529,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         return verify_hardware_memory_rtl(
             project,
             &requested_elfs,
-            predictor_config,
-            icache_index_bits,
-            fast_lsu,
-            enable_m,
+            HardwareModelConfig {
+                predictor_config,
+                icache_index_bits,
+                fast_lsu,
+                enable_m,
+                use_dsp,
+            },
             max_cycles,
         );
     }
