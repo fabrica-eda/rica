@@ -789,10 +789,9 @@ fn verify_hardware_memory_elf(
     let mut first_commit_cycle = None;
     let mut reset_entries = 0_usize;
     for cycle in 1..=max_cycles {
-        // Celox exposes one event per tick, so it cannot apply both related
-        // clock edges atomically. Run every image in both serializations: one
-        // prevents a same-edge request shortcut, the other prevents a
-        // same-edge response shortcut. The protocol must pass either model.
+        // Manual tick handles one event at a time. These two serializations
+        // stress request and response ordering; neither measures hardware
+        // cycles. Use --timed-clocks for atomic coincident-edge diagnostics.
         if cycle % 2 == 0 && matches!(coincident_order, CoincidentEdgeOrder::MemoryThenCpu) {
             simulator.tick(clk_mem)?;
         }
@@ -925,6 +924,7 @@ struct HardwareModelConfig {
     fast_lsu: u64,
     enable_m: bool,
     use_dsp: bool,
+    enable_zba: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -939,6 +939,7 @@ fn verify_hardware_memory_rtl(
         fast_lsu,
         enable_m,
         use_dsp,
+        enable_zba,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -955,6 +956,7 @@ fn verify_hardware_memory_rtl(
         .param("FAST_LSU", fast_lsu)
         .param("ENABLE_M", u64::from(enable_m))
         .param("M_USE_DSP", u64::from(use_dsp))
+        .param("ENABLE_ZBA", u64::from(enable_zba))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1458,10 +1460,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     if cache_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
         return Err("--icache-kib requires --hardware-memory-rtl".into());
     }
+    let enable_zba = arguments.iter().any(|arg| arg == "--zba-extension");
+    let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
-    if enable_m && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
-        return Err("--m-extension requires --hardware-memory-rtl".into());
+    if (enable_m || enable_zba || timed_clocks)
+        && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl")
+    {
+        return Err(
+            "--m-extension, --zba-extension and --timed-clocks require --hardware-memory-rtl"
+                .into(),
+        );
     }
     let cycle_option = arguments.iter().position(|arg| arg == "--max-cycles");
     let max_cycles = if let Some(index) = cycle_option {
@@ -1520,12 +1529,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                 verify_riscv::predictor_option(argument).is_none()
                     && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
                     && argument.as_str() != "--m-extension"
+                    && argument.as_str() != "--zba-extension"
+                    && argument.as_str() != "--timed-clocks"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
             })
             .map(|(_, argument)| PathBuf::from(argument))
             .collect::<Vec<_>>();
+        if timed_clocks {
+            if requested_elfs.is_empty() {
+                return Err("--timed-clocks requires explicit ELF paths".into());
+            }
+            for elf in &requested_elfs {
+                verify_riscv::timed_memory::run(
+                    project,
+                    elf,
+                    predictor_config,
+                    (icache_index_bits, fast_lsu),
+                    verify_riscv::IsaExtensions {
+                        m: enable_m,
+                        zba: enable_zba,
+                    },
+                    use_dsp,
+                    max_cycles,
+                )?;
+            }
+            return Ok(());
+        }
         return verify_hardware_memory_rtl(
             project,
             &requested_elfs,
@@ -1535,6 +1566,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 fast_lsu,
                 enable_m,
                 use_dsp,
+                enable_zba,
             },
             max_cycles,
         );

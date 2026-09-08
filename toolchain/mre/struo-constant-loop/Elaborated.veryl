@@ -1,0 +1,15 @@
+module Elaborated (
+    sp: input logic<3>,
+    slots: output logic<8>,
+) {
+    var decoded: logic [8];
+    for i in 0..8 :g_slot {
+        const NEXT_SP: logic<3> = (i + 1) as 3;
+        assign decoded[i] = sp == NEXT_SP;
+    }
+    always_comb {
+        for i in 0..8 {
+            slots[i] = decoded[i];
+        }
+    }
+}

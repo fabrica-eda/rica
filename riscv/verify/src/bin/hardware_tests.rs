@@ -27,6 +27,7 @@ enum Act4Suite {
     I,
     M,
     Zca,
+    Zba,
 }
 
 impl Act4Suite {
@@ -35,7 +36,8 @@ impl Act4Suite {
             "i" => Ok(Self::I),
             "m" => Ok(Self::M),
             "zca" => Ok(Self::Zca),
-            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I, M or Zca").into()),
+            "zba" => Ok(Self::Zba),
+            _ => Err(format!("unsupported ACT4 suite {value:?}; expected I, M, Zca or Zba").into()),
         }
     }
 
@@ -44,6 +46,7 @@ impl Act4Suite {
             Self::I => "I",
             Self::M => "M",
             Self::Zca => "Zca",
+            Self::Zba => "Zba",
         }
     }
 
@@ -52,6 +55,7 @@ impl Act4Suite {
             Self::I => "act4-rv64-enabled.txt",
             Self::M => "act4-rv64-m-enabled.txt",
             Self::Zca => "act4-rv64-zca-enabled.txt",
+            Self::Zba => "act4-rv64-zba-enabled.txt",
         }
     }
 }
@@ -159,7 +163,9 @@ fn act4_elfs(project: &Path, suite: Act4Suite) -> Result<Vec<PathBuf>, Box<dyn E
     let elf_dir = project
         .parent()
         .ok_or("riscv directory has no parent")?
-        .join(if matches!(suite, Act4Suite::M) {
+        .join(if matches!(suite, Act4Suite::Zba) {
+            "third_party/riscv-arch-test/work/rica-rv64im-zba/elfs/rv64i"
+        } else if matches!(suite, Act4Suite::M) {
             "third_party/riscv-arch-test/work/rica-rv64im/elfs/rv64i"
         } else {
             "third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i"
@@ -1016,7 +1022,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // CPU/memory stay at 124.8/62.4 MHz. This DSP multiplier image passed
     // STA with 200 ps setup/hold reserves and RV64_HOLD_MARGIN_PLAN.md qualification.
     let mut bitstream =
-        project.join("build/riscv-hardware-compact-dsp-m-4k-124p8-20260908-hold.bit");
+        project.join("build/riscv-hardware-compact-zba-dsp-m-4k-124p8-20260909.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {
@@ -1051,7 +1057,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if argument == "--act4-suite" {
             let value = arguments
                 .next()
-                .ok_or("--act4-suite requires I, M or Zca")?;
+                .ok_or("--act4-suite requires I, M, Zca or Zba")?;
             act4_suite =
                 Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
             act4 = true;

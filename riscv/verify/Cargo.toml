@@ -38,3 +38,7 @@ path = "../../toolchain/mre/celox-parameterized-memory/reproduce.rs"
 [[example]]
 name = "celox-ff-performance"
 path = "../../toolchain/mre/celox-parameterized-memory/performance.rs"
+
+[[example]]
+name = "struo-constant-loop"
+path = "../../toolchain/mre/struo-constant-loop/reproduce.rs"

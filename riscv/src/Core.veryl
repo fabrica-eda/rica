@@ -6,6 +6,7 @@
 /// load-use plus two-stage shift/compare dependencies stall once.
 module Core #(
     param COMMIT_PAYLOAD   : bit = 1,
+    param ENABLE_ZBA       : bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
@@ -106,7 +107,7 @@ module Core #(
     var rx_rs2_q              : logic<5> ;
     var rx_rd_q               : logic<5> ;
     var rx_immediate_q        : logic<64>;
-    var rx_alu_op_q           : logic<4> ;
+    var rx_alu_op_q           : logic<6> ;
     var rx_use_pc_q           : logic    ;
     var rx_use_immediate_q    : logic    ;
     var rx_use_rs1_q          : logic    ;
@@ -144,7 +145,7 @@ module Core #(
     var ex_pc_q                 : logic<32>;
     var ex_raw_instr_q          : logic<32>;
     var ex_rd_q                 : logic<5> ;
-    var ex_alu_op_q             : logic<4> ;
+    var ex_alu_op_q             : logic<6> ;
     var ex_subtract_q           : logic    ;
     var ex_write_enable_q       : logic    ;
     var ex_can_bypass_q         : logic    ;
@@ -424,7 +425,8 @@ module Core #(
     }
 
     inst decoder: Decoder #(
-        ENABLE_M: ENABLE_M,
+        ENABLE_ZBA: ENABLE_ZBA,
+        ENABLE_M  : ENABLE_M  ,
     ) (
         decode: decode_bus,
     );
@@ -445,7 +447,9 @@ module Core #(
     );
 
     inst execute_bus : ExecuteBus;
-    inst execute_unit: ExecuteUnit (
+    inst execute_unit: ExecuteUnit #(
+        ENABLE_ZBA: ENABLE_ZBA,
+    ) (
         execute: execute_bus,
     );
 
@@ -926,8 +930,10 @@ module Core #(
         cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_wait && !redirect_pending_q;
         instruction_flush  = cm_fence_i_event;
         cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event;
-        muldiv_start       = ENABLE_M && ex_valid_q && ex_is_muldiv_q && !backend_wait && !redirect_pending_q
-            && !branch_redirect_valid && !cm_system_redirect && !ex_exception;
+        // The registered redirect cancels a wrong-path M request in PREPARE,
+        // before it can produce a result. Keep the late CM branch comparison
+        // off the MDU state input; architectural ownership remains in CM.
+        muldiv_start = ENABLE_M && ex_valid_q && ex_is_muldiv_q && !backend_wait && !redirect_pending_q;
 
         // This is the architectural retirement boundary: a successful CM
         // instruction transfers to WB here. A pending taken branch explicitly
@@ -992,7 +998,7 @@ module Core #(
         // from predictor request and fetch-cursor control.
         rx_result_can_bypass    = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
             && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8) || (rx_alu_op_q == 4'd9)
-                || (rx_alu_op_q == 4'd11)) && (rx_rd_q != 5'd0);
+                || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16)) && (rx_rd_q != 5'd0);
         decode_operand_match_rx = fd_q.valid && rx_valid_q && rx_write_enable_q && (rx_rd_q != 5'd0)
             && ((decode_bus.use_rs1 && (decode_bus.rs1 == rx_rd_q))
                 || (decode_bus.use_rs2 && (decode_bus.rs2 == rx_rd_q)));
@@ -1624,7 +1630,7 @@ module Core #(
                 cm_compare_sign_b_q     = execute_bus.compare_sign_b;
                 cm_compare_signed_q     = ex_alu_op_q == 4'd9;
                 cm_use_compare_q        = execute_bus.result_use_compare;
-                cm_shift_left_q         = ex_alu_op_q == 4'd6;
+                cm_shift_left_q         = (ex_alu_op_q == 4'd6) || (ex_alu_op_q == 6'd16);
                 cm_shift_word_q         = ex_word_op_q;
                 cm_lsu_address_q        = lsu_address;
                 cm_lsu_memory_address_q = lsu_address;
@@ -1668,7 +1674,8 @@ module Core #(
                 ex_write_enable_q        = rx_write_enable_q;
                 ex_can_bypass_q          = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
                     && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8)
-                        || (rx_alu_op_q == 4'd9) || (rx_alu_op_q == 4'd11)) && (rx_rd_q != 5'd0);
+                        || (rx_alu_op_q == 4'd9) || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16))
+                    && (rx_rd_q != 5'd0);
                 ex_is_load_q             = rx_is_load_q;
                 ex_load_size_q           = rx_load_size_q;
                 ex_load_unsigned_q       = rx_load_unsigned_q;

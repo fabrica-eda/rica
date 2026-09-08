@@ -5,7 +5,7 @@ interface DecodeBus {
     var rs2          : logic<5> ;
     var rd           : logic<5> ;
     var immediate    : logic<64>;
-    var alu_op       : logic<4> ;
+    var alu_op       : logic<6> ;
     var use_pc       : logic    ;
     var use_immediate: logic    ;
     var use_rs1      : logic    ;
@@ -139,7 +139,7 @@ interface CsrBus {
 /// Registered operands enter the execution unit; arithmetic and logical
 /// candidates leave separately so the pipeline can preserve a short bypass.
 interface ExecuteBus {
-    var alu_op            : logic<4> ;
+    var alu_op            : logic<6> ;
     var subtract          : logic    ;
     var link              : logic    ;
     var word_op           : logic    ;

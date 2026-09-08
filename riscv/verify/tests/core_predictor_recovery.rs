@@ -26,6 +26,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static BIMODAL_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_ZBA: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_DSP_M: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
         0 => &TAGE,
@@ -38,12 +39,14 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         136 => &COMPACT_M,
         132 => &STATIC_M,
         392 => &COMPACT_DSP_M,
+        520 => &COMPACT_ZBA,
         _ => panic!("unknown predictor configuration: {config}"),
     };
     image.get_or_init(|| {
         let source = verify_riscv::core_source(&project_path()).unwrap();
         SimulatorBuilder::new(&source, "Core")
             .param("SYNC_DATA_MEMORY", 1)
+            .param("ENABLE_ZBA", u64::from(config & 512 != 0))
             .param("ENABLE_M", u64::from(config & 128 != 0))
             .param("M_USE_DSP", u64::from(config & 256 != 0))
             .param("BRANCH_PREDICTOR_CONFIG", config & 127)
@@ -126,6 +129,8 @@ struct Cycle {
     cm_is_store: bool,
     cm_is_csr: bool,
     memory_wait: bool,
+    muldiv_start: bool,
+    muldiv_cancel: bool,
     instruction_flush: bool,
     data_we: bool,
     redirect_pending: bool,
@@ -291,6 +296,8 @@ impl CoreDriver {
             cm_is_store: self.value("cm_is_store_q") != 0,
             cm_is_csr: self.value("cm_is_csr_q") != 0,
             memory_wait: self.value("memory_wait") != 0,
+            muldiv_start: self.value("muldiv_start") != 0,
+            muldiv_cancel: self.value("redirect_discards_cm") != 0,
             instruction_flush: self.value("instruction_flush") != 0,
             data_we: self.value("data_we") != 0,
             redirect_pending: self.value("redirect_pending_q") != 0,
@@ -1267,6 +1274,7 @@ fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
 
 #[test]
 fn older_branch_squashes_muldiv_and_younger_csr_store() {
+    let mut exercised_speculative_start_and_cancel = false;
     for config in [128, 130, 132, 136, 392] {
         let mut driver = CoreDriver::with_config(
             [
@@ -1282,8 +1290,12 @@ fn older_branch_squashes_muldiv_and_younger_csr_store() {
             config,
         );
         let mut result = None;
+        let mut wrong_path_started = false;
+        let mut wrong_path_cancelled = false;
         for _ in 0..200 {
             let cycle = driver.step();
+            wrong_path_started |= cycle.muldiv_start && cycle.ex_valid && cycle.ex_pc == 8;
+            wrong_path_cancelled |= cycle.muldiv_cancel && cycle.cm_valid && cycle.cm_pc == 8;
             assert!(!cycle.data_we);
             if cycle.commit_valid {
                 assert!(!(8..24).contains(&cycle.commit_pc));
@@ -1294,7 +1306,9 @@ fn older_branch_squashes_muldiv_and_younger_csr_store() {
         }
         assert_eq!(result, Some(49));
         assert_eq!(driver.csr_value("mscratch_q"), 0);
+        exercised_speculative_start_and_cancel |= wrong_path_started && wrong_path_cancelled;
     }
+    assert!(exercised_speculative_start_and_cancel);
 }
 
 #[test]
@@ -1372,5 +1386,123 @@ fn misa_reports_m_only_when_enabled() {
             }
         }
         assert_eq!(result, Some(expected));
+    }
+}
+
+fn encode_zba(rd: u32, rs1: u32, rs2: u32, shift: u32, uw: bool) -> u32 {
+    let funct7 = if shift == 0 { 4 } else { 16 };
+    funct7 << 25
+        | rs2 << 20
+        | rs1 << 15
+        | (shift * 2) << 12
+        | rd << 7
+        | if uw { 0x3b } else { 0x33 }
+}
+
+#[test]
+fn zba_forwards_both_operands_and_waits_for_slli_uw_completion() {
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_addi(1, 0, -1)),
+            (4, encode_addi(2, 0, 7)),
+            (8, encode_zba(3, 1, 2, 3, true)),
+            (12, encode_zba(4, 3, 3, 1, false)),
+            (16, 0x0800_101b | 33 << 20 | 4 << 15 | 5 << 7),
+            (20, encode_zba(6, 5, 4, 0, true)),
+            (24, encode_sd(6, 0, 256)),
+            (28, encode_jal(0, 0)),
+        ],
+        520,
+    );
+    let mut commits = BTreeMap::<u32, (usize, u64)>::new();
+    for _ in 0..160 {
+        let cycle = driver.step();
+        if cycle.memory_wait {
+            driver.acknowledge_data_request();
+        }
+        if cycle.commit_valid && cycle.commit_pc <= 24 {
+            let entry = commits.entry(cycle.commit_pc).or_default();
+            entry.0 += 1;
+            entry.1 = cycle.commit_data;
+        }
+    }
+    let a = (u64::from(u32::MAX) << 3) + 7;
+    let b = a * 3;
+    assert_eq!(commits[&8], (1, a));
+    assert_eq!(commits[&12], (1, b));
+    assert_eq!(commits[&16], (1, u64::from(b as u32) << 33));
+    assert_eq!(commits[&20], (1, b));
+    assert_eq!(commits[&24].0, 1);
+}
+
+#[test]
+fn zba_wrong_path_does_not_commit_and_disabled_zba_traps_precisely() {
+    let instruction = encode_zba(31, 1, 1, 2, true);
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_addi(1, 0, 7)),
+            (4, encode_branch(1, 1, 0, 12)),
+            (8, instruction),
+            (12, encode_sd(31, 0, 256)),
+            (16, encode_zba(31, 1, 1, 1, true)),
+            (20, encode_jal(0, 0)),
+        ],
+        520,
+    );
+    let mut result = None;
+    for _ in 0..120 {
+        let cycle = driver.step();
+        assert!(!cycle.data_we);
+        if cycle.commit_valid {
+            assert!(![8, 12].contains(&cycle.commit_pc));
+            if cycle.commit_pc == 16 {
+                result = Some(cycle.commit_data);
+            }
+        }
+    }
+    assert_eq!(result, Some(21));
+    let mut driver = CoreDriver::with_config([(0, encode_addi(1, 0, 7)), (4, instruction)], 8);
+    let mut trapped = false;
+    for _ in 0..100 {
+        let cycle = driver.step();
+        assert!(!(cycle.commit_valid && cycle.commit_pc == 4));
+        if driver.csr_value("mcause_q") == 2 {
+            assert_eq!(driver.csr_value("mepc_q") << 1, 4);
+            assert_eq!(driver.csr_value("mtval_q"), u64::from(instruction));
+            trapped = true;
+            break;
+        }
+    }
+    assert!(trapped);
+}
+
+#[test]
+fn system_trap_flushes_a_younger_muldiv_before_it_can_start() {
+    for config in [128, 130, 132, 136, 392] {
+        for trap in [0x0000_0073, 0x0010_0073] {
+            let mut driver = CoreDriver::with_config(
+                (0..8).map(|i| (i * 4, NOP)).chain([
+                    (32, encode_addi(1, 0, 7)),
+                    (36, trap),
+                    (40, encode_muldiv(31, 1, 1, 0)),
+                    (44, encode_sd(31, 0, 256)),
+                ]),
+                config,
+            );
+            for _ in 0..140 {
+                // Unlike branch repair, a system instruction already flushes
+                // younger EX work before its CM redirect is issued.
+                assert_eq!(driver.value("muldiv_start"), 0);
+                let cycle = driver.step();
+                assert!(!cycle.data_we);
+                assert!(!(cycle.commit_valid && [40, 44].contains(&cycle.commit_pc)));
+                assert_eq!(driver.value("debug_x31"), 0);
+            }
+            assert_eq!(driver.csr_value("mepc_q") << 1, 36);
+            assert_eq!(
+                driver.csr_value("mcause_q"),
+                if trap == 0x73 { 11 } else { 3 }
+            );
+        }
     }
 }

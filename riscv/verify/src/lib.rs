@@ -6,6 +6,8 @@ use std::path::Path;
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
+pub mod timed_memory;
+
 const CORE_SOURCES: [&str; 20] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
@@ -219,6 +221,12 @@ pub struct ElfRun {
     pub commits: usize,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct IsaExtensions {
+    pub m: bool,
+    pub zba: bool,
+}
+
 pub fn run_elf(
     core_source: &str,
     image: ElfImage,
@@ -241,8 +249,24 @@ pub fn compile_elf_model_with_m(
     predictor_config: u64,
     enable_m: bool,
 ) -> Result<NativeProgramImage, Box<dyn Error>> {
+    compile_elf_model_with_isa(
+        core_source,
+        predictor_config,
+        IsaExtensions {
+            m: enable_m,
+            zba: false,
+        },
+    )
+}
+
+pub fn compile_elf_model_with_isa(
+    core_source: &str,
+    predictor_config: u64,
+    isa: IsaExtensions,
+) -> Result<NativeProgramImage, Box<dyn Error>> {
     Ok(SimulatorBuilder::new(core_source, "Core")
-        .param("ENABLE_M", u64::from(enable_m))
+        .param("ENABLE_M", u64::from(isa.m))
+        .param("ENABLE_ZBA", u64::from(isa.zba))
         .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
         .compile_native()?
         .into_program_image())

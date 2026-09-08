@@ -1,8 +1,13 @@
 /// RV64 integer execution unit with two 32-bit carry-select slices.
-module ExecuteUnit (
+module ExecuteUnit #(
+    param ENABLE_ZBA: bit = 0,
+) (
     execute: modport ExecuteBus::execute,
 ) {
+    var arithmetic_a: logic<64>;
     var arithmetic_b: logic<64>;
+    var zba_source  : logic<64>;
+    var zba_shift1  : logic<64>;
     var sum_low     : logic<33>;
     var sum_high_c0 : logic<33>;
     var sum_high_c1 : logic<33>;
@@ -15,18 +20,31 @@ module ExecuteUnit (
     );
 
     always_comb {
+        zba_source = execute.operand_a;
+        if ENABLE_ZBA && execute.alu_op[4] && execute.alu_op[2] {
+            zba_source = {32'd0, execute.operand_a[31:0]};
+        }
+        // Two binary selects implement shifts 0..3 without a priority chain.
+        zba_shift1 = zba_source;
+        if ENABLE_ZBA && execute.alu_op[4] && execute.alu_op[0] {
+            zba_shift1 = {zba_source[62:0], 1'd0};
+        }
+        arithmetic_a = zba_shift1;
+        if ENABLE_ZBA && execute.alu_op[4] && execute.alu_op[1] {
+            arithmetic_a = {zba_shift1[61:0], 2'd0};
+        }
         if execute.subtract {
             arithmetic_b = ~execute.operand_b;
         } else {
             arithmetic_b = execute.operand_b;
         }
-        sum_low = {1'b0, execute.operand_a[31:0]} + {1'b0, arithmetic_b[31:0]};
+        sum_low = {1'b0, arithmetic_a[31:0]} + {1'b0, arithmetic_b[31:0]};
         if execute.subtract {
             sum_low = sum_low + 33'd1;
         }
 
-        sum_high_c0 = {1'b0, execute.operand_a[63:32]} + {1'b0, arithmetic_b[63:32]};
-        sum_high_c1 = {1'b0, execute.operand_a[63:32]} + {1'b0, arithmetic_b[63:32]} + 33'd1;
+        sum_high_c0 = {1'b0, arithmetic_a[63:32]} + {1'b0, arithmetic_b[63:32]};
+        sum_high_c1 = {1'b0, arithmetic_a[63:32]} + {1'b0, arithmetic_b[63:32]} + 33'd1;
         if sum_low[32] {
             sum_high = sum_high_c1;
         } else {
@@ -57,9 +75,13 @@ module ExecuteUnit (
             && ((execute.alu_op == 4'd2) || (execute.alu_op == 4'd3) || (execute.alu_op == 4'd4)
                 || (execute.alu_op == 4'd5) || (execute.alu_op == 4'd9) || (execute.alu_op == 4'd11));
         execute.result_use_compare = !execute.link && ((execute.alu_op == 4'd9) || (execute.alu_op == 4'd11));
-        shift_bus.alu_op           = execute.alu_op;
+        shift_bus.alu_op           = execute.alu_op[3:0];
         shift_bus.word_op          = execute.word_op;
         shift_bus.operand          = execute.operand_a;
+        if ENABLE_ZBA && (execute.alu_op == 6'd16) {
+            shift_bus.alu_op  = 4'd6;
+            shift_bus.operand = {32'd0, execute.operand_a[31:0]};
+        }
         if execute.word_op {
             shift_bus.amount = {1'b0, execute.operand_b[4:0]};
         } else {
@@ -67,6 +89,7 @@ module ExecuteUnit (
         }
         execute.shift_result     = shift_bus.result;
         execute.result_use_shift = !execute.link
-            && ((execute.alu_op == 4'd6) || (execute.alu_op == 4'd7) || (execute.alu_op == 4'd8));
+            && ((execute.alu_op == 4'd6) || (execute.alu_op == 4'd7) || (execute.alu_op == 4'd8)
+                || (ENABLE_ZBA && (execute.alu_op == 6'd16)));
     }
 }

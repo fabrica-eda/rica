@@ -415,14 +415,6 @@ module CompactReturnStack (
             committed_sp = committed_sp_q - 3'd1;
             committed_n  = committed_n_q - 4'd1;
         }
-        for i in 0..8 {
-            committed_next[i] = committed_q[i];
-            if committed_push
-                && (((committed_sp_q == i as 3) && !committed_pop)
-                    || ((committed_sp_q == (i + 1) as 3) && committed_pop)) {
-                committed_next[i] = retire_fallthrough;
-            }
-        }
         base_sp          = speculative_sp_q;
         base_n           = speculative_n_q;
         action_valid     = predict_valid;
@@ -441,19 +433,30 @@ module CompactReturnStack (
             speculative_sp = base_sp - 3'd1;
             speculative_n  = base_n - 4'd1;
         }
-        for i in 0..8 {
+        if restore {
+            speculative_sp = committed_sp;
+            speculative_n  = committed_n;
+        }
+    }
+    // These are elaboration constants. Keeping the rotated slot number out of
+    // procedural arithmetic avoids constant-only carry chains in the mapper.
+    for i in 0..8 :g_slot {
+        const NEXT_SP: logic<3> = (i + 1) as 3;
+        always_comb {
+            committed_next[i] = committed_q[i];
+            if committed_push
+                && (((committed_sp_q == i as 3) && !committed_pop)
+                    || ((committed_sp_q == NEXT_SP) && committed_pop)) {
+                committed_next[i] = retire_fallthrough;
+            }
             speculative[i] = speculative_q[i];
             if speculative_push
-                && (((base_sp == i as 3) && !speculative_pop) || ((base_sp == (i + 1) as 3) && speculative_pop)) {
+                && (((base_sp == i as 3) && !speculative_pop) || ((base_sp == NEXT_SP) && speculative_pop)) {
                 speculative[i] = action_pc;
             }
             if restore {
                 speculative[i] = committed_next[i];
             }
-        }
-        if restore {
-            speculative_sp = committed_sp;
-            speculative_n  = committed_n;
         }
     }
     always_ff (clk) {

@@ -1,6 +1,7 @@
-/// Combinational decoder for the currently implemented RV64I subset.
+/// RV64 integer decoder with optional M and Zba extensions.
 module Decoder #(
-    param ENABLE_M: bit = 0,
+    param ENABLE_M  : bit = 0,
+    param ENABLE_ZBA: bit = 0,
 ) (
     decode: modport DecodeBus::decoder,
 ) {
@@ -17,6 +18,10 @@ module Decoder #(
     var legal_control       : logic    ;
     var legal_memory        : logic    ;
     var legal_integer       : logic    ;
+    var zba_add             : logic    ;
+    var zba_shift_add       : logic    ;
+    var zba_shift_immediate : logic    ;
+    var legal_zba           : logic    ;
     var legal_system        : logic    ;
     var csr_address_known   : logic    ;
     var csr_address_writable: logic    ;
@@ -574,6 +579,25 @@ module Decoder #(
         decode.write_enable = legal_u_jump || legal_integer || decode.is_csr
             || ((opcode == 7'b1100111) && (funct3 == 3'b000)) || ((opcode == 7'b0000011) && (funct3 != 3'b111));
         decode.word_op      = legal_integer && ((opcode == 7'b0011011) || (opcode == 7'b0111011));
+        zba_add             = ENABLE_ZBA && (opcode == 7'b0111011) && (funct7 == 7'b0000100) && (funct3 == 3'b000);
+        zba_shift_add       = ENABLE_ZBA && ((opcode == 7'b0110011) || (opcode == 7'b0111011)) && (funct7 == 7'b0010000)
+            && ((funct3 == 3'b010) || (funct3 == 3'b100) || (funct3 == 3'b110));
+        zba_shift_immediate = ENABLE_ZBA && (opcode == 7'b0011011) && (decode.instr[31:26] == 6'b000010)
+            && (funct3 == 3'b001);
+        legal_zba           = zba_add || zba_shift_add || zba_shift_immediate;
+        // 16 = SLLI.UW, 17..19 = SHnADD, 20 = ADD.UW, 21..23 = SHnADD.UW.
+        // All Zba results are XLEN-wide, including the OP-32 encodings.
+        if legal_zba {
+            decode.alu_op = 6'd16;
+            if zba_add {
+                decode.alu_op = 6'd20;
+            } else if zba_shift_add {
+                decode.alu_op = {3'b010, opcode[3], funct3[2:1]};
+            }
+            decode.write_enable = 1'b1;
+            decode.word_op      = 1'b0;
+            decode.illegal      = 1'b0;
+        }
         if ENABLE_M && (funct7 == 7'b0000001)
             && ((opcode == 7'b0110011) || ((opcode == 7'b0111011) && ((funct3 == 3'd0) || funct3[2]))) {
             decode.is_muldiv    = 1'b1;

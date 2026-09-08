@@ -42,7 +42,7 @@ module MergedAluTimingTop (
 ) {
     var operand_a_q    : logic<64>;
     var operand_b_q    : logic<64>;
-    var alu_op_q       : logic<4> ;
+    var alu_op_q       : logic<6> ;
     var word_op_q      : logic    ;
     var selected_result: logic<64>;
     var result_q       : logic<64>;
@@ -92,7 +92,7 @@ module AluTimingTop (
 ) {
     var operand_a_q   : logic<64>;
     var operand_b_q   : logic<64>;
-    var alu_op_q      : logic<4> ;
+    var alu_op_q      : logic<6> ;
     var word_op_q     : logic    ;
     var arithmetic_q  : logic<64>;
     var logic_result_q: logic<64>;
@@ -148,7 +148,7 @@ module FullAluTimingTop (
 ) {
     var operand_a_q: logic<64>;
     var operand_b_q: logic<64>;
-    var alu_op_q   : logic<4> ;
+    var alu_op_q   : logic<6> ;
     var word_op_q  : logic    ;
     var amount     : logic<6> ;
 
