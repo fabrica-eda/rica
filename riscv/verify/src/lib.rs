@@ -227,6 +227,7 @@ pub struct IsaExtensions {
     pub m: bool,
     pub zba: bool,
     pub zbb: bool,
+    pub zbs: bool,
 }
 
 pub fn run_elf(
@@ -258,6 +259,7 @@ pub fn compile_elf_model_with_m(
             m: enable_m,
             zba: false,
             zbb: false,
+            zbs: false,
         },
     )
 }
@@ -271,6 +273,7 @@ pub fn compile_elf_model_with_isa(
         .param("ENABLE_M", u64::from(isa.m))
         .param("ENABLE_ZBA", u64::from(isa.zba))
         .param("ENABLE_ZBB", u64::from(isa.zbb))
+        .param("ENABLE_ZBS", u64::from(isa.zbs))
         .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
         .compile_native()?
         .into_program_image())

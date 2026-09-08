@@ -19,6 +19,7 @@ enum Act4Suite {
     Zca,
     Zba,
     Zbb,
+    Zbs,
 }
 
 impl Act4Suite {
@@ -29,9 +30,11 @@ impl Act4Suite {
             "zca" => Ok(Self::Zca),
             "zba" => Ok(Self::Zba),
             "zbb" => Ok(Self::Zbb),
-            _ => Err(
-                format!("unsupported ACT4 suite {value:?}; expected I, M, Zca, Zba or Zbb").into(),
-            ),
+            "zbs" => Ok(Self::Zbs),
+            _ => Err(format!(
+                "unsupported ACT4 suite {value:?}; expected I, M, Zca, Zba, Zbb or Zbs"
+            )
+            .into()),
         }
     }
 
@@ -42,6 +45,7 @@ impl Act4Suite {
             Self::Zca => "Zca",
             Self::Zba => "Zba",
             Self::Zbb => "Zbb",
+            Self::Zbs => "Zbs",
         }
     }
 
@@ -52,6 +56,7 @@ impl Act4Suite {
             Self::Zca => "act4-rv64-zca-enabled.txt",
             Self::Zba => "act4-rv64-zba-enabled.txt",
             Self::Zbb => "act4-rv64-zbb-enabled.txt",
+            Self::Zbs => "act4-rv64-zbs-enabled.txt",
         }
     }
 }
@@ -131,7 +136,9 @@ fn build_elfs(project: &Path, suite: &str) -> Result<Vec<PathBuf>, Box<dyn Error
         checked_command(
             Command::new(&assembler)
                 .arg("-triple=riscv64-unknown-none-elf")
-                .arg(if suite == "rv64-zbb" {
+                .arg(if suite == "rv64-zbs" {
+                    "-mattr=+i,+c,+zicsr,+zifencei,+zbs"
+                } else if suite == "rv64-zbb" {
                     "-mattr=+i,+c,+zicsr,+zifencei,+zbb"
                 } else if suite == "rv64-zba" {
                     "-mattr=+i,+c,+zicsr,+zifencei,+zba"
@@ -364,7 +371,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut enable_m = false;
     let mut enable_zba = false;
     let mut enable_zbb = false;
+    let mut enable_zbs = false;
     let mut zbb_tests = false;
+    let mut zbs_tests = false;
     let mut zba_tests = false;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
@@ -381,6 +390,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             benchmarks = true;
         } else if argument == "--cache-tests" {
             cache_tests = true;
+        } else if argument == "--zbs-extension" {
+            enable_zbs = true;
+        } else if argument == "--zbs-tests" {
+            enable_zba = true;
+            enable_zbb = true;
+            enable_zbs = true;
+            zbs_tests = true;
         } else if argument == "--zbb-extension" {
             enable_zbb = true;
         } else if argument == "--zbb-tests" {
@@ -414,7 +430,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if argument == "--act4-suite" {
             let value = arguments
                 .next()
-                .ok_or("--act4-suite requires I, M, Zca, Zba or Zbb")?;
+                .ok_or("--act4-suite requires I, M, Zca, Zba, Zbb or Zbs")?;
             act4_suite =
                 Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
             act4 = true;
@@ -445,6 +461,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             || m_benchmarks
             || zba_tests
             || zbb_tests
+            || zbs_tests
         {
             return Err("bundled diagnostic suites cannot be combined with --act4".into());
         }
@@ -453,14 +470,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let act4_enabled =
             act4_enabled.unwrap_or_else(|| project.join("tests").join(act4_suite.enabled_file()));
-        enable_m |= matches!(act4_suite, Act4Suite::M | Act4Suite::Zba | Act4Suite::Zbb);
-        enable_zba |= matches!(act4_suite, Act4Suite::Zba | Act4Suite::Zbb);
-        enable_zbb |= matches!(act4_suite, Act4Suite::Zbb);
+        enable_m |= matches!(
+            act4_suite,
+            Act4Suite::M | Act4Suite::Zba | Act4Suite::Zbb | Act4Suite::Zbs
+        );
+        enable_zba |= matches!(act4_suite, Act4Suite::Zba | Act4Suite::Zbb | Act4Suite::Zbs);
+        enable_zbb |= matches!(act4_suite, Act4Suite::Zbb | Act4Suite::Zbs);
+        enable_zbs |= matches!(act4_suite, Act4Suite::Zbs);
         let act4_elf_dir = act4_elf_dir.unwrap_or_else(|| {
             project
                 .parent()
                 .unwrap()
-                .join(if matches!(act4_suite, Act4Suite::Zbb) {
+                .join(if matches!(act4_suite, Act4Suite::Zbs) {
+                    "third_party/riscv-arch-test/work/rica-rv64im-zbs/elfs"
+                } else if matches!(act4_suite, Act4Suite::Zbb) {
                     "third_party/riscv-arch-test/work/rica-rv64im-zbb/elfs"
                 } else if matches!(act4_suite, Act4Suite::Zba) {
                     "third_party/riscv-arch-test/work/rica-rv64im-zba/elfs"
@@ -481,6 +504,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 m: enable_m,
                 zba: enable_zba,
                 zbb: enable_zbb,
+                zbs: enable_zbs,
             },
         );
     }
@@ -493,6 +517,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         m_benchmarks,
         zba_tests,
         zbb_tests,
+        zbs_tests,
     ]
     .into_iter()
     .filter(|selected| *selected)
@@ -509,13 +534,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         || m_benchmarks
         || zba_tests
         || zbb_tests
+        || zbs_tests
     {
         if !requested_elfs.is_empty() {
             return Err("bundled diagnostic suites cannot be combined with positional ELFs".into());
         }
         build_elfs(
             project,
-            if zbb_tests {
+            if zbs_tests {
+                "rv64-zbs"
+            } else if zbb_tests {
                 "rv64-zbb"
             } else if zba_tests {
                 "rv64-zba"
@@ -549,6 +577,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             m: enable_m,
             zba: enable_zba,
             zbb: enable_zbb,
+            zbs: enable_zbs,
         },
     )?;
     for elf in &elfs {

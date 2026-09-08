@@ -26,6 +26,12 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static BIMODAL_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_ZBB_ONLY: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_ZBS: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_B: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_B_DSP_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_ZBS_ZBB: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_ZBS_ZBA: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_ZBB_DSP_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_ZBB: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_ZBA: OnceLock<NativeProgramImage> = OnceLock::new();
@@ -44,6 +50,12 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         520 => &COMPACT_ZBA,
         1544 => &COMPACT_ZBB,
         1928 => &COMPACT_ZBB_DSP_M,
+        1032 => &COMPACT_ZBB_ONLY,
+        2056 => &COMPACT_ZBS,
+        3592 => &COMPACT_B,
+        3976 => &COMPACT_B_DSP_M,
+        3080 => &COMPACT_ZBS_ZBB,
+        2568 => &COMPACT_ZBS_ZBA,
         _ => panic!("unknown predictor configuration: {config}"),
     };
     image.get_or_init(|| {
@@ -52,6 +64,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
             .param("SYNC_DATA_MEMORY", 1)
             .param("ENABLE_ZBA", u64::from(config & 512 != 0))
             .param("ENABLE_ZBB", u64::from(config & 1024 != 0))
+            .param("ENABLE_ZBS", u64::from(config & 2048 != 0))
             .param("ENABLE_M", u64::from(config & 128 != 0))
             .param("M_USE_DSP", u64::from(config & 256 != 0))
             .param("BRANCH_PREDICTOR_CONFIG", config & 127)
@@ -1706,5 +1719,183 @@ fn zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers() {
+    for gap in 0..=3 {
+        for reverse in [false, true] {
+            for overwrite in [false, true] {
+                if overwrite && gap == 0 {
+                    continue;
+                }
+                let mut program = (0..8).map(|i| (i * 4, NOP)).collect::<Vec<_>>();
+                program.extend([
+                    (32, encode_addi(1, 0, 7)),
+                    (36, 0x48001013 | 1 << 20 | 1 << 15 | 2 << 7),
+                ]); // bclri x2,x1,1 = 5
+                for i in 0..gap {
+                    program.push((
+                        40 + i * 4,
+                        if overwrite && i == 0 {
+                            encode_addi(2, 0, 99)
+                        } else {
+                            NOP
+                        },
+                    ));
+                }
+                let pc = 40 + gap * 4;
+                let (a, b) = if reverse { (1, 2) } else { (2, 1) };
+                program.extend([
+                    (pc, 0x68001033 | a << 15 | b << 20 | 31 << 7),
+                    (pc + 4, encode_jal(0, 0)),
+                ]);
+                // Zbs is independently usable with Zbb and Zba disabled.
+                let mut driver = CoreDriver::with_config(program, 2056);
+                let mut result = None;
+                for _ in 0..180 {
+                    let cycle = driver.step();
+                    if cycle.commit_valid && cycle.commit_pc == pc {
+                        result = Some(cycle.commit_data);
+                    }
+                }
+                let produced = if overwrite { 99u64 } else { 5 };
+                let expected = if reverse {
+                    7 ^ (1 << (produced & 63))
+                } else {
+                    produced ^ (1 << 7)
+                };
+                assert_eq!(
+                    result,
+                    Some(expected),
+                    "gap={gap} reverse={reverse} overwrite={overwrite}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn zbs_results_cross_zbb_muldiv_csr_and_memory_wait() {
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_addi(1, 0, 13)),
+            (4, encode_addi(2, 0, 7)),
+            (8, encode_muldiv(3, 1, 2, 0)),                 // 91
+            (12, 0x48001013 | 6 << 20 | 3 << 15 | 4 << 7),  // bclri = 27
+            (16, 0x60201013 | 4 << 15 | 5 << 7),            // cpop = 4
+            (20, 0x28001033 | 5 << 20 | 5 << 15 | 6 << 7),  // bset = 20
+            (24, encode_muldiv(7, 6, 5, 5)),                // divu = 5
+            (28, 0x68001013 | 63 << 20 | 7 << 15 | 8 << 7), // binvi = 0x8000000000000005
+            (32, encode_sd(8, 0, 256)),
+            (36, 0x48005033 | 2 << 20 | 8 << 15 | 9 << 7), // bext = 0
+            (40, 0x48005013 | 63 << 20 | 8 << 15 | 10 << 7), // bexti = 1
+            (44, 0x34001073 | 10 << 15),
+            (48, 0x34002073 | 11 << 7),
+            (52, encode_zba(12, 11, 7, 2, true)), // sh2add.uw = 9
+            (56, encode_jal(0, 0)),
+        ],
+        3976,
+    );
+    let mut commits = BTreeMap::<u32, (usize, u64)>::new();
+    let mut waits = 0;
+    for _ in 0..500 {
+        let cycle = driver.step();
+        if cycle.memory_wait {
+            waits += 1;
+            if waits >= 10 {
+                driver.acknowledge_data_request();
+            }
+        }
+        if cycle.commit_valid && cycle.commit_pc <= 52 {
+            let entry = commits.entry(cycle.commit_pc).or_default();
+            entry.0 += 1;
+            entry.1 = cycle.commit_data;
+        }
+    }
+    assert!(waits >= 10);
+    for (pc, expected) in [
+        (8, 91),
+        (12, 27),
+        (16, 4),
+        (20, 20),
+        (24, 5),
+        (28, 0x8000000000000005),
+        (36, 0),
+        (40, 1),
+        (48, 1),
+        (52, 9),
+    ] {
+        assert_eq!(commits[&pc], (1, expected), "pc={pc}");
+    }
+    assert_eq!(commits[&32].0, 1);
+}
+
+#[test]
+fn zbs_redirect_disabled_and_word_encoding_traps_are_precise() {
+    let instruction = 0x28001013 | 63 << 20 | 1 << 15 | 31 << 7;
+    let mut driver = CoreDriver::with_config(
+        [
+            (0, encode_addi(1, 0, 7)),
+            (4, encode_branch(1, 1, 0, 12)),
+            (8, instruction),
+            (12, encode_sd(31, 0, 256)),
+            (16, 0x48005013 | 2 << 20 | 1 << 15 | 31 << 7),
+            (20, encode_jal(0, 0)),
+        ],
+        3592,
+    );
+    let mut result = None;
+    for _ in 0..120 {
+        let cycle = driver.step();
+        assert!(!cycle.data_we);
+        if cycle.commit_valid {
+            assert!(![8, 12].contains(&cycle.commit_pc));
+            if cycle.commit_pc == 16 {
+                result = Some(cycle.commit_data);
+            }
+        }
+    }
+    assert_eq!(result, Some(1));
+    for (instruction, config) in [
+        (instruction, 1544),
+        (instruction | 8, 3592),
+        (0x4800103b | 2 << 20 | 1 << 15 | 31 << 7, 3592),
+        (0x2c001033 | 2 << 20 | 1 << 15 | 31 << 7, 3592),
+    ] {
+        let mut driver =
+            CoreDriver::with_config([(0, encode_addi(1, 0, 7)), (4, instruction)], config);
+        let mut trapped = false;
+        for _ in 0..100 {
+            let cycle = driver.step();
+            assert!(!(cycle.commit_valid && cycle.commit_pc == 4));
+            if driver.csr_value("mcause_q") == 2 {
+                assert_eq!(driver.csr_value("mepc_q") << 1, 4);
+                assert_eq!(driver.csr_value("mtval_q"), u64::from(instruction));
+                trapped = true;
+                break;
+            }
+        }
+        assert!(trapped, "config={config} instr={instruction:08x}");
+    }
+}
+
+#[test]
+fn misa_b_is_set_only_when_zba_zbb_zbs_are_all_enabled() {
+    for config in [8, 520, 1032, 1544, 2056, 2568, 3080, 3592, 3976] {
+        let mut driver =
+            CoreDriver::with_config([(0, 0x30102073 | 1 << 7), (4, encode_jal(0, 0))], config);
+        let mut result = None;
+        for _ in 0..100 {
+            let cycle = driver.step();
+            if cycle.commit_valid && cycle.commit_pc == 0 {
+                result = Some(cycle.commit_data);
+            }
+        }
+        let expected = 0x8000000000000104
+            | if config & 128 != 0 { 1 << 12 } else { 0 }
+            | if config & 3584 == 3584 { 2 } else { 0 };
+        assert_eq!(result, Some(expected), "config={config}");
     }
 }

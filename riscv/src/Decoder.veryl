@@ -1,8 +1,9 @@
-/// RV64 integer decoder with optional M, Zba and Zbb extensions.
+/// RV64 integer decoder with optional M, Zba, Zbb and Zbs extensions.
 module Decoder #(
     param ENABLE_M  : bit = 0,
     param ENABLE_ZBA: bit = 0,
     param ENABLE_ZBB: bit = 0,
+    param ENABLE_ZBS: bit = 0,
 ) (
     decode: modport DecodeBus::decoder,
 ) {
@@ -34,6 +35,9 @@ module Decoder #(
     var zbb_rev             : logic    ;
     var legal_zbb           : logic    ;
     var zbb_op              : logic<5> ;
+    var legal_zbs           : logic    ;
+    var zbs_opcode          : logic    ;
+    var zbs_function        : logic    ;
     var legal_system        : logic    ;
     var csr_address_known   : logic    ;
     var csr_address_writable: logic    ;
@@ -644,6 +648,20 @@ module Decoder #(
         if legal_zbb {
             decode.alu_op       = {1'b1, zbb_op};
             decode.word_op      = opcode[3] && !zbb_zext;
+            decode.write_enable = 1'b1;
+            decode.illegal      = 1'b0;
+        }
+        // Zbs 1.0: OP has a seven-bit funct7, OP-IMM a six-bit funct6.
+        // RV64 admits every six-bit immediate; no OP-32 / OP-IMM-32 forms.
+        zbs_opcode   = ((opcode == 7'h33) && !decode.instr[25]) || (opcode == 7'h13);
+        zbs_function = ((funct3 == 3'd1)
+                && ((decode.instr[31:26] == 6'h0a) || (decode.instr[31:26] == 6'h12) || (decode.instr[31:26] == 6'h1a)))
+            || ((funct3 == 3'd5) && (decode.instr[31:26] == 6'h12));
+        legal_zbs    = ENABLE_ZBS && zbs_opcode && zbs_function;
+        if legal_zbs {
+            // 52 BCLR, 53 BEXT, 54 BINV, 55 BSET (register and immediate).
+            decode.alu_op       = {4'b1101, decode.instr[29], funct3[2] || !decode.instr[30]};
+            decode.word_op      = 1'b0;
             decode.write_enable = 1'b1;
             decode.illegal      = 1'b0;
         }

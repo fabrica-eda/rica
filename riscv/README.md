@@ -2,39 +2,51 @@
 
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
-The current board build is **scalar RV64 with full M, Zba and Zbb integer
-extensions**, a compact 64-entry BTB with 2-bit direction prediction, an eight-entry
-RAS and a 4 KiB synchronous instruction cache: `HardwareCompactZbbDspM4KTestTop`
-(`FAST_LSU=5`, `ENABLE_M=1`, `M_USE_DSP=1`, `ENABLE_ZBA=1`, `ENABLE_ZBB=1`).
-Sixteen DSP partial products and a seven-stage external pipeline implement
-multiplication; division remains iterative. Zbb rotates and counts are split
-across EX/CM, and dependent consumers receive the result from the existing WB register.
+The current board build is **scalar RV64 with full M and B (Zba/Zbb/Zbs)
+integer extensions**, a compact 64-entry BTB with 2-bit direction prediction,
+an eight-entry RAS and a 4 KiB synchronous instruction cache:
+`HardwareCompactZbsDspM4KTestTop` (`FAST_LSU=5`, `ENABLE_M=1`, `M_USE_DSP=1`,
+`ENABLE_ZBA=1`, `ENABLE_ZBB=1`, `ENABLE_ZBS=1`). Sixteen DSP partial products
+and a seven-stage external pipeline implement multiplication; division remains
+iterative. Zbb rotates and counts are split across EX/CM. Zbs carries its operands
+through EX and completes single-bit updates/extraction in CM. Dependent consumers
+receive bit-manipulation results from the existing WB register. `misa.B` is set
+only when all three B subsets are enabled; the compressed subset remains integer Zca.
 
 CPU **124.8 MHz / memory 62.4 MHz** is retained. STA gives **+200 ps nominal
 setup / +290 ps hold**; after reserving 200 ps independently for each, the guarded
 slacks are **0 ps setup / +90 ps hold**. All 17,232 setup and hold checks pass,
 including 515 JTCK paths at 6 MHz, with the same four reviewed external/CDC
-exceptions. The design uses 28,620 cells, 16 DSPs and 150 EBRs.
+exceptions. The design uses 29,296 cells, 16 DSPs and 150 EBRs, adding 676 cells
+compared with the qualified Zbb image.
 
-The exact bitstream passed **207 distinct physical ELFs, 52 diagnostic repetitions,
-and 16 executions through the updated default runner: 275 PASS** using Windows D2XX.
-At the same 124.8 MHz, the paired C workloads run **6.88 times faster for counts,
-1.32 times for rotations, and 2.59 times for byte operations** with Zbb enabled.
-The 20 same-ELF baseline diagnostics differ by at most one cycle. Multiplication
-takes 10,147 cycles for 2,580 retired instructions: **IPC 0.254262 / 31.731940 MIPS**.
-Measurements include startup and checks. ISA changes alter instruction counts,
-so elapsed time for the same work is the primary comparison alongside IPC and clock.
-The CPU/memory model passes 207 ELFs in both serialized clock orders. The
-coincident-edge model matches the three Zbb C diagnostics and multiplication in
-both cycles and retired instructions. A fresh synthesis and checked route import
-reproduce the exact checkpoint and bitstream bytes.
+The exact bitstream passed **230 distinct physical ELFs, 64 diagnostic repetitions,
+and 16 executions through the updated default runner: 310 PASS** using Windows D2XX.
+At the same 124.8 MHz, paired C workloads run **1.178 times faster for single-bit
+updates, 1.098 times for extraction, and 1.195 times for immediate operations**
+with Zbs enabled. All 26 same-ELF baseline diagnostics differ by at most one cycle.
+Multiplication takes 10,147 cycles for 2,580 retired instructions:
+**IPC 0.254262 / 31.731940 MIPS**. Measurements include startup and checks.
+ISA changes alter instruction counts, so elapsed time for the same work is the
+primary comparison alongside IPC and clock.
 
-The no-flag Core/model remains an M/Zba/Zbb-disabled comparison. Select the current
-model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
---fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension`. The hardware runner selects the qualified Zbb/Zba/DSP image.
+The CPU/memory model passes 230 ELFs in both serialized clock orders. Seven
+coincident-edge diagnostics match physical retired counts and differ by at most
+one cycle; memory-wait counts agree. Fresh synthesis and checked route import
+reproduce the exact checkpoint and bitstream bytes. Placement search needed a
+broader set of violating cones and equally predicted candidates. The final
+implementation passed the unchanged production tool, timing data and constraints;
+the experimental proposal patches and build records are retained in the evidence.
+
+The no-flag Core/model remains an M/Zba/Zbb/Zbs-disabled comparison. Select the
+current model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
+--fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension`.
+The hardware runner selects the qualified B/DSP image.
 
 See the [integer ISA implementation and next steps](RV64_INTEGER_ISA_PLAN.md),
-[current measurement evidence](../toolchain/measurements/2026-09-09-rv64-zbb/README.md),
+[current Zbs measurement evidence](../toolchain/measurements/2026-09-09-rv64-zbs/README.md),
+[all current IPC/clock measurements](../toolchain/measurements/2026-09-09-rv64-zbs/PERFORMANCE.md),
+[previous Zbb measurements](../toolchain/measurements/2026-09-09-rv64-zbb/README.md),
 [previous Zba measurements](../toolchain/measurements/2026-09-08-rv64-zba/README.md),
 [previous hold repair and timing record](RV64_HOLD_MARGIN_PLAN.md),
 [DSP implementation and performance comparison](RV64_DSP_PLAN.md),
@@ -55,7 +67,8 @@ The predictor configurations are available without editing RTL:
 | **Compact 64-entry BTB + 2-bit direction + 8-entry RAS** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --m-extension` (hardware-memory RTL) | `HardwareCompactM4KTestTop` |
 | **Compact predictor + DSP M multiplier** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier` (hardware-memory RTL) | `HardwareCompactDspM4KTestTop` |
 | **Compact predictor + DSP M + Zba** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension` (hardware-memory RTL) | `HardwareCompactZbaDspM4KTestTop` |
-| **Current: compact predictor + DSP M + Zba + Zbb** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension` (hardware-memory RTL) | `HardwareCompactZbbDspM4KTestTop` |
+| **Compact predictor + DSP M + Zba + Zbb** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension` (hardware-memory RTL) | `HardwareCompactZbbDspM4KTestTop` |
+| **Current: compact predictor + DSP M + B** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension` (hardware-memory RTL) | `HardwareCompactZbsDspM4KTestTop` |
 | Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
 | Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
 | Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |
@@ -359,7 +372,7 @@ M opcodes and leaves `misa.M` clear; `ENABLE_M=1` makes it read-only one.
 
 The optional `ENABLE_ZBA` implementation adds all eight RV64 Zba instructions.
 The [integer ISA plan](RV64_INTEGER_ISA_PLAN.md) records its physical qualification
-and the Zbb qualification / next Zbs stage. The default hardware image enables Zba and Zbb. `--zba-tests` builds the custom
+and the subsequent Zbb/Zbs qualification. The default hardware image enables all three B subsets. `--zba-tests` builds the custom
 operand/alias tests, `--act4-suite Zba` selects the complete eight-test Sail-backed
 catalog, and `--zba-extension` enables Zba for external ELF inputs in either model
 runner. Use `act4/test_config_zba.yaml` to build the separate `rica-rv64im-zba`
@@ -378,6 +391,16 @@ dependent consumers wait until that value can be forwarded. The standalone
 oracle checks RTL and mapped results, reserved encodings, and instruction bytes
 against LLVM 20's assembler. `tools/build_rv64_zbb_c.py` retains paired C builds
 for population/zero counts, rotations, and byte operations.
+
+`ENABLE_ZBS` adds the eight RV64 single-bit instructions. `--zbs-tests` builds
+the eight custom instruction tests plus the read-only `misa.B` check, enabling
+Zba/Zbb/Zbs together for that catalog. `--act4-suite Zbs` selects all eight
+Sail-backed tests built with `act4/test_config_zbs.yaml`; `--zbs-extension` enables
+Zbs for external ELFs. `misa.B` is set only when all three B subsets are enabled.
+`tools/build_rv64_zbs_c.py` retains paired C builds for bit updates, extraction,
+and immediate forms. Zbs has passed RTL/mapped and complete functional-model
+regressions, 124.8 MHz setup/hold timing and byte-exact bitstream reproduction.
+The same image passed 310 physical executions and is now the default hardware build.
 
 For cycle comparisons, `verify-riscv --hardware-memory-rtl --timed-clocks` uses
 Celox's timed scheduler to evaluate coincident CPU/memory edges together. Explicit

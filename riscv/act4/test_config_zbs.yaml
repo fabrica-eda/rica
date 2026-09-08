@@ -1,0 +1,9 @@
+# Rica RV64IM plus Zca, Zba, Zbb and Zbs ACT4 self-checking ELF build configuration.
+name: rica-rv64im-zbs
+compiler_exe: clang-20
+objdump_exe: /usr/lib/llvm-20/bin/llvm-objdump
+ref_model_exe: sail_riscv_sim
+udb_config: rica-rv64im-zbs.yaml
+linker_script: ../../third_party/riscv-arch-test/config/sail/sail-RVI20U64/link.ld
+dut_include_dir: zbs
+include_priv_tests: false

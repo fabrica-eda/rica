@@ -29,6 +29,7 @@ enum Act4Suite {
     Zca,
     Zba,
     Zbb,
+    Zbs,
 }
 
 impl Act4Suite {
@@ -39,9 +40,11 @@ impl Act4Suite {
             "zca" => Ok(Self::Zca),
             "zba" => Ok(Self::Zba),
             "zbb" => Ok(Self::Zbb),
-            _ => Err(
-                format!("unsupported ACT4 suite {value:?}; expected I, M, Zca, Zba or Zbb").into(),
-            ),
+            "zbs" => Ok(Self::Zbs),
+            _ => Err(format!(
+                "unsupported ACT4 suite {value:?}; expected I, M, Zca, Zba, Zbb or Zbs"
+            )
+            .into()),
         }
     }
 
@@ -52,6 +55,7 @@ impl Act4Suite {
             Self::Zca => "Zca",
             Self::Zba => "Zba",
             Self::Zbb => "Zbb",
+            Self::Zbs => "Zbs",
         }
     }
 
@@ -62,6 +66,7 @@ impl Act4Suite {
             Self::Zca => "act4-rv64-zca-enabled.txt",
             Self::Zba => "act4-rv64-zba-enabled.txt",
             Self::Zbb => "act4-rv64-zbb-enabled.txt",
+            Self::Zbs => "act4-rv64-zbs-enabled.txt",
         }
     }
 }
@@ -169,7 +174,9 @@ fn act4_elfs(project: &Path, suite: Act4Suite) -> Result<Vec<PathBuf>, Box<dyn E
     let elf_dir = project
         .parent()
         .ok_or("riscv directory has no parent")?
-        .join(if matches!(suite, Act4Suite::Zbb) {
+        .join(if matches!(suite, Act4Suite::Zbs) {
+            "third_party/riscv-arch-test/work/rica-rv64im-zbs/elfs/rv64i"
+        } else if matches!(suite, Act4Suite::Zbb) {
             "third_party/riscv-arch-test/work/rica-rv64im-zbb/elfs/rv64i"
         } else if matches!(suite, Act4Suite::Zba) {
             "third_party/riscv-arch-test/work/rica-rv64im-zba/elfs/rv64i"
@@ -1030,7 +1037,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // CPU/memory stay at 124.8/62.4 MHz. This DSP multiplier image passed
     // STA with 200 ps setup/hold reserves and RV64_HOLD_MARGIN_PLAN.md qualification.
     let mut bitstream =
-        project.join("build/riscv-hardware-compact-zbb-dsp-m-4k-124p8-20260909.bit");
+        project.join("build/riscv-hardware-compact-zbs-dsp-m-4k-124p8-20260909.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {
@@ -1065,7 +1072,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else if argument == "--act4-suite" {
             let value = arguments
                 .next()
-                .ok_or("--act4-suite requires I, M, Zca, Zba or Zbb")?;
+                .ok_or("--act4-suite requires I, M, Zca, Zba, Zbb or Zbs")?;
             act4_suite =
                 Act4Suite::parse(value.to_str().ok_or("--act4-suite is not valid UTF-8")?)?;
             act4 = true;

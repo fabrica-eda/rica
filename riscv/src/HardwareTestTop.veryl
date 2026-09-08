@@ -10,6 +10,7 @@ module HardwareTestTop #(
     param FAST_LSU         : u32 = 0,
     param ENABLE_ZBA       : bit = 0,
     param ENABLE_ZBB       : bit = 0,
+    param ENABLE_ZBS       : bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
 ) (
@@ -204,6 +205,7 @@ module HardwareTestTop #(
     inst core: Core #(
         ENABLE_ZBA             : ENABLE_ZBA            ,
         ENABLE_ZBB             : ENABLE_ZBB            ,
+        ENABLE_ZBS             : ENABLE_ZBS            ,
         ENABLE_M               : ENABLE_M              ,
         M_USE_DSP              : M_USE_DSP             ,
         COMMIT_PAYLOAD         : 0                     ,

@@ -1,0 +1,8 @@
+Zbs-bclr-00
+Zbs-bclri-00
+Zbs-bext-00
+Zbs-bexti-00
+Zbs-binv-00
+Zbs-binvi-00
+Zbs-bset-00
+Zbs-bseti-00

@@ -1,5 +1,5 @@
-/// EX half of Zbb. Rotates apply 1/2/4 here; counts reduce each byte.
-/// Codes 0..16 are the low five bits of the decoder's Zbb ALU tag.
+/// EX half of Zbb/Zbs. Rotates apply 1/2/4; counts reduce each byte; Zbs carries A.
+/// Codes 0..16 (Zbb), 20..23 (Zbs) are the low five bits of the ALU tag.
 module BitManipUnit (
     operation: input  logic<5> ,
     word_op  : input  logic    ,
@@ -110,12 +110,13 @@ module BitManipUnit (
             | (or_bytes & {(operation == 5'd6) repeat 64}) | (reverse_bytes & {(operation == 5'd7) repeat 64})
             | (operand_a & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
             | (rotate_4 & {(!operation[4] && operation[3] && operation[2] && !operation[1]) repeat 64})
-            | ({32'd0, counts} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64});
+            | ({32'd0, counts} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64})
+            | (operand_a & {(operation[4] && !operation[3] && operation[2]) repeat 64});
 
     }
 }
 
-/// CM half of Zbb. Inputs belong to the same registered EX instruction.
+/// CM half of Zbb/Zbs. Inputs belong to the same registered EX instruction.
 module BitManipHighUnit (
     operation    : input  logic<5> ,
     word_op      : input  logic    ,
@@ -128,6 +129,8 @@ module BitManipHighUnit (
     sign_b       : input  logic    ,
     result       : output logic<64>,
 ) {
+    var bit_mask : logic<64>    ;
+    var extracted: logic<64>    ;
     var rotate_8 : logic<64>    ;
     var rotate_16: logic<64>    ;
     var rotate_32: logic<64>    ;
@@ -141,7 +144,9 @@ module BitManipHighUnit (
     var minmax   : logic<64>    ;
 
     always_comb {
-        rotate_8 = partial;
+        bit_mask  = 64'd1 << operand_b[5:0];
+        extracted = (partial >> operand_b[5:0]) & 64'd1;
+        rotate_8  = partial;
         if amount[0] {
             rotate_8 = {partial[7:0], partial[63:8]};
         }
@@ -197,7 +202,10 @@ module BitManipHighUnit (
         result = (partial & {(!operation[4] && !operation[3]) repeat 64})
             | (minmax & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
             | (rotated & {(!operation[4] && operation[3] && operation[2] && !operation[1]) repeat 64})
-            | ({57'd0, count} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64});
+            | ({57'd0, count} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64})
+            | ((partial & ~bit_mask) & {(operation == 5'd20) repeat 64})
+            | (extracted & {(operation == 5'd21) repeat 64}) | ((partial ^ bit_mask) & {(operation == 5'd22) repeat 64})
+            | ((partial | bit_mask) & {(operation == 5'd23) repeat 64});
 
     }
 }

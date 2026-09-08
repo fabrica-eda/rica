@@ -68,6 +68,7 @@ pub fn run(
         .param("ENABLE_M", u64::from(isa.m))
         .param("ENABLE_ZBA", u64::from(isa.zba))
         .param("ENABLE_ZBB", u64::from(isa.zbb))
+        .param("ENABLE_ZBS", u64::from(isa.zbs))
         .param("M_USE_DSP", u64::from(use_dsp))
         .build()?;
     let reset = sim.signal("rst_n");

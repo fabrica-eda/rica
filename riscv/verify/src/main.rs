@@ -926,6 +926,7 @@ struct HardwareModelConfig {
     use_dsp: bool,
     enable_zba: bool,
     enable_zbb: bool,
+    enable_zbs: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -942,6 +943,7 @@ fn verify_hardware_memory_rtl(
         use_dsp,
         enable_zba,
         enable_zbb,
+        enable_zbs,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -960,6 +962,7 @@ fn verify_hardware_memory_rtl(
         .param("M_USE_DSP", u64::from(use_dsp))
         .param("ENABLE_ZBA", u64::from(enable_zba))
         .param("ENABLE_ZBB", u64::from(enable_zbb))
+        .param("ENABLE_ZBS", u64::from(enable_zbs))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1465,14 +1468,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let enable_zba = arguments.iter().any(|arg| arg == "--zba-extension");
     let enable_zbb = arguments.iter().any(|arg| arg == "--zbb-extension");
+    let enable_zbs = arguments.iter().any(|arg| arg == "--zbs-extension");
     let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
-    if (enable_m || enable_zba || enable_zbb || timed_clocks)
+    if (enable_m || enable_zba || enable_zbb || enable_zbs || timed_clocks)
         && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl")
     {
         return Err(
-            "--m-extension, --zba-extension, --zbb-extension and --timed-clocks require --hardware-memory-rtl"
+            "--m-extension, --zba-extension, --zbb-extension, --zbs-extension and --timed-clocks require --hardware-memory-rtl"
                 .into(),
         );
     }
@@ -1535,6 +1539,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--m-extension"
                     && argument.as_str() != "--zba-extension"
                     && argument.as_str() != "--zbb-extension"
+                    && argument.as_str() != "--zbs-extension"
                     && argument.as_str() != "--timed-clocks"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
@@ -1556,6 +1561,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         m: enable_m,
                         zba: enable_zba,
                         zbb: enable_zbb,
+                        zbs: enable_zbs,
                     },
                     use_dsp,
                     max_cycles,
@@ -1574,6 +1580,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 use_dsp,
                 enable_zba,
                 enable_zbb,
+                enable_zbs,
             },
             max_cycles,
         );

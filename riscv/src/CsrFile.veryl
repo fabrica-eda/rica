@@ -6,6 +6,7 @@
 /// enable stack and returns to the aligned MEPC value.
 module CsrFile #(
     param ENABLE_M: bit = 0,
+    param ENABLE_B: bit = 0,
 ) (
     clk  : input   clock       ,
     rst_n: input   reset       ,
@@ -255,6 +256,9 @@ module CsrFile #(
             csr_mux_level0[1] = 64'h8000_0000_0000_0104;
             if ENABLE_M {
                 csr_mux_level0[1][12] = 1'b1;
+            }
+            if ENABLE_B {
+                csr_mux_level0[1][1] = 1'b1;
             }
             csr_mux_level0[2] = mscratch_q;
             csr_mux_level0[3] = {60'd0, mcause_q};
