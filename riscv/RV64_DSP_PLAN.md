@@ -4,6 +4,10 @@
 DSPを使うためにStruo／Texo側も実装する、というユーザーの指示に基づく。
 実装コミットは `00aae16`。
 
+2026-09-08追記：同じCPU RTL・124.8 MHzのまま、hold余裕を+4 psから+200 psへ
+拡げた版を採用した。[hold修復の原因・実機検証・最新の既定bitstream](RV64_HOLD_MARGIN_PLAN.md)
+を参照。以下のDSP導入時の測定値は比較基準として保持する。
+
 ## 実装と採用の順序
 
 1. Verylの乗算をStruoのword-level IRへ保持し、18×18以内のunsigned部分積を
@@ -30,7 +34,7 @@ bitgen経路がないことを確認した。独立checkout `toolchain/worktrees
 - [nextpnr ECP5 configuration writer](https://github.com/YosysHQ/nextpnr/blob/main/ecp5/bitstream.cc)
 
 新しいコマンド・観測値・失敗結果は
-`toolchain/measurements/2026-09-07-rv64-dsp/`に記録する。作業中。
+`toolchain/measurements/2026-09-07-rv64-dsp/`に保存・封印済み。
 
 ## 実装済みの構成
 
@@ -96,8 +100,8 @@ MDU単体のRTLとマッピング後モデルは、radix-4/DSP双方で全13命�
 
 ## 次の改良の優先順位
 
-1. **hold余裕を増やす**。現在+4 psで合格しているが、配置変更時の余地が小さい。
-   124.8 MHzと200 ps追加setupを維持したまま、短いデータ経路の配置・配線を改善する。
+1. **hold余裕を増やす：完了**。2026-09-08に+200 psを確保し、setup余裕200 psと
+   124.8 MHzを維持した。[修復と採用結果](RV64_HOLD_MARGIN_PLAN.md)を参照。
 2. **乗算後の依存待ちとメモリ待ちを減らす**。DSP数よりMDUの引き渡しと外部加算段を
    詰める方が、単発のRV64乗算には効く。段削減でclockを落とさないことを条件にする。
 3. **除算の早期終了**。ゼロ、±1、被除数が小さい場合などを検出して反復数を減らし、

@@ -10,14 +10,15 @@ Sixteen DSP partial products and a seven-stage external pipeline replace the
 radix-4 multiplier; division retains the iterative implementation.
 
 CPU **124.8 MHz / memory 62.4 MHz** is retained. STA gives **+224 ps nominal
-setup / +4 ps hold**; after an extra 200 ps setup uncertainty, setup is **+24 ps**.
+setup / +200 ps hold**; with 200 ps reserved independently for setup and hold,
+the guarded slacks are **+24 ps setup / 0 ps hold**.
 The 16,956 setup/hold checks include 515 JTCK paths at 6 MHz and the same four
-reviewed external/CDC exceptions. The hold margin is small and is the next
-placement/routing improvement to pursue.
+reviewed external/CDC exceptions. Texo now supports an explicit hold reserve
+and uses consistent minimum delays when repairing shared route prefixes.
 
 The exact bitstream passed **133 distinct physical ELFs and 32 repetitions**
 using Windows D2XX and eight-byte writes; the updated default runner passed
-eight more basic ELFs (**173 executions total**). On the same multiplication ELF,
+two checks of eight basic ELFs (**181 executions total**). On the same multiplication ELF,
 median cycles fall **16,294 → 10,147 (1.6058x faster)**. IPC rises from
 **0.158340 to 0.254262**, or **19.7609 → 31.7319 MIPS** at 124.8 MHz.
 Division and the principal non-M workloads retain their previous performance.
@@ -29,8 +30,9 @@ The no-flag Core/model remains an M-disabled comparison. Select the current
 model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
 --fast-lsu 5 --dsp-multiplier`. The hardware runner selects the qualified DSP image.
 
-See the [DSP implementation, IPC, timing and next steps](RV64_DSP_PLAN.md),
-[measurement evidence](../toolchain/measurements/2026-09-07-rv64-dsp/README.md),
+See the [hold repair, current timing and next steps](RV64_HOLD_MARGIN_PLAN.md),
+[current measurement evidence](../toolchain/measurements/2026-09-08-rv64-hold-margin/README.md),
+[DSP implementation and performance comparison](RV64_DSP_PLAN.md),
 [previous radix-4 M result](RV64_LOAD_M_PLAN.md), and
 [earlier JTAG cause and repair](RV64_JTAG_FIX.md). New placements require the
 checked bitgen flow and physical tests of the exact resulting hash.
@@ -386,9 +388,9 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-compact-dsp-m-4k-124p8-20260907.bit`,
+verified `riscv/build/riscv-hardware-compact-dsp-m-4k-124p8-20260908-hold.bit`,
 with eight-byte masked writes. Its build command, hash and checked bitgen flow
-are in the [load/M report](RV64_LOAD_M_PLAN.md). Program it and run the eight
+are in the [hold margin report](RV64_HOLD_MARGIN_PLAN.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -433,11 +435,11 @@ networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
 The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
-`riscv-hardware-compact-dsp-m-4k-124p8-20260907.bit`.
+`riscv-hardware-compact-dsp-m-4k-124p8-20260908-hold.bit`.
 `--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
-CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](RV64_LOAD_M_PLAN.md)
+CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](RV64_HOLD_MARGIN_PLAN.md)
 and [historical failure reproducer](../toolchain/mre/rv64-jtag-write64/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;

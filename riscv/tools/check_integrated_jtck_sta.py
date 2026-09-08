@@ -38,8 +38,11 @@ def main():
     cp = json.loads(args.checkpoint.read_text())
     timing = cp["timing"]
     reserve = timing.get("setup_uncertainty_ps", 0)
+    hold_reserve = timing.get("hold_uncertainty_ps", 0)
     require(all(e["uncertainty_ps"] == reserve for e in timing["setup_checks"]),
             "native setup checks did not preserve the declared margin")
+    require(all(e.get("uncertainty_ps", 0) == hold_reserve for e in timing["hold_checks"]),
+            "native hold checks did not preserve the declared margin")
     require(timing["meets_timing_closure"] and timing["met_timing"], "native timing closure failed")
     require(timing["worst_slack_ps"] >= 0 and timing["worst_hold_slack_ps"] >= 0, "native setup/hold failed")
     require(timing["clock_constraints"] == [{"cell": "jtagg", "pin": "JTCK", "period_ps": 166666}],
@@ -81,11 +84,11 @@ def main():
     for kind in ("setup_checks", "hold_checks"):
         native = [e for e in timing[kind] if e["clock_net_id"] == globals_[0]]
         describe = lambda e: (e["slack_ps"], e["launch_edge"], e["capture_edge"])
-        # The historical supplemental engine has zero setup uncertainty.
+        # The supplemental graph has zero setup and hold uncertainty.
         # Compare nominal slacks while separately requiring the guarded native
-        # result to pass. Hold has no adjustment.
+        # result to pass. Both reserves tighten their respective constraints.
         native_map = {(e["cell"], pin_names[e["data_pin_id"]]):
-                      (e["slack_ps"] + (reserve if kind == "setup_checks" else 0),
+                      (e["slack_ps"] + (reserve if kind == "setup_checks" else hold_reserve),
                        e["launch_edge"], e["capture_edge"]) for e in native}
         supplement_map = {(e["endpoint"]["cell"], e["endpoint"]["pin"]): describe(e) for e in audit[kind]}
         require(len(native) == len(native_map) == len(supplement_map) == 515,
@@ -97,7 +100,9 @@ def main():
         "checkpoint": str(args.checkpoint.resolve()), "checkpoint_sha256": checkpoint_sha,
         "native_setup_ps": timing["worst_slack_ps"], "native_hold_ps": timing["worst_hold_slack_ps"],
         "setup_uncertainty_ps": reserve,
+        "hold_uncertainty_ps": hold_reserve,
         "native_nominal_setup_ps": timing["worst_slack_ps"] + reserve,
+        "native_nominal_hold_ps": timing["worst_hold_slack_ps"] + hold_reserve,
         "jtck_setup_ps": audit["worst_setup_slack_ps"], "jtck_hold_ps": audit["worst_hold_slack_ps"],
         "native_checks": {kind: len(timing[kind]) for kind in counts}, "jtck_checks": counts,
         "native_unchecked": unchecked, "supplemental_command": command,
