@@ -1,0 +1,203 @@
+/// EX half of Zbb. Rotates apply 1/2/4 here; counts reduce each byte.
+/// Codes 0..16 are the low five bits of the decoder's Zbb ALU tag.
+module BitManipUnit (
+    operation: input  logic<5> ,
+    word_op  : input  logic    ,
+    operand_a: input  logic<64>,
+    operand_b: input  logic<64>,
+    partial  : output logic<64>,
+) {
+    var reversed     : logic<64>    ;
+    var rotate_input : logic<64>    ;
+    var rotate_1     : logic<64>    ;
+    var rotate_2     : logic<64>    ;
+    var rotate_4     : logic<64>    ;
+    var scan         : logic<64>    ;
+    var pop_source   : logic<64>    ;
+    var byte_count   : logic<4>  [8];
+    var counts       : logic<32>    ;
+    var or_bytes     : logic<64>    ;
+    var reverse_bytes: logic<64>    ;
+
+    for i in 0..8 :g_byte {
+        var pop_pair: logic<2> [4];
+        var pop_half: logic<3> [2];
+        var tz_pair : logic<2> [4];
+        var tz_half : logic<3> [2];
+        var pop     : logic<4>    ;
+        var tz      : logic<4>    ;
+        always_comb {
+            for j in 0..4 {
+                pop_pair[j] = {1'b0, pop_source[i * 8 + j * 2]} + {1'b0, pop_source[i * 8 + j * 2 + 1]};
+                tz_pair[j]  = 2'd2;
+                if scan[i * 8 + j * 2] {
+                    tz_pair[j] = 2'd0;
+                } else if scan[i * 8 + j * 2 + 1] {
+                    tz_pair[j] = 2'd1;
+                }
+            }
+            for j in 0..2 {
+                pop_half[j] = {1'b0, pop_pair[j * 2]} + {1'b0, pop_pair[j * 2 + 1]};
+                tz_half[j]  = {1'b0, tz_pair[j * 2]};
+                if tz_pair[j * 2][1] {
+                    tz_half[j] = 3'd2 + {1'b0, tz_pair[j * 2 + 1]};
+                }
+            }
+            pop = {1'b0, pop_half[0]} + {1'b0, pop_half[1]};
+            tz  = {1'b0, tz_half[0]};
+            if tz_half[0][2] {
+                tz = 4'd4 + {1'b0, tz_half[1]};
+            }
+            byte_count[i] = tz;
+            if operation == 5'd16 {
+                byte_count[i] = pop;
+            }
+        }
+    }
+
+    always_comb {
+        for i in 0..64 {
+            reversed[i] = operand_a[63 - i];
+        }
+        rotate_input = operand_a;
+        if word_op {
+            rotate_input = {operand_a[31:0], operand_a[31:0]};
+        }
+        if operation == 5'd12 {
+            rotate_input = reversed;
+            if word_op {
+                rotate_input = {reversed[63:32], reversed[63:32]};
+            }
+        }
+        rotate_1 = rotate_input;
+        if operand_b[0] {
+            rotate_1 = {rotate_input[0], rotate_input[63:1]};
+        }
+        rotate_2 = rotate_1;
+        if operand_b[1] {
+            rotate_2 = {rotate_1[1:0], rotate_1[63:2]};
+        }
+        rotate_4 = rotate_2;
+        if operand_b[2] {
+            rotate_4 = {rotate_2[3:0], rotate_2[63:4]};
+        }
+
+        scan       = operand_a;
+        pop_source = operand_a;
+        if word_op {
+            scan       = {32'hffff_ffff, operand_a[31:0]};
+            pop_source = {32'd0, operand_a[31:0]};
+        }
+        if operation == 5'd14 {
+            scan = reversed;
+            if word_op {
+                scan = {32'hffff_ffff, reversed[63:32]};
+            }
+        }
+        for i in 0..8 {
+            counts[i * 4+:4]        = byte_count[i];
+            or_bytes[i * 8+:8]      = {(operand_a[i * 8+:8] != 8'd0) repeat 8};
+            reverse_bytes[i * 8+:8] = operand_a[(7 - i) * 8+:8];
+        }
+        // Disjoint one-hot candidates avoid a word-wide first-match tree.
+        // Unsupported operation tags have no architectural consumer.
+        partial = ((operand_a & ~operand_b) & {(operation == 5'd0) repeat 64})
+            | ((operand_a | ~operand_b) & {(operation == 5'd1) repeat 64})
+            | ((~(operand_a ^ operand_b)) & {(operation == 5'd2) repeat 64})
+            | ({operand_a[7] repeat 56, operand_a[7:0]} & {(operation == 5'd3) repeat 64})
+            | ({operand_a[15] repeat 48, operand_a[15:0]} & {(operation == 5'd4) repeat 64})
+            | ({48'd0, operand_a[15:0]} & {(operation == 5'd5) repeat 64})
+            | (or_bytes & {(operation == 5'd6) repeat 64}) | (reverse_bytes & {(operation == 5'd7) repeat 64})
+            | (operand_a & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
+            | (rotate_4 & {(!operation[4] && operation[3] && operation[2] && !operation[1]) repeat 64})
+            | ({32'd0, counts} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64});
+
+    }
+}
+
+/// CM half of Zbb. Inputs belong to the same registered EX instruction.
+module BitManipHighUnit (
+    operation    : input  logic<5> ,
+    word_op      : input  logic    ,
+    amount       : input  logic<3> ,
+    partial      : input  logic<64>,
+    operand_b    : input  logic<64>,
+    compare_equal: input  logic<4> ,
+    compare_less : input  logic<4> ,
+    sign_a       : input  logic    ,
+    sign_b       : input  logic    ,
+    result       : output logic<64>,
+) {
+    var rotate_8 : logic<64>    ;
+    var rotate_16: logic<64>    ;
+    var rotate_32: logic<64>    ;
+    var rotated  : logic<64>    ;
+    var sum16    : logic<5>  [4];
+    var sum32    : logic<6>  [2];
+    var tz16     : logic<5>  [4];
+    var tz32     : logic<6>  [2];
+    var count    : logic<7>     ;
+    var less     : logic        ;
+    var minmax   : logic<64>    ;
+
+    always_comb {
+        rotate_8 = partial;
+        if amount[0] {
+            rotate_8 = {partial[7:0], partial[63:8]};
+        }
+        rotate_16 = rotate_8;
+        if amount[1] {
+            rotate_16 = {rotate_8[15:0], rotate_8[63:16]};
+        }
+        rotate_32 = rotate_16;
+        if amount[2] && !word_op {
+            rotate_32 = {rotate_16[31:0], rotate_16[63:32]};
+        }
+        rotated = rotate_32;
+        if operation == 5'd12 {
+            for i in 0..64 {
+                rotated[i] = rotate_32[63 - i];
+            }
+        }
+        if word_op {
+            rotated = {rotated[31] repeat 32, rotated[31:0]};
+        }
+
+        for i in 0..4 {
+            sum16[i] = {1'b0, partial[i * 8+:4]} + {1'b0, partial[i * 8 + 4+:4]};
+            tz16[i]  = {1'b0, partial[i * 8+:4]};
+            if partial[i * 8 + 3] {
+                tz16[i] = 5'd8 + {1'b0, partial[i * 8 + 4+:4]};
+            }
+        }
+        for i in 0..2 {
+            sum32[i] = {1'b0, sum16[i * 2]} + {1'b0, sum16[i * 2 + 1]};
+            tz32[i]  = {1'b0, tz16[i * 2]};
+            if tz16[i * 2][4] {
+                tz32[i] = 6'd16 + {1'b0, tz16[i * 2 + 1]};
+            }
+        }
+        count = {1'b0, tz32[0]};
+        if tz32[0][5] {
+            count = 7'd32 + {1'b0, tz32[1]};
+        }
+        if operation == 5'd16 {
+            count = {1'b0, sum32[0]} + {1'b0, sum32[1]};
+        }
+
+        less = compare_less[3] || (compare_equal[3] && compare_less[2])
+            || (compare_equal[3] && compare_equal[2] && (compare_less[1] || (compare_equal[1] && compare_less[0])));
+        if !operation[0] && (sign_a != sign_b) {
+            less = sign_a;
+        }
+        minmax = partial;
+        if !(less ^ operation[1]) {
+            minmax = operand_b;
+        }
+        result = (partial & {(!operation[4] && !operation[3]) repeat 64})
+            | (minmax & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
+            | (rotated & {(!operation[4] && operation[3] && operation[2] && !operation[1]) repeat 64})
+            | ({57'd0, count} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64});
+
+    }
+}

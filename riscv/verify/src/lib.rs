@@ -8,7 +8,7 @@ use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
 pub mod timed_memory;
 
-const CORE_SOURCES: [&str; 20] = [
+const CORE_SOURCES: [&str; 21] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -21,6 +21,7 @@ const CORE_SOURCES: [&str; 20] = [
     "BranchPredictor.veryl",
     "CsrFile.veryl",
     "ExecuteUnit.veryl",
+    "BitManipUnit.veryl",
     "MulDivUnit.veryl",
     "DspMultiply64.veryl",
     "ShiftUnit.veryl",
@@ -225,6 +226,7 @@ pub struct ElfRun {
 pub struct IsaExtensions {
     pub m: bool,
     pub zba: bool,
+    pub zbb: bool,
 }
 
 pub fn run_elf(
@@ -255,6 +257,7 @@ pub fn compile_elf_model_with_m(
         IsaExtensions {
             m: enable_m,
             zba: false,
+            zbb: false,
         },
     )
 }
@@ -267,6 +270,7 @@ pub fn compile_elf_model_with_isa(
     Ok(SimulatorBuilder::new(core_source, "Core")
         .param("ENABLE_M", u64::from(isa.m))
         .param("ENABLE_ZBA", u64::from(isa.zba))
+        .param("ENABLE_ZBB", u64::from(isa.zbb))
         .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
         .compile_native()?
         .into_program_image())

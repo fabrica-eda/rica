@@ -287,10 +287,10 @@ impl Driver {
         let _ = self.request(pc, pc + 4);
         assert_eq!(self.get_tage("lookup_base_q"), u64::from(coordinates.base));
         assert_eq!(self.get_tage("response_base_entry"), 3);
-        for bank in 0..4 {
+        for (bank, word) in words.iter().enumerate() {
             assert_eq!(
                 self.get_tage(&format!("response_entry{bank}")),
-                u64::from(words[bank]),
+                u64::from(*word),
             );
         }
         assert_eq!(self.get_tage("response_hit"), 1);

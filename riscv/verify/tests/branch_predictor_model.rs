@@ -338,10 +338,11 @@ impl TageModel {
 
             // A wrong weak provider also trains the prediction-time true
             // alternate, without ever training the provider twice.
-            if prediction.longest_match_was_weak && prediction.longest_match_prediction != taken {
-                if prediction.true_alternate != provider_source {
-                    self.train_source(prediction, prediction.true_alternate, taken);
-                }
+            if prediction.longest_match_was_weak
+                && prediction.longest_match_prediction != taken
+                && prediction.true_alternate != provider_source
+            {
+                self.train_source(prediction, prediction.true_alternate, taken);
             }
 
             if prediction.longest_match_prediction != prediction.true_alternate_prediction {
@@ -628,7 +629,7 @@ enum ActualControl {
     Coroutine { target: u64, return_address: u64 },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct PredictorModel {
     tage: TageModel,
     btb: Btb,
@@ -637,20 +638,6 @@ struct PredictorModel {
     checkpoints: Vec<Checkpoint>,
     next_token: u64,
     scrub_cursor: usize,
-}
-
-impl Default for PredictorModel {
-    fn default() -> Self {
-        Self {
-            tage: TageModel::default(),
-            btb: Btb::default(),
-            ras: Ras::default(),
-            history: HistoryState::default(),
-            checkpoints: Vec::new(),
-            next_token: 0,
-            scrub_cursor: 0,
-        }
-    }
 }
 
 impl PredictorModel {
@@ -1070,7 +1057,7 @@ fn busy_single_probe_decays_only_the_chosen_bank_without_fallback() {
 
 #[test]
 fn weak_longest_match_selects_true_alternate() {
-    let state = HistoryState::from_ghr(0x0a55_3c);
+    let state = HistoryState::from_ghr(0x000a_553c);
     let pc = 0x1036;
     let mut tage = TageModel::default();
     tage.install(0, pc, &state, 3, 1); // strong taken true alternate

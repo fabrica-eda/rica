@@ -1,7 +1,8 @@
-/// RV64 integer decoder with optional M and Zba extensions.
+/// RV64 integer decoder with optional M, Zba and Zbb extensions.
 module Decoder #(
     param ENABLE_M  : bit = 0,
     param ENABLE_ZBA: bit = 0,
+    param ENABLE_ZBB: bit = 0,
 ) (
     decode: modport DecodeBus::decoder,
 ) {
@@ -22,6 +23,17 @@ module Decoder #(
     var zba_shift_add       : logic    ;
     var zba_shift_immediate : logic    ;
     var legal_zba           : logic    ;
+    var zbb_logic           : logic    ;
+    var zbb_minmax          : logic    ;
+    var zbb_rotate_reg      : logic    ;
+    var zbb_rotate_imm      : logic    ;
+    var zbb_count           : logic    ;
+    var zbb_sext            : logic    ;
+    var zbb_zext            : logic    ;
+    var zbb_orc             : logic    ;
+    var zbb_rev             : logic    ;
+    var legal_zbb           : logic    ;
+    var zbb_op              : logic<5> ;
     var legal_system        : logic    ;
     var csr_address_known   : logic    ;
     var csr_address_writable: logic    ;
@@ -596,6 +608,43 @@ module Decoder #(
             }
             decode.write_enable = 1'b1;
             decode.word_op      = 1'b0;
+            decode.illegal      = 1'b0;
+        }
+        // Zbb 1.0: exact RV64 encodings, including the reserved roriw bit 5.
+        zbb_logic      = (opcode == 7'h33) && (funct7 == 7'h20)
+            && ((funct3 == 3'd4) || (funct3 == 3'd6) || (funct3 == 3'd7));
+        zbb_minmax     = (opcode == 7'h33) && (funct7 == 7'h05) && funct3[2];
+        zbb_rotate_reg = ((opcode == 7'h33) || (opcode == 7'h3b)) && (funct7 == 7'h30)
+            && ((funct3 == 3'd1) || (funct3 == 3'd5));
+        zbb_rotate_imm = (funct3 == 3'd5)
+            && (((opcode == 7'h13) && (decode.instr[31:26] == 6'h18)) || ((opcode == 7'h1b) && (funct7 == 7'h30)));
+        zbb_count      = ((opcode == 7'h13) || (opcode == 7'h1b)) && (funct3 == 3'd1) && (funct7 == 7'h30)
+            && (decode.instr[24:20] <= 5'd2);
+        zbb_sext       = (opcode == 7'h13) && (funct3 == 3'd1) && (funct7 == 7'h30)
+            && ((decode.instr[24:20] == 5'd4) || (decode.instr[24:20] == 5'd5));
+        zbb_zext       = (opcode == 7'h3b) && (funct3 == 3'd4) && (funct7 == 7'h04) && (decode.instr[24:20] == 5'd0);
+        zbb_orc        = (opcode == 7'h13) && (funct3 == 3'd5) && (decode.instr[31:20] == 12'h287);
+        zbb_rev        = (opcode == 7'h13) && (funct3 == 3'd5) && (decode.instr[31:20] == 12'h6b8);
+        legal_zbb      = ENABLE_ZBB
+            && (zbb_logic || zbb_minmax || zbb_rotate_reg || zbb_rotate_imm || zbb_count || zbb_sext || zbb_zext
+                || zbb_orc || zbb_rev);
+        // 32..39 logic/extension/byte ops; 40..43 min/max; 44/45 rotate;
+        // 46/47 leading/trailing zero count; 48 population count.
+        // Instruction groups are disjoint. Encode each control bit directly
+        // so the tag does not pass through a priority chain of whole words.
+        zbb_op[0] = (zbb_logic && (funct3 == 3'd6)) || (zbb_sext && !decode.instr[20]) || zbb_zext || zbb_rev
+            || (zbb_minmax && funct3[0]) || ((zbb_rotate_reg || zbb_rotate_imm) && funct3[2])
+            || (zbb_count && decode.instr[20]);
+        zbb_op[1] = (zbb_logic && (funct3 == 3'd4)) || (zbb_sext && !decode.instr[20]) || zbb_orc || zbb_rev
+            || (zbb_minmax && funct3[1]) || (zbb_count && !decode.instr[21]);
+        zbb_op[2] = (zbb_sext && decode.instr[20]) || zbb_zext || zbb_orc || zbb_rev || zbb_rotate_reg || zbb_rotate_imm
+            || (zbb_count && !decode.instr[21]);
+        zbb_op[3] = zbb_minmax || zbb_rotate_reg || zbb_rotate_imm || (zbb_count && !decode.instr[21]);
+        zbb_op[4] = zbb_count && decode.instr[21];
+        if legal_zbb {
+            decode.alu_op       = {1'b1, zbb_op};
+            decode.word_op      = opcode[3] && !zbb_zext;
+            decode.write_enable = 1'b1;
             decode.illegal      = 1'b0;
         }
         if ENABLE_M && (funct7 == 7'b0000001)

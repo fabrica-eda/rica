@@ -1,6 +1,6 @@
 # RV64整数ISAの拡充と検証計画
 
-2026-09-08着手、2026-09-09に第一段階のZbaを実機認定した。
+2026-09-08着手。2026-09-09に第1段階のZbaと第2段階のZbbを実機認定した。
 比較基準は `9526c1a` のDSP版、CPU 124.8 MHz／メモリ62.4 MHz、
 setup・hold各200 ps予約、133種類のELF／181実機実行。
 
@@ -8,14 +8,15 @@ setup・hold各200 ps予約、133種類のELF／181実機実行。
 
 整数ISAを **I/M/Zca → Zba → Zbb → Zbs** の順に拡充する。
 拡張ごとに機能・タイミング・実機を確定し、コンパイラが生成する命令列で比較する。
-今回のZbaは完了。Zbb/Zbsを含むB全体の対応は今後の工程である。
+**Zba／Zbbは完了。次はZbs。** B全体の対応はZbs認定後に宣言する。
+現行構成・性能・次の計画は本書の「第2段階: Zbb 実機認定」にまとめた。
 仕様は [RISC-V B v1.0](https://docs.riscv.org/reference/isa/unpriv/b-st-ext.html)。
 
 現在の圧縮命令は整数Zca。M-modeの限定したCSR／同期例外も実装している。
 A、特権／割り込み、F/D/Vは動かすソフトに合わせて別工程とする。
 LSU・MDUの追加高速化は、整数拡張後のコンパイラ生成コードで効果を判断する。
 
-## 採用した構成
+## 第1段階: Zbaの構成
 
 `HardwareCompactZbaDspM4KTestTop`：`ENABLE_ZBA=1`、`ENABLE_M=1`、
 `M_USE_DSP=1`、`FAST_LSU=5`、64-entry BTB／2-bit方向予測／8-entry RAS／4 KiB L1I。
@@ -33,7 +34,7 @@ Zba無効時は該当命令を不正命令として扱う。
   [小さな再現](../toolchain/mre/struo-constant-loop/README.md)ではmapped cellsが144→8になり、
   全入力で値が一致する。依存ライブラリは変更していない。
 
-## 物理条件と検証結果
+## Zbaの物理条件と検証結果
 
 | 項目 | 認定結果 |
 | --- | --- |
@@ -64,7 +65,7 @@ JTCKは別構築のグラフでnominal slackとedgeを照合した。同じSTA�
 - bit SHA-256：`b761695a1af8496c2ea042d1dcd909941a70f5b13e98652baa04e5e82c9dd1d2`
 - checkpoint SHA-256：`7cbeb0a40b4b71c1a58c492c565fb795577a3449af71026141137fbd4cc97f70`
 
-## 実機性能
+## Zbaの実機性能
 
 同じCソース・入力・検算をClang 20.1.2、`-O2 -mabi=lp64 -mcmodel=medany`でコンパイルし、
 `-march=rv64imc_zicsr_zifencei`にZbaを加えた場合と比較した。
@@ -114,18 +115,95 @@ Ricaが単一eventの手動`tick`を連続して呼んでいたことが、旧�
 観測を止めるためminstretより1件少ない。比較には同じCM retire境界のCSRを使う。
 これは観測条件での整合であり、全clock位相や外部CDCの物理保証を追加するものではない。
 
-## 次の工程
 
-1. **Zbb**：論理反転、min/max、符号・ゼロ拡張、rotate、count、byte操作を実装する。
-   rotate/countの経路が既存ALUを遅くする場合は、完了段を分けて依存制御を明示する。
-   独立oracle、全ACT4 catalog、例外／転送、C生成コードを揃える。
-2. **Zbs**：単一bit操作と即値版を追加し、同じ検査と物理ゲートを適用する。
-   Zba/Zbb/Zbs全体の合格後にB対応を宣言する。
-3. **LSU・MDU**：拡張後のCコードを使い、load依存待ちと除算待ちを再測定する。
-   同時edgeモデルで見積もり、同一仕事の実機時間で採用する。
-4. **ツール側**：Struoの定数arithmetic foldingと、Texoの局所配置探索の改善余地を残す。
-   今回は定数の明示と合法な配置変更で認定条件を満たした。STA条件を緩める工程は設けない。
+## 第2段階: Zbb 実機認定（2026-09-09）
 
-全段階で124.8 MHz、setup・hold各200 ps予約、通常STA＋JTCK照合、同一hashの実機試験を維持する。
-結果、コマンド、全診断のIPC／clock、再現用artifactは
-[測定記録](../toolchain/measurements/2026-09-08-rv64-zba/README.md)に保存する。
+RV64 Zbb 1.0 全24命令を `ENABLE_ZBB` で実装し、実機認定した。
+現行構成は `HardwareCompactZbbDspM4KTestTop`。ZbaとDSP Mを有効にし、
+64-entry BTB／2-bit方向予測／8-entry RAS、4 KiB L1I、FAST_LSU=5を維持する。
+`ENABLE_ZBB=0` では該当命令をprecise illegal-instruction trapとして扱う。
+
+EXで論理・拡張・バイト操作、1/2/4 bit回転、byte単位のカウントを処理し、
+CMで8/16/32 bit回転、カウント木、分割比較によるmin/maxを完了する。
+結果は既存のWBレジスタへ格納する。依存命令はWBから受け取り、
+直後と間に1命令ある依存の停止を明示した。独立したZbb命令は連続して発行できる。
+
+CMからの共通転送を使う案はsetup −925 ps、Boolean式でカウントを小さくする案は
+−724 psで停止した。どちらも200 ps予約後の値であり、採用していない。
+採用したWB転送版は通常の配置修正で収束した。依存ライブラリのバージョンは変更せず、
+初期checkpointを保存する診断用の8行も保存後に戻した。STAの条件を緩めてはいない。
+
+| 項目 | 認定結果 |
+| --- | --- |
+| CPU / memory / JTCK | **124.8 / 62.4 / 6 MHz** |
+| setup: nominal / 200 ps予約後 | **+200 / 0 ps** |
+| hold: nominal / 200 ps予約後 | **+290 / +90 ps** |
+| setup / hold検査数 | 各17,232。JTCK各515、既存の明示的例外4件 |
+| セル / DSP / EBR / PIPs | 28,620 / 16 / 150 / 356,858。Zba版から2,596セル増 |
+| workspace | **186 PASS / 1 ignored**。Veryl、Rust fmt、全targetのClippyも合格 |
+| Zbb独立整数oracle | RTL／ECP5 mappedで各 **300,984組**合格 |
+| CPU＋メモリモデル | **207 ELF × 2 clock順 = 414 PASS** |
+| 認定bitの実機 | **207種類 + 診断52反復 + 既定起動16実行 = 275 PASS** |
+
+207 ELFは基準153本を同一SHAで維持し、自作Zbb24本、公式ACT4/Sail Zbb24本、C診断6本を追加したもの。
+Coreの試験には依存距離0〜3、両オペランド、若い命令の上書き、メモリ待ち、store、
+誤予測先の破棄、M乗除算・CSRとの連続実行、無効設定と予約命令の例外を含む。
+初回のMINU/MAX取り違えは公式試験が検出した。修正に加え、oracleのencodingも
+外部LLVMアセンブラと照合するようにした。不合格試作からIPCを算出していない。
+
+JTCKは別構築グラフとnominal slack／edgeを照合した。同じSTAエンジンとdelay dataを使うため、
+独立した遅延characterizationではない。既存のJTAGG外部境界、reset／CDC、4件の例外は維持する。
+workspaceの既存除外1件は、mapped board resetのNonScalarControlによるWRITE64試験である。
+最終bitはWindows D2XX/XVCで書き込み、すべての実機試験を通した。
+
+採用 `zbb-09` と、現行34 RTLファイルから合成し直した `zbb-12-final` は、
+通常の物理検査・STA・JTCK照合・checked bitgenを通り、checkpointとbitがbyte単位で一致した。
+モデル、STA、実機のRTL／ELF／bit hashも照合した。
+
+- 既定image: `build/riscv-hardware-compact-zbb-dsp-m-4k-124p8-20260909.bit`
+- bit SHA-256: `e0c122ae33f2b9565bbc933742c25fa7006117fc69a160e362db174c19ca1ea7`
+- checkpoint SHA-256: `9a401e5ffc693413cf0029a881a11b97f44c21842f59397e71c8c27172e436cc`
+
+### 同じC処理の実機時間
+
+Clang 20、`-O2 -mabi=lp64 -mcmodel=medany`で、同じ入力・検算を持つCソースを
+`rv64imc_zicsr_zifencei_zba` とZbb追加版へコンパイルした。
+以下は同じ認定bit上の3回中央値。起動と検算を含むfreeze済みCSRを使う。
+Zbbなしへの命令混入がなく、Zbbありで目的の命令が生成されることをdisassemblyで確認した。
+
+| 同じ仕事 | cycles: base → Zbb | 時間: base → Zbb | 高速化 | 時間短縮 |
+| --- | ---: | ---: | ---: | ---: |
+| カウント | 187,276 → 27,211 | 1500.609 → 218.037 µs | **6.882364倍** | **85.470%** |
+| 回転 | 25,166 → 19,007 | 201.651 → 152.300 µs | **1.324039倍** | **24.473%** |
+| バイト処理 | 65,047 → 25,157 | 521.210 → 201.579 µs | **2.585642倍** | **61.325%** |
+
+| 診断 / ISA | retired | IPC | IPC × 124.8 MHz（MIPS） |
+| --- | ---: | ---: | ---: |
+| counts / base | 96,370 | 0.514588 | 64.220594 |
+| counts / Zbb | 18,487 | 0.679394 | 84.788416 |
+| rotate / base | 15,429 | 0.613089 | 76.513518 |
+| rotate / Zbb | 9,285 | 0.488504 | 60.965329 |
+| bytes / base | 41,582 | 0.639261 | 79.779753 |
+| bytes / Zbb | 15,416 | 0.612792 | 76.476400 |
+
+回転・バイト処理はIPC／MIPSが下がっても、命令数の削減で仕事当たりの時間が短くなった。
+基準Zba bitとの同一ELFの20診断は、全て中央値の差が±1 cycle以内。
+乗算は10,147 cycles、2,580 retired、IPC 0.254262／31.731940 MIPS。
+固定4診断の速度比幾何平均は0.999980で、起動位相差の範囲だった。
+基準C3本も既存Zba bitで各3回検証し、新bitのbase版との差が±1 cycle以内である。
+
+同時edgeモデルと実機のZbb診断は、カウント27,211、回転19,007、バイト25,157 cyclesで一致した。
+乗算も10,147 cycles、memory wait 1,793 cyclesで一致した。これは観測条件での整合であり、
+未測定の全clock位相や外部CDCを保証するものではない。
+
+### 次の工程
+
+1. **Zbs**: 単一bit操作と即値版を追加し、同じoracle／ACT4／依存・例外検証と物理ゲートを適用する。
+   Zba/Zbb/Zbsがすべて認定された段階でB対応を宣言する。
+2. **依存待ち・LSU・MDU**: ISA拡充後のCコードで再測定する。今回の回転診断はZbb結果の依存待ちが残る。
+   単純なZbb演算の早い転送、load依存待ち、除算待ちを、124.8 MHzと200 ps予約を維持して比較する。
+3. **ツール側**: Struoの小幅演算のマッピング、Texoの配置・配線の再利用と局所探索の改善余地を残す。
+   回路を小さくしただけでは今回のSTAは改善しなかったため、実配線と同じ仕事の時間で採否を決める。
+
+全26診断のIPC／clock、コマンド、失敗試作、再現artifactと照合結果は
+[Zbb測定記録](../toolchain/measurements/2026-09-09-rv64-zbb/README.md)に保存した。

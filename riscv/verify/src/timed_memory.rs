@@ -38,37 +38,6 @@ fn edge(sim: &mut Simulation, clocks: &[&str]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn coincident_edges_read_old_state_independent_of_registration_order() {
-        let source = r#"
-            module Edges(clk_a: input '_ clock, clk_b: input '_ clock, rst_n: input '_ reset,
-                         a: output '_ logic<8>, b: output '_ logic<8>) {
-                always_ff(clk_a, rst_n) { if_reset { a = 8'd0; } else { a = a + 8'd1; } }
-                always_ff(clk_b, rst_n) { if_reset { b = 8'd0; } else { b = a; } }
-            }
-        "#;
-        for clocks in [["clk_a", "clk_b"], ["clk_b", "clk_a"]] {
-            let mut sim = Simulation::builder(source, "Edges").build().unwrap();
-            let reset = sim.signal("rst_n");
-            sim.modify(|io| io.set(reset, 0_u8)).unwrap();
-            edge(&mut sim, &clocks).unwrap();
-            sim.modify(|io| io.set(reset, 1_u8)).unwrap();
-            for count in 1..=4 {
-                edge(&mut sim, &clocks).unwrap();
-                assert_eq!(value(&mut sim, "a"), count);
-                assert_eq!(value(&mut sim, "b"), count - 1);
-            }
-            edge(&mut sim, &["clk_a"]).unwrap();
-            assert_eq!(value(&mut sim, "a"), 5);
-            assert_eq!(value(&mut sim, "b"), 3);
-        }
-    }
-}
-
 /// This explicit diagnostic compiles a timed model per ELF. Ordinary catalog
 /// verification retains its cached native images and both serialized orders.
 pub fn run(
@@ -98,6 +67,7 @@ pub fn run(
         .param("FAST_LSU", memory.1)
         .param("ENABLE_M", u64::from(isa.m))
         .param("ENABLE_ZBA", u64::from(isa.zba))
+        .param("ENABLE_ZBB", u64::from(isa.zbb))
         .param("M_USE_DSP", u64::from(use_dsp))
         .build()?;
     let reset = sim.signal("rst_n");
@@ -195,4 +165,35 @@ pub fn run(
         elf.display()
     )
     .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coincident_edges_read_old_state_independent_of_registration_order() {
+        let source = r#"
+            module Edges(clk_a: input '_ clock, clk_b: input '_ clock, rst_n: input '_ reset,
+                         a: output '_ logic<8>, b: output '_ logic<8>) {
+                always_ff(clk_a, rst_n) { if_reset { a = 8'd0; } else { a = a + 8'd1; } }
+                always_ff(clk_b, rst_n) { if_reset { b = 8'd0; } else { b = a; } }
+            }
+        "#;
+        for clocks in [["clk_a", "clk_b"], ["clk_b", "clk_a"]] {
+            let mut sim = Simulation::builder(source, "Edges").build().unwrap();
+            let reset = sim.signal("rst_n");
+            sim.modify(|io| io.set(reset, 0_u8)).unwrap();
+            edge(&mut sim, &clocks).unwrap();
+            sim.modify(|io| io.set(reset, 1_u8)).unwrap();
+            for count in 1..=4 {
+                edge(&mut sim, &clocks).unwrap();
+                assert_eq!(value(&mut sim, "a"), count);
+                assert_eq!(value(&mut sim, "b"), count - 1);
+            }
+            edge(&mut sim, &["clk_a"]).unwrap();
+            assert_eq!(value(&mut sim, "a"), 5);
+            assert_eq!(value(&mut sim, "b"), 3);
+        }
+    }
 }
