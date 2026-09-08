@@ -38,6 +38,12 @@ fn edge(sim: &mut Simulation, clocks: &[&str]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecutionConfig {
+    pub use_dsp: bool,
+    pub early_bitmanip: bool,
+}
+
 /// This explicit diagnostic compiles a timed model per ELF. Ordinary catalog
 /// verification retains its cached native images and both serialized orders.
 pub fn run(
@@ -46,7 +52,7 @@ pub fn run(
     predictor_config: u64,
     memory: (u64, u64),
     isa: IsaExtensions,
-    use_dsp: bool,
+    execution: ExecutionConfig,
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let image = ElfImage::load(elf)?;
@@ -69,7 +75,8 @@ pub fn run(
         .param("ENABLE_ZBA", u64::from(isa.zba))
         .param("ENABLE_ZBB", u64::from(isa.zbb))
         .param("ENABLE_ZBS", u64::from(isa.zbs))
-        .param("M_USE_DSP", u64::from(use_dsp))
+        .param("M_USE_DSP", u64::from(execution.use_dsp))
+        .param("EARLY_BITMANIP", u64::from(execution.early_bitmanip))
         .build()?;
     let reset = sim.signal("rst_n");
     let run = sim.signal("run");

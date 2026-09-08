@@ -4,7 +4,7 @@ use std::path::Path;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 
 const TOP: &str = r#"
-module ZbsTestTop #(param ENABLE_ZBS: bit = 0) (
+module ZbsTestTop #(param ENABLE_ZBS: bit = 0, param EARLY_SIMPLE: bit = 0) (
     instr: input logic<32>, a: input logic<64>, b: input logic<64>,
     result: output logic<64>, illegal: output logic,
     word_op: output logic, use_rs2: output logic, write_enable: output logic,
@@ -15,17 +15,24 @@ module ZbsTestTop #(param ENABLE_ZBS: bit = 0) (
     inst execute: ExecuteUnit (execute: e);
     var partial: logic<64>;
     var operand_b: logic<64>;
-    inst low: BitManipUnit (
+    var slow_result: logic<64>;
+    var simple_result: logic<64>;
+    inst simple: SimpleBitManipUnit #(ENABLE_ZBS: ENABLE_ZBS) (
+        operation: d.alu_op[4:0], operand_a: a, operand_b: operand_b, result: simple_result,
+    );
+    inst low: BitManipUnit #(EARLY_SIMPLE: EARLY_SIMPLE) (
         operation: d.alu_op[4:0], word_op: d.word_op,
         operand_a: a, operand_b: operand_b, partial: partial,
     );
-    inst high: BitManipHighUnit (
+    inst high: BitManipHighUnit #(EARLY_SIMPLE: EARLY_SIMPLE) (
         operation: d.alu_op[4:0], word_op: d.word_op, amount: operand_b[5:3],
         partial: partial, operand_b: operand_b,
         compare_equal: e.compare_equal, compare_less: e.compare_less,
-        sign_a: e.compare_sign_a, sign_b: e.compare_sign_b, result: result,
+        sign_a: e.compare_sign_a, sign_b: e.compare_sign_b, result: slow_result,
     );
     always_comb {
+        result = slow_result;
+        if EARLY_SIMPLE { result = slow_result | simple_result; }
         d.instr = instr;
         operand_b = b;
         if d.use_immediate { operand_b = d.immediate; }
@@ -162,12 +169,13 @@ fn all_eight_zbs_instructions_match_independent_integer_oracle() {
     exercise_oracle(simulator(true));
 }
 
-#[test]
-fn mapped_zbs_matches_the_same_independent_integer_oracle() {
-    let source = source().replace(
-        "module ZbsTestTop #(param ENABLE_ZBS: bit = 0)",
-        "module ZbsTestTop #(param ENABLE_ZBS: bit = 1)",
-    );
+fn mapped_oracle(early: bool) {
+    let source = source().replace("param ENABLE_ZBS: bit = 0", "param ENABLE_ZBS: bit = 1");
+    let source = if early {
+        source.replace("param EARLY_SIMPLE: bit = 0", "param EARLY_SIMPLE: bit = 1")
+    } else {
+        source
+    };
     let rtl = struo_frontend_veryl::analyze_and_lower(&source, "zbs_mapped", "ZbsTestTop").unwrap();
     let synthesized = struo_synth::synthesize(&rtl).unwrap();
     let mapped = struo_target_ecp5::map_to_ecp5_with_options(
@@ -295,4 +303,25 @@ fn oracle_instruction_bytes_match_the_external_assembler() {
     for ((assembly, instruction), actual) in cases.iter().zip(encoded) {
         assert_eq!(*instruction | 1 << 15 | 3 << 7, actual, "{assembly}");
     }
+}
+
+#[test]
+fn mapped_zbs_matches_the_same_independent_integer_oracle() {
+    mapped_oracle(false);
+}
+
+#[test]
+fn early_simple_zbs_matches_independent_integer_oracle() {
+    exercise_oracle(
+        SimulatorBuilder::new(&source(), "ZbsTestTop")
+            .param("ENABLE_ZBS", 1)
+            .param("EARLY_SIMPLE", 1)
+            .build_native()
+            .unwrap(),
+    );
+}
+
+#[test]
+fn mapped_early_simple_zbs_matches_independent_integer_oracle() {
+    mapped_oracle(true);
 }

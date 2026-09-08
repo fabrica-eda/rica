@@ -36,7 +36,15 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static COMPACT_ZBB: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_ZBA: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_DSP_M: OnceLock<NativeProgramImage> = OnceLock::new();
+    static EARLY_1544: OnceLock<NativeProgramImage> = OnceLock::new();
+    static EARLY_1928: OnceLock<NativeProgramImage> = OnceLock::new();
+    static EARLY_2056: OnceLock<NativeProgramImage> = OnceLock::new();
+    static EARLY_3976: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
+        8072 => &EARLY_3976,
+        6152 => &EARLY_2056,
+        6024 => &EARLY_1928,
+        5640 => &EARLY_1544,
         0 => &TAGE,
         2 => &BIMODAL,
         4 => &STATIC,
@@ -65,6 +73,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
             .param("ENABLE_ZBA", u64::from(config & 512 != 0))
             .param("ENABLE_ZBB", u64::from(config & 1024 != 0))
             .param("ENABLE_ZBS", u64::from(config & 2048 != 0))
+            .param("EARLY_BITMANIP", u64::from(config & 4096 != 0))
             .param("ENABLE_M", u64::from(config & 128 != 0))
             .param("M_USE_DSP", u64::from(config & 256 != 0))
             .param("BRANCH_PREDICTOR_CONFIG", config & 127)
@@ -1525,8 +1534,7 @@ fn system_trap_flushes_a_younger_muldiv_before_it_can_start() {
     }
 }
 
-#[test]
-fn zbb_completion_forwards_both_inputs_and_survives_memory_wait() {
+fn exercise_zbb_completion_forwards_both_inputs_and_survives_memory_wait(config: u64) {
     let reg = |base: u32, rd: u32, a: u32, b: u32| base | rd << 7 | a << 15 | b << 20;
     let unary = |base: u32, rd: u32, a: u32| base | rd << 7 | a << 15;
     let mut driver = CoreDriver::with_config(
@@ -1543,7 +1551,7 @@ fn zbb_completion_forwards_both_inputs_and_survives_memory_wait() {
             (36, encode_zba(9, 8, 7, 2, true)),
             (40, encode_jal(0, 0)),
         ],
-        1544,
+        config,
     );
     let mut commits = BTreeMap::<u32, (usize, u64)>::new();
     let mut waits = 0;
@@ -1575,6 +1583,16 @@ fn zbb_completion_forwards_both_inputs_and_survives_memory_wait() {
         assert_eq!(commits[&pc], (1, expected), "pc={pc}");
     }
     assert_eq!(commits[&16].0, 1);
+}
+
+#[test]
+fn zbb_completion_forwards_both_inputs_and_survives_memory_wait() {
+    exercise_zbb_completion_forwards_both_inputs_and_survives_memory_wait(1544);
+}
+
+#[test]
+fn early_zbb_completion_forwards_both_inputs_and_survives_memory_wait() {
+    exercise_zbb_completion_forwards_both_inputs_and_survives_memory_wait(5640);
 }
 
 #[test]
@@ -1628,8 +1646,7 @@ fn zbb_redirect_discards_partial_results_and_disabled_instruction_traps() {
     }
 }
 
-#[test]
-fn zbb_results_cross_muldiv_and_csr_boundaries() {
+fn exercise_zbb_results_cross_muldiv_and_csr_boundaries(config: u64) {
     let mut driver = CoreDriver::with_config(
         [
             (0, encode_addi(1, 0, 13)),
@@ -1646,7 +1663,7 @@ fn zbb_results_cross_muldiv_and_csr_boundaries() {
             (44, encode_sd(10, 0, 256)),
             (48, encode_jal(0, 0)),
         ],
-        1928,
+        config,
     );
     let mut commits = BTreeMap::<u32, (usize, u64)>::new();
     for _ in 0..400 {
@@ -1676,7 +1693,16 @@ fn zbb_results_cross_muldiv_and_csr_boundaries() {
 }
 
 #[test]
-fn zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers() {
+fn zbb_results_cross_muldiv_and_csr_boundaries() {
+    exercise_zbb_results_cross_muldiv_and_csr_boundaries(1928);
+}
+
+#[test]
+fn early_zbb_results_cross_muldiv_and_csr_boundaries() {
+    exercise_zbb_results_cross_muldiv_and_csr_boundaries(6024);
+}
+
+fn exercise_zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers(config: u64) {
     for gap in 0..=3 {
         for reverse in [false, true] {
             for overwrite in [false, true] {
@@ -1704,7 +1730,7 @@ fn zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers() {
                     (pc, 0x40004033 | a << 15 | b << 20 | 31 << 7),
                     (pc + 4, encode_jal(0, 0)),
                 ]);
-                let mut driver = CoreDriver::with_config(program, 1544);
+                let mut driver = CoreDriver::with_config(program, config);
                 let mut result = None;
                 for _ in 0..180 {
                     let cycle = driver.step();
@@ -1723,7 +1749,16 @@ fn zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers() {
 }
 
 #[test]
-fn zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers() {
+fn zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers() {
+    exercise_zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers(1544);
+}
+
+#[test]
+fn early_zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers() {
+    exercise_zbb_forwarding_covers_instruction_gaps_both_operands_and_younger_writers(5640);
+}
+
+fn exercise_zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers(config: u64) {
     for gap in 0..=3 {
         for reverse in [false, true] {
             for overwrite in [false, true] {
@@ -1752,7 +1787,7 @@ fn zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers() {
                     (pc + 4, encode_jal(0, 0)),
                 ]);
                 // Zbs is independently usable with Zbb and Zba disabled.
-                let mut driver = CoreDriver::with_config(program, 2056);
+                let mut driver = CoreDriver::with_config(program, config);
                 let mut result = None;
                 for _ in 0..180 {
                     let cycle = driver.step();
@@ -1777,7 +1812,16 @@ fn zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers() {
 }
 
 #[test]
-fn zbs_results_cross_zbb_muldiv_csr_and_memory_wait() {
+fn zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers() {
+    exercise_zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers(2056);
+}
+
+#[test]
+fn early_zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers() {
+    exercise_zbs_forwarding_covers_instruction_gaps_inputs_and_younger_writers(6152);
+}
+
+fn exercise_zbs_results_cross_zbb_muldiv_csr_and_memory_wait(config: u64) {
     let mut driver = CoreDriver::with_config(
         [
             (0, encode_addi(1, 0, 13)),
@@ -1796,7 +1840,7 @@ fn zbs_results_cross_zbb_muldiv_csr_and_memory_wait() {
             (52, encode_zba(12, 11, 7, 2, true)), // sh2add.uw = 9
             (56, encode_jal(0, 0)),
         ],
-        3976,
+        config,
     );
     let mut commits = BTreeMap::<u32, (usize, u64)>::new();
     let mut waits = 0;
@@ -1830,6 +1874,16 @@ fn zbs_results_cross_zbb_muldiv_csr_and_memory_wait() {
         assert_eq!(commits[&pc], (1, expected), "pc={pc}");
     }
     assert_eq!(commits[&32].0, 1);
+}
+
+#[test]
+fn zbs_results_cross_zbb_muldiv_csr_and_memory_wait() {
+    exercise_zbs_results_cross_zbb_muldiv_csr_and_memory_wait(3976);
+}
+
+#[test]
+fn early_zbs_results_cross_zbb_muldiv_csr_and_memory_wait() {
+    exercise_zbs_results_cross_zbb_muldiv_csr_and_memory_wait(8072);
 }
 
 #[test]

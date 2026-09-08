@@ -1037,7 +1037,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // CPU/memory stay at 124.8/62.4 MHz. This DSP multiplier image passed
     // STA with 200 ps setup/hold reserves and RV64_HOLD_MARGIN_PLAN.md qualification.
     let mut bitstream =
-        project.join("build/riscv-hardware-compact-zbs-dsp-m-4k-124p8-20260909.bit");
+        project.join("build/riscv-hardware-compact-prefetch-return-124p8-20260909.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

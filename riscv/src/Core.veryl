@@ -9,6 +9,7 @@ module Core #(
     param ENABLE_ZBA       : bit = 0,
     param ENABLE_ZBB       : bit = 0,
     param ENABLE_ZBS       : bit = 0,
+    param EARLY_BITMANIP   : bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
@@ -221,6 +222,9 @@ module Core #(
     var cm_use_shift_q          : logic    ;
     var cm_use_bitmanip_q       : logic    ;
     var bitmanip_result         : logic<64>;
+    var early_bitmanip_result   : logic<64>;
+    var ex_early_bitmanip       : logic    ;
+    var rx_early_bitmanip       : logic    ;
     var cm_compare_less_q       : logic<4> ;
     var cm_compare_sign_a_q     : logic    ;
     var cm_compare_sign_b_q     : logic    ;
@@ -470,14 +474,18 @@ module Core #(
         var partial_q  : logic<64>;
         var operand_b_q: logic<64>;
         var operation_q: logic<5> ;
-        inst low: BitManipUnit (
+        inst low: BitManipUnit #(
+            EARLY_SIMPLE: EARLY_BITMANIP,
+        ) (
             operation: ex_alu_op_q[4:0],
             word_op  : ex_word_op_q    ,
             operand_a: alu_operand_a   ,
             operand_b: alu_operand_b   ,
             partial  : partial         ,
         );
-        inst high: BitManipHighUnit (
+        inst high: BitManipHighUnit #(
+            EARLY_SIMPLE: EARLY_BITMANIP,
+        ) (
             operation    : operation_q        ,
             word_op      : cm_shift_word_q    ,
             amount       : cm_shift_amount_q  ,
@@ -499,6 +507,28 @@ module Core #(
         }
     } else {
         assign bitmanip_result = 64'd0;
+    }
+
+    // Only shallow operations use the existing registered ALU forwarding path.
+    // BEXT, min/max, rotates and counts still complete through CM and WB.
+    assign ex_early_bitmanip = EARLY_BITMANIP
+        && ((ENABLE_ZBB && (ex_alu_op_q[5:3] == 3'b100))
+            || (ENABLE_ZBS && (ex_alu_op_q[5:2] == 4'b1101) && (ex_alu_op_q[1] || !ex_alu_op_q[0])));
+    assign rx_early_bitmanip = EARLY_BITMANIP
+        && ((ENABLE_ZBB && (rx_alu_op_q[5:3] == 3'b100))
+            || (ENABLE_ZBS && (rx_alu_op_q[5:2] == 4'b1101) && (rx_alu_op_q[1] || !rx_alu_op_q[0])));
+    if EARLY_BITMANIP && (ENABLE_ZBB || ENABLE_ZBS) :g_early_bitmanip {
+        inst unit: SimpleBitManipUnit #(
+            ENABLE_ZBB: ENABLE_ZBB,
+            ENABLE_ZBS: ENABLE_ZBS,
+        ) (
+            operation: ex_alu_op_q[4:0]     ,
+            operand_a: alu_operand_a        ,
+            operand_b: alu_operand_b        ,
+            result   : early_bitmanip_result,
+        );
+    } else {
+        assign early_bitmanip_result = 64'd0;
     }
 
     if (BRANCH_PREDICTOR_CONFIG & 8) != 0 :g_compact {
@@ -1043,16 +1073,16 @@ module Core #(
         // from predictor request and fetch-cursor control.
         rx_result_can_bypass    = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
             && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8) || (rx_alu_op_q == 4'd9)
-                || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16) || ((ENABLE_ZBB || ENABLE_ZBS) && rx_alu_op_q[5]))
-            && (rx_rd_q != 5'd0);
+                || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16)
+                || ((ENABLE_ZBB || ENABLE_ZBS) && rx_alu_op_q[5] && !rx_early_bitmanip)) && (rx_rd_q != 5'd0);
         decode_operand_match_rx = fd_q.valid && rx_valid_q && rx_write_enable_q && (rx_rd_q != 5'd0)
             && ((decode_bus.use_rs1 && (decode_bus.rs1 == rx_rd_q))
                 || (decode_bus.use_rs2 && (decode_bus.rs2 == rx_rd_q)));
         decode_execution_hazard = decode_operand_match_rx && !rx_result_can_bypass;
-        // A Zbb/Zbs producer two instructions ahead will occupy CM when this FD
+        // A slow Zbb/Zbs producer two instructions ahead will occupy CM when this FD
         // consumer reaches RX. Its result is available from WB one edge later.
-        if (ENABLE_ZBB || ENABLE_ZBS) && fd_q.valid && ex_valid_q && ex_alu_op_q[5] && ex_write_enable_q
-            && (ex_rd_q != 5'd0)
+        if (ENABLE_ZBB || ENABLE_ZBS) && fd_q.valid && ex_valid_q && ex_alu_op_q[5] && !ex_early_bitmanip
+            && ex_write_enable_q && (ex_rd_q != 5'd0)
             && ((decode_bus.use_rs1 && (decode_bus.rs1 == ex_rd_q))
                 || (decode_bus.use_rs2 && (decode_bus.rs2 == ex_rd_q))) {
             decode_execution_hazard = 1'b1;
@@ -1606,7 +1636,8 @@ module Core #(
                 // Zbb/Zbs finishes into the existing WB register. A dependent
                 // consumer waits one extra cycle and reads that stable value,
                 // keeping the bit-manipulation cone off the common CM bypass.
-                rx_execution_hazard_q = (ENABLE_ZBB || ENABLE_ZBS) && execution_hazard && ex_valid_q && ex_alu_op_q[5];
+                rx_execution_hazard_q = (ENABLE_ZBB || ENABLE_ZBS) && execution_hazard && ex_valid_q && ex_alu_op_q[5]
+                    && !ex_early_bitmanip;
                 wb_valid_q            = cm_valid_q && !cm_exception_q;
                 if COMMIT_PAYLOAD {
                     wb_pc_q        = cm_pc_q;
@@ -1682,11 +1713,14 @@ module Core #(
                 } else {
                     cm_shift_amount_q = alu_operand_b[5:3];
                 }
-                cm_shift_arithmetic_q   = ex_alu_op_q == 4'd8;
-                cm_logic_result_q       = execute_bus.logic_result;
-                cm_use_logic_q          = execute_bus.result_use_logic && !ex_is_csr_q;
+                cm_shift_arithmetic_q = ex_alu_op_q == 4'd8;
+                cm_logic_result_q     = execute_bus.logic_result;
+                if ex_early_bitmanip {
+                    cm_logic_result_q = early_bitmanip_result;
+                }
+                cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip) && !ex_is_csr_q;
                 cm_use_shift_q          = execute_bus.result_use_shift;
-                cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5];
+                cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
                 cm_compare_less_q       = execute_bus.compare_less;
                 cm_compare_sign_a_q     = execute_bus.compare_sign_a;
                 cm_compare_sign_b_q     = execute_bus.compare_sign_b;
@@ -1737,7 +1771,7 @@ module Core #(
                 ex_can_bypass_q          = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
                     && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8)
                         || (rx_alu_op_q == 4'd9) || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16)
-                        || ((ENABLE_ZBB || ENABLE_ZBS) && rx_alu_op_q[5])) && (rx_rd_q != 5'd0);
+                        || ((ENABLE_ZBB || ENABLE_ZBS) && rx_alu_op_q[5] && !rx_early_bitmanip)) && (rx_rd_q != 5'd0);
                 ex_is_load_q             = rx_is_load_q;
                 ex_load_size_q           = rx_load_size_q;
                 ex_load_unsigned_q       = rx_load_unsigned_q;

@@ -927,6 +927,7 @@ struct HardwareModelConfig {
     enable_zba: bool,
     enable_zbb: bool,
     enable_zbs: bool,
+    early_bitmanip: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -944,6 +945,7 @@ fn verify_hardware_memory_rtl(
         enable_zba,
         enable_zbb,
         enable_zbs,
+        early_bitmanip,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -963,6 +965,7 @@ fn verify_hardware_memory_rtl(
         .param("ENABLE_ZBA", u64::from(enable_zba))
         .param("ENABLE_ZBB", u64::from(enable_zbb))
         .param("ENABLE_ZBS", u64::from(enable_zbs))
+        .param("EARLY_BITMANIP", u64::from(early_bitmanip))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1469,14 +1472,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let enable_zba = arguments.iter().any(|arg| arg == "--zba-extension");
     let enable_zbb = arguments.iter().any(|arg| arg == "--zbb-extension");
     let enable_zbs = arguments.iter().any(|arg| arg == "--zbs-extension");
+    let early_bitmanip = arguments.iter().any(|arg| arg == "--early-bitmanip");
     let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
-    if (enable_m || enable_zba || enable_zbb || enable_zbs || timed_clocks)
+    if (enable_m || enable_zba || enable_zbb || enable_zbs || early_bitmanip || timed_clocks)
         && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl")
     {
         return Err(
-            "--m-extension, --zba-extension, --zbb-extension, --zbs-extension and --timed-clocks require --hardware-memory-rtl"
+            "--m-extension, --zba-extension, --zbb-extension, --zbs-extension, --early-bitmanip and --timed-clocks require --hardware-memory-rtl"
                 .into(),
         );
     }
@@ -1505,9 +1509,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some("3") => 3,
             Some("4") => 4,
             Some("5") => 5,
+            Some("6") => 6,
             _ => {
                 return Err(
-                    "--fast-lsu requires 0 (original), 1 (store/forwarding), 2 (store only), 3 (direct load), 4 (CPU-registered load), or 5 (read prefetch)"
+                    "--fast-lsu requires 0 (original), 1 (store/forwarding), 2 (store only), 3 (direct load), 4 (CPU-registered load), 5 (read prefetch), or 6 (prefetched load with CPU return register)"
                         .into(),
                 );
             }
@@ -1541,6 +1546,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--zbb-extension"
                     && argument.as_str() != "--zbs-extension"
                     && argument.as_str() != "--timed-clocks"
+                    && argument.as_str() != "--early-bitmanip"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
@@ -1563,7 +1569,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                         zbb: enable_zbb,
                         zbs: enable_zbs,
                     },
-                    use_dsp,
+                    verify_riscv::timed_memory::ExecutionConfig {
+                        use_dsp,
+                        early_bitmanip,
+                    },
                     max_cycles,
                 )?;
             }
@@ -1581,6 +1590,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_zba,
                 enable_zbb,
                 enable_zbs,
+                early_bitmanip,
             },
             max_cycles,
         );

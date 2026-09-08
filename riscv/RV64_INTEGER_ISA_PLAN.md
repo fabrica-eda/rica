@@ -297,3 +297,82 @@ IPC 0.254262／31.731940 MIPSで維持した。
 A、特権／割り込み、F/D/Vは対象ソフトの要件に合わせた別工程とする。
 全32診断のIPC／クロックは [性能表](../toolchain/measurements/2026-09-09-rv64-zbs/PERFORMANCE.md)、
 試作・再現・コマンドは [Zbs測定記録](../toolchain/measurements/2026-09-09-rv64-zbs/README.md)へ保存した。
+
+
+## 採用: 単純bit演算の早期転送とload応答（2026-09-09）
+
+`HardwareCompactPrefetchReturnTestTop`をCPU **124.8 MHz**／memory **62.4 MHz**／
+JTCK **6 MHz**で実機認定した。`EARLY_BITMANIP=1`でANDN/ORN/XNOR、
+SEXT.B/H、ZEXT.H、ORC.B/REV8、BCLR/BINV/BSETを既存ALU結果レジスタから転送する。
+BEXT、min/max、回転、カウントはCM/WBで処理する。
+
+LSUは`FAST_LSU=6`。保持されたload要求をBRAMのread edgeで受け付け、
+データと応答tokenをCPU側レジスタで同時に受ける。storeは登録bundleから一度だけ
+書き込み、そのedgeで応答する。早期bit転送とLSUは個別に有効・無効を比較した。
+byteカウントの4 bit論理化と、排他的なALU操作番号の並列デコードも採用した。
+既存のISA、DSP乗算、4 KiB L1I、compact予測器を使う。
+
+| 項目 | 認定結果 |
+| --- | --- |
+| setup: nominal / 200 ps予約後 | **+201 / +1 ps** |
+| hold: nominal / 200 ps予約後 | **+290 / +90 ps** |
+| setup / hold検査、JTCK照合 | 各**17,296**、JTCK各**515**、既存の明示例外4件 |
+| セル / DSP / EBR / PIPs | **28,770 / 16 / 150 / 359,977**。旧版から526セル減 |
+| workspace | **203 PASS／既存除外1件** |
+| 4設定 ×230 ELF ×2 clock順 | **1,840 PASS** |
+| 実機230 ELF +診断64反復 +既定起動16実行 | **310 PASS** |
+
+通常Texoでfresh配置した`early-09-flat-decode`が収束した。
+再合成・配置配線の読込・物理検査・STAを行った`early-10-production`と
+`early-11-reproduction`はcheckpointとbitがbyte単位で一致し、09のbitとも一致した。
+JTCK照合、checked bitgen、Veryl、Rust fmt、全target Clippyを通過。
+setup・hold予約、遅延データ、通常ツールと依存pinを緩めていない。
+
+Decoderはopcode×funct3×上位12 bit×16拡張設定の67,108,864通りを旧版と比較して一致した。
+rs1=7、rd=31固定であり、全32 bit命令の総当たりではない。
+独立整数oracleはZbb各300,984／Zbs各201,728を通常・早期版のRTLとmappedで検証した。
+既存除外1件はmapped board resetのNonScalarControlによるWRITE64試験。
+JTCK照合は同じSTAエンジン・遅延データを使い、JTAGG外部境界・reset/CDCの
+未characterize範囲は維持する。測定条件と範囲は記録に明記した。
+
+### 同じELFの実機性能
+
+旧Zbs認定bitと同じELF・入力・終了条件で、起動と検算を含むfreeze済みCSRを各3回測定した。
+命令数とELF SHAは全32診断で一致。IPC×124.8 MHzをMIPS、cycle/124.8をµsとする。
+
+| 診断 | cycle: 旧 → 採用 | 採用IPC | MIPS | 採用時間µs | 高速化 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 単一bit更新（mutate-zbs） | 23,103 → 16,974 | 0.607753 | 75.847579 | 136.010 | **1.361082倍** |
+| byte操作（bytes-zbb） | 25,156 → 23,108 | 0.667128 | 83.257608 | 185.160 | **1.088627倍** |
+| 配列合計 | 14,761 → 12,720 | 0.405031 | 50.547925 | 101.923 | **1.160456倍** |
+| 配列コピー | 22,475 → 19,918 | 0.374736 | 46.767105 | 159.599 | **1.128376倍** |
+| 乗算診断 | 10,147 → 9,636 | 0.267746 | 33.414695 | 77.212 | **1.053030倍** |
+
+単一bit更新の依存待ちは4,095→1、配列合計のメモリ待ちは4,098→2,054 cycle。
+乗算診断では乗算器を変えずにメモリ待ちを1,793→1,283へ短縮した。
+pointer_chaseは12,659 cycleで横ばい、load_storeは4,422→4,425（約0.068%遅化）。
+固定4診断の速度比幾何平均は0.999822。全32診断の同時edgeモデルと実機は
+minstretが一致し、cycle差は−1〜0だった。
+
+- 既定image: `build/riscv-hardware-compact-prefetch-return-124p8-20260909.bit`
+- bit SHA-256: `9463dc0cc13c57c62cc9ca46e994917262762838c989777282cecb1adff5f3e1`
+- checkpoint SHA-256: `c8bfe2e85387fdfebd05f4b7e7d3118aa5fedca89d2c699125fd7835814a4d91`
+- [全32診断のIPC・clock・時間](../toolchain/measurements/2026-09-09-rv64-early-bitmanip/PERFORMANCE.md)
+- [設計・試作・再現・実機記録](../toolchain/measurements/2026-09-09-rv64-early-bitmanip/README.md)
+
+初稿で見つかったCeloxのパラメータoverride/repeatの幅問題は、明示的な1 bit比較値で回避した。
+FF・clockを含まない[独立MRE](../toolchain/mre/celox-parameter-repeat/README.md)を保存し、
+失敗モデルから性能を算出していない。依存ライブラリへの試験的変更も加えていない。
+
+### 次の改良計画
+
+1. **残るload依存とfrontend待ちを測る。** pointer_chaseが改善しなかった理由を
+   カウンタと2:1 clockの波形で切り分ける。LSU6に残る旧出力レジスタの削減は
+   別候補として資源・setup余裕を比較する。
+2. **除算の早期終了を評価する。** 符号・ゼロ除算・overflow・word幅を検証し、
+   コンパイラ生成Cの同じ処理時間で採否を決める。DSP乗算は維持する。
+3. **Texo探索のコストを制限する。** 初期未達が多い場合の全cone探索は高コストだった。
+   候補選択と探索上限を回帰評価し、STA条件を変えずに改善を整理する。
+
+いずれも124.8 MHzとsetup／hold各200 ps予約、同じELFの実機比較を採用条件とする。
+A、特権／割り込み、F/D/Vの追加は対象ソフトの要件に応じた別工程とする。

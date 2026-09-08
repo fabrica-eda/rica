@@ -1,6 +1,8 @@
 /// EX half of Zbb/Zbs. Rotates apply 1/2/4; counts reduce each byte; Zbs carries A.
 /// Codes 0..16 (Zbb), 20..23 (Zbs) are the low five bits of the ALU tag.
-module BitManipUnit (
+module BitManipUnit #(
+    param EARLY_SIMPLE: bit = 0,
+) (
     operation: input  logic<5> ,
     word_op  : input  logic    ,
     operand_a: input  logic<64>,
@@ -20,33 +22,30 @@ module BitManipUnit (
     var reverse_bytes: logic<64>    ;
 
     for i in 0..8 :g_byte {
-        var pop_pair: logic<2> [4];
         var pop_half: logic<3> [2];
-        var tz_pair : logic<2> [4];
         var tz_half : logic<3> [2];
         var pop     : logic<4>    ;
         var tz      : logic<4>    ;
         always_comb {
-            for j in 0..4 {
-                pop_pair[j] = {1'b0, pop_source[i * 8 + j * 2]} + {1'b0, pop_source[i * 8 + j * 2 + 1]};
-                tz_pair[j]  = 2'd2;
-                if scan[i * 8 + j * 2] {
-                    tz_pair[j] = 2'd0;
-                } else if scan[i * 8 + j * 2 + 1] {
-                    tz_pair[j] = 2'd1;
-                }
-            }
+            // Each nibble output is a four-input Boolean function. This avoids
+            // a carry chain for counting each pair before adding the nibbles.
             for j in 0..2 {
-                pop_half[j] = {1'b0, pop_pair[j * 2]} + {1'b0, pop_pair[j * 2 + 1]};
-                tz_half[j]  = {1'b0, tz_pair[j * 2]};
-                if tz_pair[j * 2][1] {
-                    tz_half[j] = 3'd2 + {1'b0, tz_pair[j * 2 + 1]};
-                }
+                pop_half[j][0] = ^pop_source[i * 8 + j * 4+:4];
+                pop_half[j][1] = (pop_source[i * 8 + j * 4] & pop_source[i * 8 + j * 4 + 1])
+                    ^ (pop_source[i * 8 + j * 4 + 2] & pop_source[i * 8 + j * 4 + 3])
+                    ^ ((pop_source[i * 8 + j * 4] ^ pop_source[i * 8 + j * 4 + 1])
+                        & (pop_source[i * 8 + j * 4 + 2] ^ pop_source[i * 8 + j * 4 + 3]));
+                pop_half[j][2] = &pop_source[i * 8 + j * 4+:4];
+                tz_half[j][0]  = !scan[i * 8 + j * 4]
+                    && (scan[i * 8 + j * 4 + 1] || (!scan[i * 8 + j * 4 + 2] && scan[i * 8 + j * 4 + 3]));
+                tz_half[j][1]  = !scan[i * 8 + j * 4] && !scan[i * 8 + j * 4 + 1]
+                    && (scan[i * 8 + j * 4 + 2] || scan[i * 8 + j * 4 + 3]);
+                tz_half[j][2]  = !(|scan[i * 8 + j * 4+:4]);
             }
             pop = {1'b0, pop_half[0]} + {1'b0, pop_half[1]};
             tz  = {1'b0, tz_half[0]};
             if tz_half[0][2] {
-                tz = 4'd4 + {1'b0, tz_half[1]};
+                tz = {tz_half[1][2], !tz_half[1][2], tz_half[1][1:0]};
             }
             byte_count[i] = tz;
             if operation == 5'd16 {
@@ -101,23 +100,29 @@ module BitManipUnit (
         }
         // Disjoint one-hot candidates avoid a word-wide first-match tree.
         // Unsupported operation tags have no architectural consumer.
-        partial = ((operand_a & ~operand_b) & {(operation == 5'd0) repeat 64})
-            | ((operand_a | ~operand_b) & {(operation == 5'd1) repeat 64})
-            | ((~(operand_a ^ operand_b)) & {(operation == 5'd2) repeat 64})
-            | ({operand_a[7] repeat 56, operand_a[7:0]} & {(operation == 5'd3) repeat 64})
-            | ({operand_a[15] repeat 48, operand_a[15:0]} & {(operation == 5'd4) repeat 64})
-            | ({48'd0, operand_a[15:0]} & {(operation == 5'd5) repeat 64})
-            | (or_bytes & {(operation == 5'd6) repeat 64}) | (reverse_bytes & {(operation == 5'd7) repeat 64})
-            | (operand_a & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
+        partial = (((operand_a & ~operand_b) & {(operation == 5'd0) repeat 64})
+                | ((operand_a | ~operand_b) & {(operation == 5'd1) repeat 64})
+                | ((~(operand_a ^ operand_b)) & {(operation == 5'd2) repeat 64})
+                | ({operand_a[7] repeat 56, operand_a[7:0]} & {(operation == 5'd3) repeat 64})
+                | ({operand_a[15] repeat 48, operand_a[15:0]} & {(operation == 5'd4) repeat 64})
+                | ({48'd0, operand_a[15:0]} & {(operation == 5'd5) repeat 64})
+                | (or_bytes & {(operation == 5'd6) repeat 64}) | (reverse_bytes & {(operation == 5'd7) repeat 64}))
+            & {!EARLY_SIMPLE repeat 64} | (operand_a & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
             | (rotate_4 & {(!operation[4] && operation[3] && operation[2] && !operation[1]) repeat 64})
             | ({32'd0, counts} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64})
-            | (operand_a & {(operation[4] && !operation[3] && operation[2]) repeat 64});
+            | (operand_a
+                & {
+                    ((operation[4] && !operation[3] && operation[2])
+                        && (!EARLY_SIMPLE || (operation == 5'd21))) repeat 64
+                });
 
     }
 }
 
 /// CM half of Zbb/Zbs. Inputs belong to the same registered EX instruction.
-module BitManipHighUnit (
+module BitManipHighUnit #(
+    param EARLY_SIMPLE: bit = 0,
+) (
     operation    : input  logic<5> ,
     word_op      : input  logic    ,
     amount       : input  logic<3> ,
@@ -199,13 +204,48 @@ module BitManipHighUnit (
         if !(less ^ operation[1]) {
             minmax = operand_b;
         }
-        result = (partial & {(!operation[4] && !operation[3]) repeat 64})
+        result = (partial & {(!EARLY_SIMPLE && !operation[4] && !operation[3]) repeat 64})
             | (minmax & {(!operation[4] && operation[3] && !operation[2]) repeat 64})
             | (rotated & {(!operation[4] && operation[3] && operation[2] && !operation[1]) repeat 64})
             | ({57'd0, count} & {((operation == 5'd14) || (operation == 5'd15) || (operation == 5'd16)) repeat 64})
-            | ((partial & ~bit_mask) & {(operation == 5'd20) repeat 64})
-            | (extracted & {(operation == 5'd21) repeat 64}) | ((partial ^ bit_mask) & {(operation == 5'd22) repeat 64})
-            | ((partial | bit_mask) & {(operation == 5'd23) repeat 64});
+            | ((partial & ~bit_mask) & {(!EARLY_SIMPLE && (operation == 5'd20)) repeat 64})
+            | (extracted & {(operation == 5'd21) repeat 64})
+            | ((partial ^ bit_mask) & {(!EARLY_SIMPLE && (operation == 5'd22)) repeat 64})
+            | ((partial | bit_mask) & {(!EARLY_SIMPLE && (operation == 5'd23)) repeat 64});
 
+    }
+}
+
+/// Shallow EX operations. No count tree, rotate barrel, or BEXT selector can
+/// enter this cone; Core captures its output in the ordinary ALU logic register.
+module SimpleBitManipUnit #(
+    param ENABLE_ZBB: bit = 0,
+    param ENABLE_ZBS: bit = 0,
+) (
+    operation: input  logic<5> ,
+    operand_a: input  logic<64>,
+    operand_b: input  logic<64>,
+    result   : output logic<64>,
+) {
+    var or_bytes     : logic<64>;
+    var reverse_bytes: logic<64>;
+    var bit_mask     : logic<64>;
+    always_comb {
+        for i in 0..8 {
+            or_bytes[i * 8+:8]      = {(operand_a[i * 8+:8] != 8'd0) repeat 8};
+            reverse_bytes[i * 8+:8] = operand_a[(7 - i) * 8+:8];
+        }
+        bit_mask = 64'd1 << operand_b[5:0];
+        result   = (((operand_a & ~operand_b) & {(operation == 5'd0) repeat 64})
+                | ((operand_a | ~operand_b) & {(operation == 5'd1) repeat 64})
+                | ((~(operand_a ^ operand_b)) & {(operation == 5'd2) repeat 64})
+                | ({operand_a[7] repeat 56, operand_a[7:0]} & {(operation == 5'd3) repeat 64})
+                | ({operand_a[15] repeat 48, operand_a[15:0]} & {(operation == 5'd4) repeat 64})
+                | ({48'd0, operand_a[15:0]} & {(operation == 5'd5) repeat 64})
+                | (or_bytes & {(operation == 5'd6) repeat 64}) | (reverse_bytes & {(operation == 5'd7) repeat 64}))
+            & {(ENABLE_ZBB != 1'b0) repeat 64}
+            | ((((operand_a & ~bit_mask) & {(operation == 5'd20) repeat 64})
+                    | ((operand_a ^ bit_mask) & {(operation == 5'd22) repeat 64})
+                    | ((operand_a | bit_mask) & {(operation == 5'd23) repeat 64})) & {(ENABLE_ZBS != 1'b0) repeat 64});
     }
 }

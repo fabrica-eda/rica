@@ -11,6 +11,7 @@ module HardwareTestTop #(
     param ENABLE_ZBA       : bit = 0,
     param ENABLE_ZBB       : bit = 0,
     param ENABLE_ZBS       : bit = 0,
+    param EARLY_BITMANIP   : bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
 ) (
@@ -183,7 +184,7 @@ module HardwareTestTop #(
 
     var core_data_rdata            : 'cpu logic<64>;
     var core_data_response_sequence: 'cpu logic    ;
-    if FAST_LSU == 4 :g_load_return {
+    if (FAST_LSU == 4) || (FAST_LSU == 6) :g_load_return {
         // Split byte-bank selection from Core's load formatting and bypass.
         // One CPU edge replaces the previous full memory-domain output cycle.
         var load_sequence_q: 'cpu logic;
@@ -206,6 +207,7 @@ module HardwareTestTop #(
         ENABLE_ZBA             : ENABLE_ZBA            ,
         ENABLE_ZBB             : ENABLE_ZBB            ,
         ENABLE_ZBS             : ENABLE_ZBS            ,
+        EARLY_BITMANIP         : EARLY_BITMANIP        ,
         ENABLE_M               : ENABLE_M              ,
         M_USE_DSP              : M_USE_DSP             ,
         COMMIT_PAYLOAD         : 0                     ,
