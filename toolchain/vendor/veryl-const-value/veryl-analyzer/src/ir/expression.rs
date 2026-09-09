@@ -1,0 +1,1679 @@
+use crate::AnalyzerError;
+use crate::conv::Context;
+use crate::conv::checker::clock_domain::check_clock_domain;
+use crate::ir::assign_table::{AssignContext, AssignTable};
+use crate::ir::ff_table::AssignTarget;
+use crate::ir::utils::convert_cast;
+use crate::ir::{
+    Comptime, ExpressionContext, FfTable, FunctionCall, Op, Signature, SystemFunctionCall,
+    SystemFunctionKind, Type, TypeKind, ValueVariant, VarId, VarIndex, VarPath, VarSelect,
+};
+use crate::symbol::{ClockDomain, Symbol, SymbolKind};
+use crate::value::{Value, ValueBigUint};
+use std::fmt;
+use std::sync::Arc;
+use veryl_parser::resource_table::StrId;
+use veryl_parser::token_range::TokenRange;
+
+#[derive(Clone, Debug)]
+pub enum Expression {
+    Term(Box<Factor>),
+    Unary(Op, Box<Expression>, Box<Comptime>),
+    Binary(Box<Expression>, Op, Box<Expression>, Box<Comptime>),
+    Ternary(
+        Box<Expression>,
+        Box<Expression>,
+        Box<Expression>,
+        Box<Comptime>,
+    ),
+    Concatenation(Vec<(Expression, Option<Expression>)>, Box<Comptime>),
+    ArrayLiteral(Vec<ArrayLiteralItem>, Box<Comptime>),
+    StructConstructor(Box<Type>, Vec<(StrId, Expression)>, Box<Comptime>),
+}
+
+impl Expression {
+    pub fn create_value(value: Value, token: TokenRange) -> Self {
+        Self::Term(Box::new(Factor::create_value(value, token)))
+    }
+}
+
+impl fmt::Display for Expression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ret = match self {
+            Expression::Term(x) => x.to_string(),
+            Expression::Unary(x, y, _) => {
+                format!("({x} {y})")
+            }
+            Expression::Binary(x, y, z, _) => {
+                format!("({x} {y} {z})")
+            }
+            Expression::Ternary(x, y, z, _) => {
+                format!("({x} ? {y} : {z})")
+            }
+            Expression::Concatenation(x, _) => {
+                let mut ret = String::new();
+                for (x, y) in x {
+                    if let Some(y) = y {
+                        ret = format!("{ret}, {x} repeat {y}")
+                    } else {
+                        ret = format!("{ret}, {x}")
+                    }
+                }
+                format!("{{{}}}", &ret[2..])
+            }
+            Expression::ArrayLiteral(x, _) => {
+                let mut ret = String::new();
+                for x in x {
+                    ret = format!("{ret}, {x}")
+                }
+                format!("'{{{}}}", &ret[2..])
+            }
+            Expression::StructConstructor(_, x, _) => {
+                let mut ret = String::new();
+                for x in x {
+                    ret = format!("{ret}, {}: {}", x.0, x.1)
+                }
+                format!("'{{{}}}", &ret[2..])
+            }
+        };
+
+        ret.fmt(f)
+    }
+}
+
+impl Expression {
+    pub fn is_assignable(&self) -> bool {
+        match self {
+            Expression::Term(x) => x.is_assignable(),
+            Expression::Concatenation(x, _) => {
+                x.iter().all(|x| x.0.is_assignable() && x.1.is_none())
+            }
+            _ => false,
+        }
+    }
+
+    /// Token range when this expression is a bare unbased unsized literal
+    /// Term (`'0`/`'1`/`'x`/`'z`); nested under an operator it is `None`.
+    pub fn unbased_unsized_literal_token(&self) -> Option<&TokenRange> {
+        match self {
+            Expression::Term(x) => x.unbased_unsized_literal_token(),
+            _ => None,
+        }
+    }
+
+    /// Error if this is a bare unbased unsized literal in a self-determined
+    /// position (concat operand, replication count, shift amount, logical
+    /// operand, ternary condition), where it has no determinable width.
+    pub(crate) fn check_self_determined_unsized(&self, context: &mut Context) {
+        if let Some(token) = self.unbased_unsized_literal_token() {
+            context.insert_error(AnalyzerError::invalid_unsized_literal(token));
+        }
+    }
+
+    /// A base-less literal is 32-bit in Veryl but emitted verbatim as an
+    /// unsized SV literal, which LRM 11.4.12 forbids in a concatenation.
+    pub(crate) fn check_concat_operand_baseless(&self, context: &mut Context) {
+        if let Expression::Term(x) = self
+            && let Some(token) = x.baseless_literal_token()
+        {
+            context.insert_error(AnalyzerError::invalid_unsized_literal(token));
+        }
+    }
+
+    pub fn gather_context(&mut self, context: &mut Context) -> ExpressionContext {
+        match self {
+            Expression::Term(x) => x.gather_context(context),
+            Expression::Unary(op, x, comptime) => {
+                let xc = if op.unary_x_self_determined() {
+                    // Finalized with its own context here; `apply_context`
+                    // skips self-determined operands.
+                    x.check_self_determined_unsized(context);
+                    let expr_context = x.gather_context(context);
+                    x.apply_context(context, expr_context);
+                    x.comptime().expr_context
+                } else {
+                    x.gather_context(context)
+                };
+
+                comptime.is_const = xc.is_const;
+                comptime.is_global = xc.is_global;
+
+                op.eval_context_unary(xc)
+            }
+            Expression::Binary(x, op, y, comptime) => {
+                let mut as_target_is_type = false;
+                let (xc, yc) = if *op == Op::As {
+                    // `as` is a width-context boundary (LRM 6.24.1): the
+                    // operand is sized as if assigned to a cast-width
+                    // variable; the outer context never reaches inside.
+                    let xc = x.gather_context(context);
+                    let yc = y.gather_context(context);
+                    // The target is self-contained (a type or a width
+                    // literal): finalize it with its own context.
+                    y.apply_context(context, yc);
+                    as_target_is_type = matches!(y.comptime().value, ValueVariant::Type(_));
+                    // A numeric cast (`x as 16`) carries the width as the
+                    // literal's VALUE; a type cast carries it as the width.
+                    let cast_width = if as_target_is_type {
+                        yc.width
+                    } else {
+                        y.comptime()
+                            .get_value()
+                            .ok()
+                            .and_then(|v| v.to_usize())
+                            .unwrap_or(0)
+                    };
+                    let inner = ExpressionContext {
+                        width: xc.width.max(cast_width),
+                        ..xc
+                    };
+                    x.apply_context(context, inner);
+                    (
+                        x.comptime().expr_context,
+                        ExpressionContext {
+                            width: cast_width,
+                            ..yc
+                        },
+                    )
+                } else if op.binary_op_self_determined() {
+                    let expr_context = x.gather_context(context).merge(y.gather_context(context));
+                    x.apply_context(context, expr_context);
+                    y.apply_context(context, expr_context);
+                    (expr_context, expr_context)
+                } else {
+                    let xc = if op.binary_x_self_determined() {
+                        x.check_self_determined_unsized(context);
+                        let expr_context = x.gather_context(context);
+                        x.apply_context(context, expr_context);
+                        x.comptime().expr_context
+                    } else {
+                        x.gather_context(context)
+                    };
+
+                    let yc = if op.binary_y_self_determined() {
+                        y.check_self_determined_unsized(context);
+                        let expr_context = y.gather_context(context);
+                        y.apply_context(context, expr_context);
+                        y.comptime().expr_context
+                    } else {
+                        y.gather_context(context)
+                    };
+
+                    // `y` (the cast target) now has its comptime populated.
+                    as_target_is_type = matches!(y.comptime().value, ValueVariant::Type(_));
+
+                    (xc, yc)
+                };
+
+                comptime.is_const = xc.is_const & yc.is_const;
+                comptime.is_global = xc.is_global & yc.is_global;
+
+                let mut ctx = op.eval_context_binary(xc, yc);
+                // An `as`-cast inherits its target's signedness only for an
+                // explicit signed TYPE; a numeric width cast (`x as N`) is an
+                // unsigned `logic<N>` like the emitted SystemVerilog. Otherwise
+                // it is spuriously signed at runtime, sign-extending in shifts.
+                if *op == Op::As && !as_target_is_type {
+                    ctx.signed = false;
+                }
+                ctx
+            }
+            Expression::Ternary(x, y, z, comptime) => {
+                // x is self-determined
+                x.check_self_determined_unsized(context);
+                let expr_context = x.gather_context(context);
+                x.apply_context(context, expr_context);
+                let x = x.comptime();
+
+                let y = y.gather_context(context);
+                let z = z.gather_context(context);
+
+                let is_const = x.is_const & y.is_const & z.is_const;
+                let is_global = x.is_global & y.is_global & z.is_global;
+
+                comptime.is_const = is_const;
+                comptime.is_global = is_global;
+
+                ExpressionContext {
+                    width: y.width.max(z.width),
+                    signed: y.signed & z.signed,
+                    is_const,
+                    is_global,
+                }
+            }
+            Expression::Concatenation(x, comptime) => {
+                let op = Op::Concatenation;
+                op.eval_type_concatenation(context, x, comptime);
+                comptime.evaluated = true;
+
+                ExpressionContext {
+                    width: comptime.r#type.total_width().unwrap_or(0),
+                    signed: comptime.r#type.signed,
+                    is_const: comptime.is_const,
+                    is_global: comptime.is_global,
+                }
+            }
+            Expression::StructConstructor(r#type, exprs, comptime) => {
+                let mut is_const = true;
+                let mut is_global = true;
+                for (_, expr) in exprs {
+                    let expr_context = expr.gather_context(context);
+                    is_const &= expr_context.is_const;
+                    is_global &= expr_context.is_global;
+
+                    let expr = expr.comptime();
+                    check_clock_domain(context, comptime, expr, &comptime.token.beg);
+                    // accumulate a concrete domain (a trailing const field must
+                    // not launder the struct's clock domain to None)
+                    comptime.clock_domain = comptime.clock_domain.merge(&expr.clock_domain);
+                }
+
+                comptime.r#type = r#type.as_ref().clone();
+                comptime.is_const = is_const;
+                comptime.is_global = is_global;
+                comptime.evaluated = true;
+
+                ExpressionContext {
+                    width: r#type.total_width().unwrap_or(0),
+                    signed: false,
+                    is_const,
+                    is_global,
+                }
+            }
+            Expression::ArrayLiteral(items, comptime) => {
+                let mut is_const = true;
+                let mut is_global = true;
+                for item in items {
+                    match item {
+                        ArrayLiteralItem::Value(x, y) => {
+                            let x_context = x.gather_context(context);
+                            is_const &= x_context.is_const;
+                            is_global &= x_context.is_global;
+                            // Evaluate the element so a compound expression carries its
+                            // operands' clock domains (mirrors eval_type_concatenation);
+                            // else the check below launders a cross-domain element.
+                            x.apply_context(context, x_context);
+                            let x = x.comptime();
+                            check_clock_domain(context, comptime, x, &comptime.token.beg);
+                            comptime.clock_domain = comptime.clock_domain.merge(&x.clock_domain);
+                            if let Some(y) = y {
+                                let y_context = y.gather_context(context);
+                                is_const &= y_context.is_const;
+                                is_global &= y_context.is_global;
+                            }
+                        }
+                        ArrayLiteralItem::Defaul(x) => {
+                            let x_context = x.gather_context(context);
+                            is_const &= x_context.is_const;
+                            is_global &= x_context.is_global;
+                            x.apply_context(context, x_context);
+                            let x = x.comptime();
+                            check_clock_domain(context, comptime, x, &comptime.token.beg);
+                            comptime.clock_domain = comptime.clock_domain.merge(&x.clock_domain);
+                        }
+                    }
+                }
+
+                comptime.is_const = is_const;
+                comptime.is_global = is_global;
+                comptime.evaluated = true;
+
+                // ArrayLiteral doesn't affect context width
+                ExpressionContext {
+                    width: 0,
+                    signed: false,
+                    is_const,
+                    is_global,
+                }
+            }
+        }
+    }
+
+    pub fn apply_context(&mut self, context: &mut Context, expr_context: ExpressionContext) {
+        match self {
+            Expression::Term(x) => x.apply_context(expr_context),
+            Expression::Unary(op, x, comptime) => {
+                if !op.unary_x_self_determined() {
+                    x.apply_context(context, expr_context);
+                }
+                comptime.expr_context = expr_context;
+                op.eval_type_unary(context, x.comptime(), comptime);
+                comptime.evaluated = true;
+            }
+            Expression::Binary(x, op, y, comptime) => {
+                // `as` operands were sized in gather_context; the outer
+                // context must not leak inside the cast.
+                if *op != Op::As && !op.binary_op_self_determined() {
+                    if !op.binary_x_self_determined() {
+                        x.apply_context(context, expr_context);
+                    }
+                    if !op.binary_y_self_determined() {
+                        y.apply_context(context, expr_context);
+                    }
+                }
+
+                comptime.expr_context = expr_context;
+                op.eval_type_binary(context, x.comptime(), y.comptime(), comptime);
+                comptime.evaluated = true;
+            }
+            Expression::Ternary(x, y, z, comptime) => {
+                y.apply_context(context, expr_context);
+                z.apply_context(context, expr_context);
+
+                comptime.expr_context = expr_context;
+                let op = Op::Ternary;
+                op.eval_type_ternary(context, x.comptime(), y.comptime(), z.comptime(), comptime);
+                comptime.evaluated = true;
+            }
+            Expression::Concatenation(_, comptime)
+            | Expression::StructConstructor(_, _, comptime)
+            | Expression::ArrayLiteral(_, comptime) => {
+                // These are evaluated in `gather_context`, but their context (e.g.
+                // is_const/is_global) must still be recorded so a parent reading
+                // `comptime().expr_context` after `apply_context` (such as an `as`
+                // cast) sees the gathered values instead of the default.
+                comptime.expr_context = expr_context
+            }
+        }
+    }
+
+    pub fn eval_value(&self, context: &mut Context) -> Option<Value> {
+        let context_width = self.comptime().expr_context.width;
+        let signed = self.comptime().expr_context.signed;
+
+        match self {
+            Expression::Term(x) => x.eval_value(context),
+            Expression::Unary(op, x, _) => {
+                let ret = x.eval_value(context)?;
+                let x_kind = &x.comptime().r#type.kind;
+                if x_kind.is_float() {
+                    op.eval_float_unary(&ret, x_kind)
+                } else {
+                    let ret =
+                        op.eval_value_unary(&ret, context_width, signed, &mut context.mask_cache);
+                    Some(ret)
+                }
+            }
+            Expression::Binary(x, op, y, comptime) => {
+                if op == &Op::As {
+                    let src_kind = &x.comptime().r#type.kind;
+                    let dst_kind = &comptime.r#type.kind;
+
+                    let val = x.eval_value(context)?;
+                    if src_kind.is_float() || dst_kind.is_float() {
+                        return Some(convert_cast(val, src_kind, dst_kind, context_width));
+                    }
+
+                    let cast_width = comptime.r#type.total_width()?;
+                    let val_width = val.width();
+                    if val_width > cast_width {
+                        let mut val = val.clone();
+                        val.trunc(cast_width);
+                        return Some(convert_cast(val, src_kind, dst_kind, context_width));
+                    } else if val_width < cast_width {
+                        // SV's `N'(expr)` sign-extends a signed operand; widen by
+                        // the source TYPE's signedness so comptime matches the
+                        // emitted SV (the value flag can carry the init
+                        // literal's signedness, e.g. `logic<8> = 200`).
+                        let src_signed = x.comptime().r#type.signed;
+                        let val = val.expand(cast_width, src_signed).into_owned();
+                        return Some(convert_cast(val, src_kind, dst_kind, context_width));
+                    } else {
+                        return Some(convert_cast(val, src_kind, dst_kind, context_width));
+                    }
+                }
+
+                // Div/Rem and comparisons take signedness from their two
+                // operands alone (SV 11.4.4); the outer expr_context may
+                // have dropped signed via merge() with an unsigned sibling.
+                let signed = if matches!(
+                    op,
+                    Op::Div | Op::Rem | Op::Greater | Op::GreaterEq | Op::Less | Op::LessEq
+                ) {
+                    x.comptime().expr_context.signed & y.comptime().expr_context.signed
+                } else {
+                    signed
+                };
+
+                let x_kind = x.comptime().r#type.kind.clone();
+                let y_kind = y.comptime().r#type.kind.clone();
+                let x = x.eval_value(context)?;
+                let y = y.eval_value(context)?;
+                if x_kind.is_float() || y_kind.is_float() {
+                    let float_kind = if x_kind.is_float() { &x_kind } else { &y_kind };
+                    let float_width = if matches!(float_kind, TypeKind::F32) {
+                        32
+                    } else {
+                        64
+                    };
+                    let x = if !x_kind.is_float() {
+                        convert_cast(x, &x_kind, float_kind, float_width)
+                    } else {
+                        x
+                    };
+                    let y = if !y_kind.is_float() {
+                        convert_cast(y, &y_kind, float_kind, float_width)
+                    } else {
+                        y
+                    };
+                    op.eval_float_binary(&x, &y, float_kind)
+                } else {
+                    let ret = op.eval_value_binary(
+                        &x,
+                        &y,
+                        context_width,
+                        signed,
+                        &mut context.mask_cache,
+                    );
+                    Some(ret)
+                }
+            }
+            Expression::Ternary(x, y, z, _) => {
+                let x = x.eval_value(context)?;
+                let y = y.eval_value(context)?;
+                let z = z.eval_value(context)?;
+
+                // The selected branch extends to the evaluation width by the
+                // result signedness: both-signed branches sign-extend
+                // (LRM 11.4.11), anything else zero-extends.
+                let signed = y.signed() && z.signed();
+                let width = y.width().max(z.width()).max(context_width);
+
+                let ret = if x.to_usize().unwrap_or(0) == 0 { z } else { y };
+                let ret = ret.expand(width, signed).into_owned();
+                Some(ret)
+            }
+            Expression::Concatenation(x, _) => {
+                let mut ret = Value::new(0, 0, false);
+                for (exp, rep) in x.iter() {
+                    let exp = exp.eval_value(context)?;
+
+                    let rep = if let Some(rep) = rep {
+                        let token = rep.token_range();
+                        let rep = rep.eval_value(context)?;
+                        let rep = rep.to_usize()?;
+                        context.check_size(rep, token)?
+                    } else {
+                        1
+                    };
+
+                    for _ in 0..rep {
+                        ret = ret.concat(&exp);
+                    }
+                }
+                Some(ret)
+            }
+            Expression::StructConstructor(r#type, exprs, _) => {
+                let mut ret = Value::new(0u32.into(), 0, false);
+                for (name, expr) in exprs {
+                    let sub_type = r#type.get_member_type(*name)?;
+                    let width = sub_type.total_width()?;
+                    let mut value = expr.eval_value(context)?;
+                    // Extend a narrow RHS (e.g. a 32-bit literal in a `logic<100>`
+                    // field) to the member width; otherwise the field's slot
+                    // shrinks and later fields land at the wrong packed offset.
+                    value.trunc(width);
+                    let value = value.expand(width, true).into_owned();
+                    ret = ret.concat(&value);
+                }
+                Some(ret)
+            }
+            // ArrayLiteral doesn't require evaluation because it is expanded in conv phase
+            Expression::ArrayLiteral(_, _) => None,
+        }
+    }
+
+    pub fn eval_comptime(
+        &mut self,
+        context: &mut Context,
+        context_width: Option<usize>,
+    ) -> &Comptime {
+        if !self.comptime().evaluated {
+            let mut expr_context = self.gather_context(context);
+            expr_context.width = expr_context.width.max(context_width.unwrap_or(0));
+            self.apply_context(context, expr_context);
+
+            let value = self.eval_value(context);
+            let comptime = self.comptime_mut();
+            if comptime.value.is_unknown()
+                && let Some(x) = &value
+            {
+                comptime.value = ValueVariant::Numeric(x.clone());
+            }
+
+            // const optimization
+            if !context.disalbe_const_opt
+                && comptime.is_const
+                && let Some(value) = value
+                && !value.is_xz()
+            {
+                let is_global = comptime.is_global;
+                let r#type = comptime.r#type.clone();
+                let mut expr = Expression::create_value(value.clone(), self.token_range());
+
+                let expr_comptime = expr.comptime_mut();
+                expr_comptime.is_global = is_global;
+                expr_comptime.r#type = r#type;
+                expr_comptime.evaluated = true;
+
+                *self = expr;
+            }
+        }
+
+        self.comptime()
+    }
+
+    pub fn eval_assign(
+        &self,
+        context: &mut Context,
+        assign_table: &mut AssignTable,
+        assign_context: AssignContext,
+    ) {
+        match self {
+            Expression::Term(x) => x.eval_assign(context, assign_table, assign_context),
+            Expression::Unary(_, x, _) => x.eval_assign(context, assign_table, assign_context),
+            Expression::Binary(x, _, y, _) => {
+                x.eval_assign(context, assign_table, assign_context);
+                y.eval_assign(context, assign_table, assign_context);
+            }
+            Expression::Ternary(x, y, z, _) => {
+                x.eval_assign(context, assign_table, assign_context);
+                y.eval_assign(context, assign_table, assign_context);
+                z.eval_assign(context, assign_table, assign_context);
+            }
+            Expression::Concatenation(x, _) => {
+                for (x, y) in x {
+                    x.eval_assign(context, assign_table, assign_context);
+                    if let Some(y) = y {
+                        y.eval_assign(context, assign_table, assign_context);
+                    }
+                }
+            }
+            Expression::StructConstructor(_, exprs, _) => {
+                for (_, expr) in exprs {
+                    expr.eval_assign(context, assign_table, assign_context);
+                }
+            }
+            // ArrayLiteral doesn't require evaluation because it is expanded in conv phase
+            Expression::ArrayLiteral(_, _) => (),
+        }
+    }
+
+    pub fn gather_ff(
+        &self,
+        context: &mut Context,
+        table: &mut FfTable,
+        decl: usize,
+        assign_target: Option<&AssignTarget>,
+        from_ff: bool,
+    ) {
+        match self {
+            Expression::Term(x) => x.gather_ff(context, table, decl, assign_target, from_ff),
+            Expression::Unary(_, x, _) => x.gather_ff(context, table, decl, assign_target, from_ff),
+            Expression::Binary(x, _, y, _) => {
+                x.gather_ff(context, table, decl, assign_target, from_ff);
+                y.gather_ff(context, table, decl, assign_target, from_ff);
+            }
+            Expression::Ternary(x, y, z, _) => {
+                x.gather_ff(context, table, decl, assign_target, from_ff);
+                y.gather_ff(context, table, decl, assign_target, from_ff);
+                z.gather_ff(context, table, decl, assign_target, from_ff);
+            }
+            Expression::Concatenation(x, _) => {
+                for (x, y) in x {
+                    x.gather_ff(context, table, decl, assign_target, from_ff);
+                    if let Some(y) = y {
+                        y.gather_ff(context, table, decl, assign_target, from_ff);
+                    }
+                }
+            }
+            Expression::StructConstructor(_, exprs, _) => {
+                for (_, expr) in exprs {
+                    expr.gather_ff(context, table, decl, assign_target, from_ff);
+                }
+            }
+            // ArrayLiteral doesn't require evaluation because it is expanded in conv phase
+            Expression::ArrayLiteral(_, _) => (),
+        }
+    }
+
+    pub fn set_index(&mut self, index: &VarIndex) {
+        match self {
+            Expression::Term(x) => x.set_index(index),
+            Expression::Unary(_, x, _) => x.set_index(index),
+            Expression::Binary(x, _, y, _) => {
+                x.set_index(index);
+                y.set_index(index);
+            }
+            Expression::Ternary(x, y, z, _) => {
+                x.set_index(index);
+                y.set_index(index);
+                z.set_index(index);
+            }
+            Expression::Concatenation(x, _) => {
+                for (x, y) in x {
+                    x.set_index(index);
+                    if let Some(y) = y {
+                        y.set_index(index);
+                    }
+                }
+            }
+            Expression::StructConstructor(_, exprs, _) => {
+                for (_, expr) in exprs {
+                    expr.set_index(index);
+                }
+            }
+            // ArrayLiteral doesn't require evaluation because it is expanded in conv phase
+            Expression::ArrayLiteral(_, _) => (),
+        }
+    }
+
+    pub fn comptime(&self) -> &Comptime {
+        match self {
+            Expression::Term(x) => x.comptime(),
+            Expression::Unary(_, _, x) => x,
+            Expression::Binary(_, _, _, x) => x,
+            Expression::Ternary(_, _, _, x) => x,
+            Expression::Concatenation(_, x) => x,
+            Expression::ArrayLiteral(_, x) => x,
+            Expression::StructConstructor(_, _, x) => x,
+        }
+    }
+
+    pub fn comptime_mut(&mut self) -> &mut Comptime {
+        match self {
+            Expression::Term(x) => x.comptime_mut(),
+            Expression::Unary(_, _, x) => x,
+            Expression::Binary(_, _, _, x) => x,
+            Expression::Ternary(_, _, _, x) => x,
+            Expression::Concatenation(_, x) => x,
+            Expression::ArrayLiteral(_, x) => x,
+            Expression::StructConstructor(_, _, x) => x,
+        }
+    }
+
+    pub fn token_range(&self) -> TokenRange {
+        match self {
+            Expression::Term(x) => x.token_range(),
+            Expression::Unary(_, _, x) => x.token,
+            Expression::Binary(_, _, _, x) => x.token,
+            Expression::Ternary(_, _, _, x) => x.token,
+            Expression::Concatenation(_, x) => x.token,
+            Expression::ArrayLiteral(_, x) => x.token,
+            Expression::StructConstructor(_, _, x) => x.token,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Factor {
+    Variable(VarId, VarIndex, VarSelect, Comptime),
+    /// Read-only reference to a variable inside a child module instance
+    /// (e.g. `dut.u_core.pc` in a testbench initial block). Resolved to a
+    /// concrete buffer offset by the simulator after elaboration.
+    HierVariable(Box<HierVarRef>),
+    Value(Comptime),
+    SystemFunctionCall(SystemFunctionCall),
+    FunctionCall(FunctionCall),
+    Anonymous(Comptime),
+    Unknown(Comptime),
+}
+
+#[derive(Clone, Debug)]
+pub struct HierVarRef {
+    /// Instance names from the referencing module down to the target module.
+    pub inst_path: Vec<StrId>,
+    /// Variable path within the target module.
+    pub var_path: VarPath,
+    pub index: VarIndex,
+    pub select: VarSelect,
+    pub comptime: Comptime,
+}
+
+impl Factor {
+    pub fn create_value(value: Value, token: TokenRange) -> Self {
+        let comptime = Comptime::create_value(value, token);
+        Factor::Value(comptime)
+    }
+
+    pub fn from_component_symbol(symbol: &Symbol, token: TokenRange) -> Self {
+        let sig = Arc::new(Signature::new(symbol.id));
+        let kind = match &symbol.kind {
+            SymbolKind::Module(_) | SymbolKind::AliasModule(_) => TypeKind::Module(sig.clone()),
+            SymbolKind::Interface(_) | SymbolKind::AliasInterface(_) => {
+                TypeKind::Interface(sig.clone())
+            }
+            SymbolKind::Package(_) | SymbolKind::AliasPackage(_) => TypeKind::Package(sig.clone()),
+            _ => unreachable!(),
+        };
+        let r#type = Type::new(kind);
+
+        let mut comptime = Comptime::from_type(r#type, ClockDomain::None, token);
+        comptime.is_const = true;
+        comptime.is_global = true;
+
+        Factor::Value(comptime)
+    }
+
+    pub fn is_assignable(&self) -> bool {
+        match self {
+            // SystemVerilog member is interpreted as Factor::Value, but it may be assignable.
+            Factor::Value(x) => x.r#type.is_systemverilog(),
+            Factor::FunctionCall(_) | Factor::SystemFunctionCall(_) => false,
+            _ => true,
+        }
+    }
+
+    pub fn gather_context(&mut self, context: &mut Context) -> ExpressionContext {
+        match self {
+            Factor::Variable(_, index, select, comptime) => {
+                // Array dimensions are already drained at Factor construction time
+                // (in VarPathSelect::to_expression and eval_factor).
+
+                if !comptime.evaluated {
+                    // Struct/Union/Enum should be treated as flatten bit/logic when it is bit-selected
+                    if !select.is_empty() {
+                        comptime.r#type.flatten_struct_union_enum();
+                    }
+
+                    // Skip on empty select to preserve parametric `width_expr`.
+                    if !select.is_empty()
+                        && let Some(width) = select.eval_comptime(context, &comptime.r#type, false)
+                    {
+                        comptime.r#type.set_concrete_width(width);
+                    }
+
+                    // A select/index expression is a data-dependent read: an
+                    // 'a-domain index into 'b-domain data is a real CDC, so
+                    // check + merge each index/select domain into the factor.
+                    let select_exprs = select
+                        .0
+                        .iter_mut()
+                        .chain(select.1.as_mut().map(|(_, expr)| expr));
+                    for expr in index.0.iter_mut().chain(select_exprs) {
+                        let x = expr.eval_comptime(context, None);
+                        check_clock_domain(context, comptime, x, &comptime.token.beg);
+                        comptime.clock_domain = comptime.clock_domain.merge(&x.clock_domain);
+                    }
+                }
+
+                ExpressionContext {
+                    width: comptime.r#type.total_width().unwrap_or(0),
+                    signed: comptime.r#type.signed,
+                    is_const: comptime.is_const,
+                    is_global: comptime.is_global,
+                }
+            }
+            // Select width is already applied to the comptime type at
+            // construction (eval_factor_path); no CDC check because the
+            // testbench observes across domains by design.
+            Factor::HierVariable(x) => ExpressionContext {
+                width: x.comptime.r#type.total_width().unwrap_or(0),
+                signed: x.comptime.r#type.signed,
+                is_const: false,
+                is_global: false,
+            },
+            Factor::Value(x) => ExpressionContext {
+                width: x.r#type.total_width().unwrap_or(0),
+                signed: x.r#type.signed,
+                is_const: x.is_const,
+                is_global: x.is_global,
+            },
+            Factor::FunctionCall(x) => {
+                x.eval_type(context);
+                ExpressionContext {
+                    width: x.comptime.r#type.total_width().unwrap_or(0),
+                    signed: x.comptime.r#type.signed,
+                    is_const: x.comptime.is_const,
+                    is_global: x.comptime.is_global,
+                }
+            }
+            Factor::SystemFunctionCall(x) => ExpressionContext {
+                width: x.comptime.r#type.total_width().unwrap_or(0),
+                signed: x.comptime.expr_context.signed,
+                is_const: x.comptime.is_const,
+                is_global: x.comptime.is_global,
+            },
+            Factor::Anonymous(_) | Factor::Unknown(_) => ExpressionContext::default(),
+        }
+    }
+
+    pub fn apply_context(&mut self, expr_context: ExpressionContext) {
+        match self {
+            Factor::Variable(_, _, _, x) => {
+                x.expr_context = expr_context;
+                x.evaluated = true;
+            }
+            Factor::HierVariable(x) => {
+                x.comptime.expr_context = expr_context;
+                x.comptime.evaluated = true;
+            }
+            Factor::Value(x) => {
+                x.expr_context = expr_context;
+                x.evaluated = true;
+            }
+            Factor::SystemFunctionCall(x) => {
+                // Preserve the signed flag set by $signed / $unsigned:
+                // the outer-propagated expr_context must not clobber the
+                // explicit cast intent.
+                let preserve_signed = matches!(
+                    x.kind,
+                    SystemFunctionKind::Signed(_) | SystemFunctionKind::Unsigned(_)
+                );
+                let kept = x.comptime.expr_context.signed;
+                x.comptime.expr_context = expr_context;
+                if preserve_signed {
+                    x.comptime.expr_context.signed = kept;
+                }
+                x.comptime.evaluated = true;
+            }
+            Factor::FunctionCall(x) => {
+                x.comptime.expr_context = expr_context;
+                x.comptime.evaluated = true;
+            }
+            Factor::Anonymous(x) => {
+                x.expr_context = expr_context;
+                x.evaluated = true
+            }
+            Factor::Unknown(x) => {
+                x.expr_context = expr_context;
+                x.evaluated = true;
+            }
+        }
+    }
+
+    /// Token range when this factor is an unbased unsized literal
+    /// (`'0`/`'1`/`'x`/`'z`): a width-0 Numeric of Bit/Logic kind. The
+    /// Bit/Logic guard excludes an empty string `""` (also width-0 Numeric,
+    /// but `TypeKind::String`).
+    pub fn unbased_unsized_literal_token(&self) -> Option<&TokenRange> {
+        match self {
+            Factor::Value(comptime) => match &comptime.value {
+                ValueVariant::Numeric(v)
+                    if v.width() == 0
+                        && matches!(comptime.r#type.kind, TypeKind::Bit | TypeKind::Logic) =>
+                {
+                    Some(&comptime.token)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Detected by token text (digits/underscores only), since base-less-ness
+    /// is not preserved on the folded type.
+    pub fn baseless_literal_token(&self) -> Option<&TokenRange> {
+        match self {
+            Factor::Value(comptime) => match &comptime.value {
+                ValueVariant::Numeric(v) if v.width() != 0 => {
+                    let text = comptime.token.beg.to_string();
+                    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit() || c == '_') {
+                        Some(&comptime.token)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn eval_value(&self, context: &mut Context) -> Option<Value> {
+        match self {
+            Factor::Variable(id, index, select, comptime) => {
+                let idx = index.eval_value(context)?;
+                let (value, r#type) = if let Some(variable) = context.variables.get(id) {
+                    (variable.get_value(&idx)?.clone(), variable.r#type.clone())
+                } else if index.0.is_empty() && select.is_empty() && comptime.is_const {
+                    // Const/param scalar refs keep their folded value in comptime;
+                    // use it when the Context has no variable table — synth's
+                    // `try_constant` runs tableless, so `2 ** (AW - 2)` folds here
+                    // instead of reaching synth as an unsupported Pow node.
+                    return comptime.get_value().ok().cloned();
+                } else {
+                    return None;
+                };
+
+                if !select.is_empty() {
+                    // The select indexes into the variable's own layout, not
+                    // into `comptime.r#type`, whose width dimensions
+                    // `gather_context` has already replaced by the selected
+                    // width (mirrors `eval_assign` / `gather_ff`).
+                    let (beg, end) = select.eval_value(context, &r#type, false)?;
+                    Some(value.select(beg, end))
+                } else {
+                    Some(value)
+                }
+            }
+            Factor::HierVariable(_) => None,
+            Factor::Value(x) => x.get_value().ok().cloned(),
+            Factor::SystemFunctionCall(x) => x.eval_value(context),
+            Factor::FunctionCall(x) => x.eval_value(context),
+            Factor::Anonymous(_) => None,
+            Factor::Unknown(_) => None,
+        }
+    }
+
+    pub fn eval_assign(
+        &self,
+        context: &mut Context,
+        assign_table: &mut AssignTable,
+        assign_context: AssignContext,
+    ) {
+        match self {
+            Factor::Variable(id, index, select, _) => {
+                // `insert_reference` bails out on arrays over `array_limit`;
+                // short-circuit to avoid cloning the full Variable (value
+                // vec scales with array size).
+                let total_array = context
+                    .variables
+                    .get(id)
+                    .map(|v| v.r#type.total_array().unwrap_or(0))
+                    .unwrap_or(0);
+                if total_array > assign_table.array_limit {
+                    return;
+                }
+                if let Some(index) = index.eval_value(context)
+                    && let Some(variable) = context.variables.get(id).cloned()
+                    && let Some((beg, end)) = select.eval_value(context, &variable.r#type, false)
+                {
+                    let mask = ValueBigUint::gen_mask_range(beg, end);
+                    assign_table.insert_reference(&variable, index, mask);
+                }
+            }
+            Factor::FunctionCall(x) => {
+                x.eval_assign(context, assign_table, assign_context);
+            }
+            Factor::SystemFunctionCall(x) => {
+                x.eval_assign(context, assign_table, assign_context);
+            }
+            _ => (),
+        }
+    }
+
+    pub fn gather_ff(
+        &self,
+        context: &mut Context,
+        table: &mut FfTable,
+        decl: usize,
+        assign_target: Option<&AssignTarget>,
+        from_ff: bool,
+    ) {
+        match self {
+            Factor::Variable(id, index, select, _) => {
+                if let Some(variable) = context.get_variable_info(*id) {
+                    let src_read_mask = if let Some((beg, end)) =
+                        select.eval_value(context, &variable.r#type, false)
+                    {
+                        ValueBigUint::gen_mask_range(beg, end)
+                    } else if let Some(width) = variable.total_width() {
+                        ValueBigUint::gen_mask(width)
+                    } else {
+                        crate::BigUint::default()
+                    };
+                    if let Some(index) = index.eval_value(context) {
+                        if let Some(index) = variable.r#type.array.calc_index(&index) {
+                            table.insert_refered(
+                                *id,
+                                index,
+                                decl,
+                                assign_target.cloned(),
+                                src_read_mask,
+                                from_ff,
+                            );
+                        }
+                    } else if let Some(total_array) = variable.r#type.total_array() {
+                        for i in 0..total_array {
+                            table.insert_refered(
+                                *id,
+                                i,
+                                decl,
+                                assign_target.cloned(),
+                                src_read_mask.clone(),
+                                from_ff,
+                            );
+                        }
+                    }
+                }
+            }
+            Factor::FunctionCall(x) => {
+                x.gather_ff(context, table, decl, assign_target, from_ff);
+            }
+            _ => (),
+        }
+    }
+
+    pub fn set_index(&mut self, index: &VarIndex) {
+        match self {
+            Factor::Variable(_, i, _, _) => {
+                *i = index.clone();
+            }
+            Factor::FunctionCall(x) => {
+                x.set_index(index);
+            }
+            _ => (),
+        }
+    }
+
+    pub fn comptime(&self) -> &Comptime {
+        match self {
+            Factor::Variable(_, _, _, x) => x,
+            Factor::HierVariable(x) => &x.comptime,
+            Factor::Value(x) => x,
+            Factor::SystemFunctionCall(x) => &x.comptime,
+            Factor::FunctionCall(x) => &x.comptime,
+            Factor::Anonymous(x) => x,
+            Factor::Unknown(x) => x,
+        }
+    }
+
+    pub fn comptime_mut(&mut self) -> &mut Comptime {
+        match self {
+            Factor::Variable(_, _, _, x) => x,
+            Factor::HierVariable(x) => &mut x.comptime,
+            Factor::Value(x) => x,
+            Factor::SystemFunctionCall(x) => &mut x.comptime,
+            Factor::FunctionCall(x) => &mut x.comptime,
+            Factor::Anonymous(x) => x,
+            Factor::Unknown(x) => x,
+        }
+    }
+
+    pub fn token_range(&self) -> TokenRange {
+        match self {
+            Factor::Variable(_, _, _, x) => x.token,
+            Factor::HierVariable(x) => x.comptime.token,
+            Factor::Value(x) => x.token,
+            Factor::SystemFunctionCall(x) => x.comptime.token,
+            Factor::FunctionCall(x) => x.comptime.token,
+            Factor::Anonymous(x) => x.token,
+            Factor::Unknown(x) => x.token,
+        }
+    }
+}
+
+impl fmt::Display for Factor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ret = match self {
+            Factor::Variable(id, index, select, _) => {
+                format!("{id}{index}{select}")
+            }
+            Factor::HierVariable(x) => {
+                let mut s = String::new();
+                for seg in &x.inst_path {
+                    s.push_str(&format!("{seg}."));
+                }
+                format!("{s}{}{}{}", x.var_path, x.index, x.select)
+            }
+            Factor::Value(x) => {
+                if let Ok(x) = x.get_value() {
+                    format!("{:x}", x)
+                } else {
+                    String::from("unknown")
+                }
+            }
+            Factor::SystemFunctionCall(x) => x.to_string(),
+            Factor::FunctionCall(x) => x.to_string(),
+            Factor::Anonymous(_) => String::from("_"),
+            Factor::Unknown(_) => String::from("unknown"),
+        };
+
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ArrayLiteralItem {
+    Value(Box<Expression>, Option<Box<Expression>>),
+    Defaul(Box<Expression>),
+}
+
+impl ArrayLiteralItem {
+    pub fn token_range(&self) -> TokenRange {
+        match self {
+            ArrayLiteralItem::Value(x, y) => {
+                let beg = x.token_range();
+                let mut end = if let Some(y) = y {
+                    y.token_range()
+                } else {
+                    beg
+                };
+                end.set_beg(beg);
+                end
+            }
+            ArrayLiteralItem::Defaul(x) => x.token_range(),
+        }
+    }
+
+    pub fn is_const(&self) -> bool {
+        match self {
+            ArrayLiteralItem::Value(x, y) => {
+                let mut ret = x.comptime().is_const;
+                if let Some(y) = y {
+                    ret &= y.comptime().is_const;
+                }
+                ret
+            }
+            ArrayLiteralItem::Defaul(x) => x.comptime().is_const,
+        }
+    }
+
+    pub fn is_global(&self) -> bool {
+        match self {
+            ArrayLiteralItem::Value(x, y) => {
+                let mut ret = x.comptime().is_global;
+                if let Some(y) = y {
+                    ret &= y.comptime().is_global;
+                }
+                ret
+            }
+            ArrayLiteralItem::Defaul(x) => x.comptime().is_global,
+        }
+    }
+}
+
+impl fmt::Display for ArrayLiteralItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let ret = match self {
+            ArrayLiteralItem::Value(x, y) => {
+                if let Some(y) = y {
+                    format!("{} repeat {}", x, y)
+                } else {
+                    format!("{}", x)
+                }
+            }
+            ArrayLiteralItem::Defaul(x) => {
+                format!("default: {}", x)
+            }
+        };
+
+        ret.fmt(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conv::utils::parse_expression;
+    use crate::conv::{Context, Conv};
+    use crate::ir::{Shape, TypeKind};
+
+    fn calc_expression(s: &str, context_width: Option<usize>) -> Value {
+        let mut context = Context::default();
+        let x = parse_expression(s);
+        let mut x: Expression = Conv::conv(&mut context, &x).unwrap();
+        x.eval_comptime(&mut context, context_width)
+            .get_value()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn reduction_operand_self_determined_repro() {
+        let x0 = calc_expression("&(4'hf | ~4'hf)", None);
+        let x1 = calc_expression("&(4'h0 | ~4'h0)", None);
+        let x2 = calc_expression("&(4'hf | ~4'hf)", Some(32));
+        assert_eq!(format!("{:x}", x0), "1'h1");
+        assert_eq!(format!("{:x}", x1), "1'h1");
+        assert_eq!(format!("{:x}", x2), "32'h00000001");
+    }
+
+    #[test]
+    fn arithmetic() {
+        let x00 = calc_expression("1 + 2", None);
+        let x01 = calc_expression("5 - 1", None);
+        let x02 = calc_expression("2 * 7", None);
+        let x03 = calc_expression("8 / 3", None);
+        let x04 = calc_expression("9 % 4", None);
+        let x05 = calc_expression("2 ** 3", None);
+        let x06 = calc_expression("+5", None);
+        let x07 = calc_expression("-1", None);
+        let x08 = calc_expression("1 << 2", None);
+        let x09 = calc_expression("1 <<< 2", None);
+        let x10 = calc_expression("-8 >> 2", None);
+        let x11 = calc_expression("-8 >>> 2", None);
+
+        assert_eq!(format!("{:x}", x00), "32'sh00000003");
+        assert_eq!(format!("{:x}", x01), "32'sh00000004");
+        assert_eq!(format!("{:x}", x02), "32'sh0000000e");
+        assert_eq!(format!("{:x}", x03), "32'sh00000002");
+        assert_eq!(format!("{:x}", x04), "32'sh00000001");
+        assert_eq!(format!("{:x}", x05), "32'sh00000008");
+        assert_eq!(format!("{:x}", x06), "32'sh00000005");
+        assert_eq!(format!("{:x}", x07), "32'shffffffff");
+        assert_eq!(format!("{:x}", x08), "32'h00000004");
+        assert_eq!(format!("{:x}", x09), "32'sh00000004");
+        assert_eq!(format!("{:x}", x10), "32'h3ffffffe");
+        assert_eq!(format!("{:x}", x11), "32'shfffffffe");
+    }
+
+    #[test]
+    fn relational() {
+        let x0 = calc_expression("1 <: 2", None);
+        let x1 = calc_expression("1 >: 2", None);
+        let x2 = calc_expression("1 <= 2", None);
+        let x3 = calc_expression("1 >= 2", None);
+        let x4 = calc_expression("2 <: 2", None);
+        let x5 = calc_expression("2 >: 2", None);
+        let x6 = calc_expression("2 <= 2", None);
+        let x7 = calc_expression("2 >= 2", None);
+
+        assert_eq!(format!("{:x}", x0), "1'h1");
+        assert_eq!(format!("{:x}", x1), "1'h0");
+        assert_eq!(format!("{:x}", x2), "1'h1");
+        assert_eq!(format!("{:x}", x3), "1'h0");
+        assert_eq!(format!("{:x}", x4), "1'h0");
+        assert_eq!(format!("{:x}", x5), "1'h0");
+        assert_eq!(format!("{:x}", x6), "1'h1");
+        assert_eq!(format!("{:x}", x7), "1'h1");
+    }
+
+    #[test]
+    fn equality() {
+        let x0 = calc_expression("1 == 2", None);
+        let x1 = calc_expression("1 != 2", None);
+        let x2 = calc_expression("2 == 2", None);
+        let x3 = calc_expression("2 != 2", None);
+
+        assert_eq!(format!("{:x}", x0), "1'h0");
+        assert_eq!(format!("{:x}", x1), "1'h1");
+        assert_eq!(format!("{:x}", x2), "1'h1");
+        assert_eq!(format!("{:x}", x3), "1'h0");
+    }
+
+    #[test]
+    fn wildcard_equality() {
+        let x0 = calc_expression("4'b0000 ==? 4'b00xx", None);
+        let x1 = calc_expression("4'b0011 ==? 4'b00xx", None);
+        let x2 = calc_expression("4'b0100 ==? 4'b00xx", None);
+        let x3 = calc_expression("4'b0111 ==? 4'b00xx", None);
+        let x4 = calc_expression("4'b0000 !=? 4'b00xx", None);
+        let x5 = calc_expression("4'b0011 !=? 4'b00xx", None);
+        let x6 = calc_expression("4'b0100 !=? 4'b00xx", None);
+        let x7 = calc_expression("4'b0111 !=? 4'b00xx", None);
+
+        assert_eq!(format!("{:x}", x0), "1'h1");
+        assert_eq!(format!("{:x}", x1), "1'h1");
+        assert_eq!(format!("{:x}", x2), "1'h0");
+        assert_eq!(format!("{:x}", x3), "1'h0");
+        assert_eq!(format!("{:x}", x4), "1'h0");
+        assert_eq!(format!("{:x}", x5), "1'h0");
+        assert_eq!(format!("{:x}", x6), "1'h1");
+        assert_eq!(format!("{:x}", x7), "1'h1");
+    }
+
+    #[test]
+    fn logical() {
+        let x0 = calc_expression("10 && 0", None);
+        let x1 = calc_expression("10 || 0", None);
+        let x2 = calc_expression("!0", None);
+        let x3 = calc_expression("!10", None);
+
+        assert_eq!(format!("{:x}", x0), "1'h0");
+        assert_eq!(format!("{:x}", x1), "1'h1");
+        assert_eq!(format!("{:x}", x2), "1'h1");
+        assert_eq!(format!("{:x}", x3), "1'h0");
+    }
+
+    #[test]
+    fn bitwise() {
+        let x0 = calc_expression("4'b0001  & 4'b0101", None);
+        let x1 = calc_expression("4'b0001  | 4'b0101", None);
+        let x2 = calc_expression("4'b0001  ^ 4'b0101", None);
+        let x3 = calc_expression("4'b0001 ~^ 4'b0101", None);
+        let x4 = calc_expression("~4'b0101", None);
+
+        assert_eq!(format!("{:x}", x0), "4'h1");
+        assert_eq!(format!("{:x}", x1), "4'h5");
+        assert_eq!(format!("{:x}", x2), "4'h4");
+        assert_eq!(format!("{:x}", x3), "4'hb");
+        assert_eq!(format!("{:x}", x4), "4'ha");
+    }
+
+    #[test]
+    fn reduction() {
+        let x00 = calc_expression(" &4'b0000", None);
+        let x01 = calc_expression(" |4'b0000", None);
+        let x02 = calc_expression(" ^4'b0000", None);
+        let x03 = calc_expression("~&4'b0000", None);
+        let x04 = calc_expression("~|4'b0000", None);
+        let x05 = calc_expression("~^4'b0000", None);
+
+        let x06 = calc_expression(" &4'b1111", None);
+        let x07 = calc_expression(" |4'b1111", None);
+        let x08 = calc_expression(" ^4'b1111", None);
+        let x09 = calc_expression("~&4'b1111", None);
+        let x10 = calc_expression("~|4'b1111", None);
+        let x11 = calc_expression("~^4'b1111", None);
+
+        let x12 = calc_expression(" &4'b0110", None);
+        let x13 = calc_expression(" |4'b0110", None);
+        let x14 = calc_expression(" ^4'b0110", None);
+        let x15 = calc_expression("~&4'b0110", None);
+        let x16 = calc_expression("~|4'b0110", None);
+        let x17 = calc_expression("~^4'b0110", None);
+
+        let x18 = calc_expression(" &4'b1000", None);
+        let x19 = calc_expression(" |4'b1000", None);
+        let x20 = calc_expression(" ^4'b1000", None);
+        let x21 = calc_expression("~&4'b1000", None);
+        let x22 = calc_expression("~|4'b1000", None);
+        let x23 = calc_expression("~^4'b1000", None);
+
+        assert_eq!(format!("{:x}", x00), "1'h0");
+        assert_eq!(format!("{:x}", x01), "1'h0");
+        assert_eq!(format!("{:x}", x02), "1'h0");
+        assert_eq!(format!("{:x}", x03), "1'h1");
+        assert_eq!(format!("{:x}", x04), "1'h1");
+        assert_eq!(format!("{:x}", x05), "1'h1");
+
+        assert_eq!(format!("{:x}", x06), "1'h1");
+        assert_eq!(format!("{:x}", x07), "1'h1");
+        assert_eq!(format!("{:x}", x08), "1'h0");
+        assert_eq!(format!("{:x}", x09), "1'h0");
+        assert_eq!(format!("{:x}", x10), "1'h0");
+        assert_eq!(format!("{:x}", x11), "1'h1");
+
+        assert_eq!(format!("{:x}", x12), "1'h0");
+        assert_eq!(format!("{:x}", x13), "1'h1");
+        assert_eq!(format!("{:x}", x14), "1'h0");
+        assert_eq!(format!("{:x}", x15), "1'h1");
+        assert_eq!(format!("{:x}", x16), "1'h0");
+        assert_eq!(format!("{:x}", x17), "1'h1");
+
+        assert_eq!(format!("{:x}", x18), "1'h0");
+        assert_eq!(format!("{:x}", x19), "1'h1");
+        assert_eq!(format!("{:x}", x20), "1'h1");
+        assert_eq!(format!("{:x}", x21), "1'h1");
+        assert_eq!(format!("{:x}", x22), "1'h0");
+        assert_eq!(format!("{:x}", x23), "1'h0");
+    }
+
+    #[test]
+    fn conditional() {
+        let x0 = calc_expression("if 0 ? 1 : 2", None);
+        let x1 = calc_expression("if 1 ? 1 : 2", None);
+
+        assert_eq!(format!("{:x}", x0), "32'sh00000002");
+        assert_eq!(format!("{:x}", x1), "32'sh00000001");
+    }
+
+    #[test]
+    fn concatenation() {
+        let x0 = calc_expression("{4'h1, 4'h3}", None);
+        let x1 = calc_expression("{4'h1 repeat 3, 4'h3}", None);
+
+        assert_eq!(format!("{:x}", x0), "8'h13");
+        assert_eq!(format!("{:x}", x1), "16'h1113");
+    }
+
+    #[test]
+    fn inside_outside() {
+        let x0 = calc_expression("inside 1 {1, 2}", None);
+        let x1 = calc_expression("inside 0 {1, 2}", None);
+        let x2 = calc_expression("inside 5 {3, 2..=10}", None);
+        let x3 = calc_expression("inside 1 {3, 2..=10}", None);
+        let x4 = calc_expression("outside 1 {1, 2}", None);
+        let x5 = calc_expression("outside 0 {1, 2}", None);
+        let x6 = calc_expression("outside 5 {3, 2..=10}", None);
+        let x7 = calc_expression("outside 1 {3, 2..=10}", None);
+
+        assert_eq!(format!("{:x}", x0), "1'h1");
+        assert_eq!(format!("{:x}", x1), "1'h0");
+        assert_eq!(format!("{:x}", x2), "1'h1");
+        assert_eq!(format!("{:x}", x3), "1'h0");
+        assert_eq!(format!("{:x}", x4), "1'h0");
+        assert_eq!(format!("{:x}", x5), "1'h1");
+        assert_eq!(format!("{:x}", x6), "1'h0");
+        assert_eq!(format!("{:x}", x7), "1'h1");
+    }
+
+    #[test]
+    fn mixed_int_float_pow() {
+        let x0 = calc_expression("2 ** (41 as f64)", None);
+        let x1 = calc_expression("2 ** ((48 - 7) as f64)", None);
+
+        let expected = 2.0_f64.powf(41.0).to_bits();
+        assert_eq!(x0.to_u64(), Some(expected), "2 ** (41 as f64)");
+        assert_eq!(x1.to_u64(), Some(expected), "2 ** ((48-7) as f64)");
+    }
+
+    #[test]
+    fn context_width() {
+        let x0 = calc_expression("(2'd0 - 2'd1) == 3'd7", None);
+
+        assert_eq!(format!("{:x}", x0), "1'h1");
+    }
+
+    fn bit(width: usize) -> Box<Expression> {
+        let mut t = Type::new(TypeKind::Bit);
+        t.set_concrete_width(Shape::new(vec![Some(width)]));
+        let ret = Comptime {
+            value: ValueVariant::Unknown,
+            r#type: t,
+            ..Default::default()
+        };
+        Box::new(Expression::Term(Box::new(Factor::Value(ret))))
+    }
+
+    fn logic(width: usize) -> Box<Expression> {
+        let mut t = Type::new(TypeKind::Logic);
+        t.set_concrete_width(Shape::new(vec![Some(width)]));
+        let ret = Comptime {
+            value: ValueVariant::Unknown,
+            r#type: t,
+            ..Default::default()
+        };
+        Box::new(Expression::Term(Box::new(Factor::Value(ret))))
+    }
+
+    fn signed_bit(width: usize) -> Box<Expression> {
+        let mut t = Type::new(TypeKind::Bit);
+        t.set_concrete_width(Shape::new(vec![Some(width)]));
+        t.signed = true;
+        let ret = Comptime {
+            value: ValueVariant::Unknown,
+            r#type: t,
+            ..Default::default()
+        };
+        Box::new(Expression::Term(Box::new(Factor::Value(ret))))
+    }
+
+    fn signed_logic(width: usize) -> Box<Expression> {
+        let mut t = Type::new(TypeKind::Logic);
+        t.set_concrete_width(Shape::new(vec![Some(width)]));
+        t.signed = true;
+        let ret = Comptime {
+            value: ValueVariant::Unknown,
+            r#type: t,
+            ..Default::default()
+        };
+        Box::new(Expression::Term(Box::new(Factor::Value(ret))))
+    }
+
+    fn value(value: usize) -> Box<Expression> {
+        let mut t = Type::new(TypeKind::Logic);
+        t.set_concrete_width(Shape::new(vec![Some(32)]));
+        let ret = Comptime {
+            value: ValueVariant::Numeric(Value::new(value as u64, 32, false)),
+            r#type: t,
+            is_const: true,
+            is_global: true,
+            ..Default::default()
+        };
+        Box::new(Expression::Term(Box::new(Factor::Value(ret))))
+    }
+
+    fn eval_comptime_unary(context: &mut Context, op: Op, x: Box<Expression>) -> Comptime {
+        let comptime = Box::new(Comptime::create_unknown(TokenRange::default()));
+        let mut ret = Expression::Unary(op, x, comptime);
+        ret.eval_comptime(context, None).clone()
+    }
+
+    fn eval_comptime_binary(
+        context: &mut Context,
+        x: Box<Expression>,
+        op: Op,
+        y: Box<Expression>,
+    ) -> Comptime {
+        let comptime = Box::new(Comptime::create_unknown(TokenRange::default()));
+        let mut ret = Expression::Binary(x, op, y, comptime);
+        ret.eval_comptime(context, None).clone()
+    }
+
+    fn eval_comptime_ternary(
+        context: &mut Context,
+        x: Box<Expression>,
+        y: Box<Expression>,
+        z: Box<Expression>,
+    ) -> Comptime {
+        let comptime = Box::new(Comptime::create_unknown(TokenRange::default()));
+        let mut ret = Expression::Ternary(x, y, z, comptime);
+        ret.eval_comptime(context, None).clone()
+    }
+
+    fn eval_comptime_concat(
+        context: &mut Context,
+        x: Vec<(Expression, Option<Expression>)>,
+    ) -> Comptime {
+        let comptime = Box::new(Comptime::create_unknown(TokenRange::default()));
+        let mut ret = Expression::Concatenation(x, comptime);
+        ret.eval_comptime(context, None).clone()
+    }
+
+    #[test]
+    fn unary_type() {
+        let mut context = Context::default();
+
+        let x0 = eval_comptime_unary(&mut context, Op::BitAnd, bit(3));
+        let x1 = eval_comptime_unary(&mut context, Op::BitAnd, logic(4));
+        let x2 = eval_comptime_unary(&mut context, Op::BitNot, bit(3));
+        let x3 = eval_comptime_unary(&mut context, Op::BitNot, logic(4));
+        let x4 = eval_comptime_unary(&mut context, Op::LogicNot, bit(1));
+        let x5 = eval_comptime_unary(&mut context, Op::LogicNot, logic(1));
+        let x6 = eval_comptime_unary(&mut context, Op::Add, bit(3));
+        let x7 = eval_comptime_unary(&mut context, Op::Add, logic(4));
+
+        let errors = context.drain_errors();
+        assert!(errors.is_empty());
+
+        assert_eq!(format!("{}", x0.r#type), "bit<1>");
+        assert_eq!(format!("{}", x1.r#type), "logic<1>");
+        assert_eq!(format!("{}", x2.r#type), "bit<3>");
+        assert_eq!(format!("{}", x3.r#type), "logic<4>");
+        assert_eq!(format!("{}", x4.r#type), "bit<1>");
+        assert_eq!(format!("{}", x5.r#type), "logic<1>");
+        assert_eq!(format!("{}", x6.r#type), "bit<3>");
+        assert_eq!(format!("{}", x7.r#type), "logic<4>");
+    }
+
+    #[test]
+    fn binary_type() {
+        let mut context = Context::default();
+
+        let x00 = eval_comptime_binary(&mut context, bit(4), Op::Add, bit(3));
+        let x01 = eval_comptime_binary(&mut context, bit(4), Op::Add, logic(3));
+        let x02 = eval_comptime_binary(&mut context, logic(4), Op::Add, logic(3));
+        let x03 = eval_comptime_binary(&mut context, bit(4), Op::Eq, bit(3));
+        let x04 = eval_comptime_binary(&mut context, bit(4), Op::Eq, logic(3));
+        let x05 = eval_comptime_binary(&mut context, logic(4), Op::Eq, logic(3));
+        let x06 = eval_comptime_binary(&mut context, bit(1), Op::LogicAnd, bit(1));
+        let x07 = eval_comptime_binary(&mut context, bit(1), Op::LogicAnd, logic(1));
+        let x08 = eval_comptime_binary(&mut context, logic(1), Op::LogicAnd, logic(1));
+        let x09 = eval_comptime_binary(&mut context, signed_bit(4), Op::ArithShiftL, bit(3));
+        let x10 = eval_comptime_binary(&mut context, signed_bit(4), Op::ArithShiftL, logic(3));
+        let x11 = eval_comptime_binary(&mut context, signed_logic(4), Op::ArithShiftL, logic(3));
+
+        let errors = context.drain_errors();
+        assert!(errors.is_empty());
+
+        assert_eq!(format!("{}", x00.r#type), "bit<4>");
+        assert_eq!(format!("{}", x01.r#type), "logic<4>");
+        assert_eq!(format!("{}", x02.r#type), "logic<4>");
+        assert_eq!(format!("{}", x03.r#type), "bit<1>");
+        assert_eq!(format!("{}", x04.r#type), "logic<1>");
+        assert_eq!(format!("{}", x05.r#type), "logic<1>");
+        assert_eq!(format!("{}", x06.r#type), "bit<1>");
+        assert_eq!(format!("{}", x07.r#type), "logic<1>");
+        assert_eq!(format!("{}", x08.r#type), "logic<1>");
+        assert_eq!(format!("{}", x09.r#type), "signed bit<4>");
+        assert_eq!(format!("{}", x10.r#type), "signed bit<4>");
+        assert_eq!(format!("{}", x11.r#type), "signed logic<4>");
+    }
+
+    #[test]
+    fn ternary_type() {
+        let mut context = Context::default();
+
+        let x0 = eval_comptime_ternary(&mut context, bit(1), bit(4), bit(3));
+        let x1 = eval_comptime_ternary(&mut context, bit(1), bit(4), logic(3));
+        let x2 = eval_comptime_ternary(&mut context, bit(1), logic(4), bit(3));
+        let x3 = eval_comptime_ternary(&mut context, bit(1), logic(4), logic(3));
+        let x4 = eval_comptime_ternary(&mut context, logic(1), bit(4), bit(3));
+        let x5 = eval_comptime_ternary(&mut context, logic(1), bit(4), logic(3));
+        let x6 = eval_comptime_ternary(&mut context, logic(1), logic(4), bit(3));
+        let x7 = eval_comptime_ternary(&mut context, logic(1), logic(4), logic(3));
+
+        let errors = context.drain_errors();
+        assert!(errors.is_empty());
+
+        assert_eq!(format!("{}", x0.r#type), "bit<4>");
+        assert_eq!(format!("{}", x1.r#type), "logic<4>");
+        assert_eq!(format!("{}", x2.r#type), "logic<4>");
+        assert_eq!(format!("{}", x3.r#type), "logic<4>");
+        assert_eq!(format!("{}", x4.r#type), "bit<4>");
+        assert_eq!(format!("{}", x5.r#type), "logic<4>");
+        assert_eq!(format!("{}", x6.r#type), "logic<4>");
+        assert_eq!(format!("{}", x7.r#type), "logic<4>");
+    }
+
+    #[test]
+    fn concat_type() {
+        let mut context = Context::default();
+
+        let x0 = eval_comptime_concat(
+            &mut context,
+            vec![(*bit(1), None), (*bit(4), None), (*bit(3), None)],
+        );
+        let x1 = eval_comptime_concat(
+            &mut context,
+            vec![(*bit(1), None), (*logic(4), None), (*bit(3), None)],
+        );
+        let x2 = eval_comptime_concat(
+            &mut context,
+            vec![(*logic(1), None), (*logic(4), None), (*logic(3), None)],
+        );
+        let x3 = eval_comptime_concat(
+            &mut context,
+            vec![(*bit(1), Some(*value(2))), (*bit(4), None), (*bit(3), None)],
+        );
+        let x4 = eval_comptime_concat(
+            &mut context,
+            vec![
+                (*bit(1), None),
+                (*logic(4), Some(*value(2))),
+                (*bit(3), None),
+            ],
+        );
+        let x5 = eval_comptime_concat(
+            &mut context,
+            vec![
+                (*logic(1), None),
+                (*logic(4), None),
+                (*logic(3), Some(*value(3))),
+            ],
+        );
+
+        let errors = context.drain_errors();
+        assert!(errors.is_empty());
+
+        assert_eq!(format!("{}", x0.r#type), "bit<8>");
+        assert_eq!(format!("{}", x1.r#type), "logic<8>");
+        assert_eq!(format!("{}", x2.r#type), "logic<8>");
+        assert_eq!(format!("{}", x3.r#type), "bit<9>");
+        assert_eq!(format!("{}", x4.r#type), "logic<12>");
+        assert_eq!(format!("{}", x5.r#type), "logic<14>");
+    }
+}

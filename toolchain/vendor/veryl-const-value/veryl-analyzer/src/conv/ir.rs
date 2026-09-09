@@ -1,0 +1,670 @@
+use crate::conv::checker::alias::{AliasType, check_alias_target};
+use crate::conv::checker::clock_domain::check_clock_domain;
+use crate::conv::checker::generic::check_generic_bound;
+use crate::conv::checker::proto::check_proto;
+use crate::conv::utils::{check_module_with_unevaluable_generic_parameters, get_component};
+use crate::conv::{Affiliation, Context, Conv};
+use crate::ir::{self, IrResult, VarKind, VarPath, Variable};
+use crate::symbol::SymbolKind;
+use crate::symbol_table;
+use crate::{HashMap, ir_error};
+use veryl_parser::token_range::TokenRange;
+use veryl_parser::veryl_grammar_trait::*;
+
+/// Memo key for a top-level component's direct conversion, or `None` when
+/// sharing must not apply: a non-`veryl test` run (instantiation clears bodies)
+/// or a generic template.
+fn top_level_memo_sig(context: &Context, identifier: &Identifier) -> Option<ir::Signature> {
+    if context.config.retain_component_body && !context.in_generic {
+        symbol_table::resolve(identifier).ok().map(|s| {
+            let mut sig = ir::Signature::new(s.found.id);
+            sig.normalize();
+            sig
+        })
+    } else {
+        None
+    }
+}
+
+impl Conv<&Veryl> for ir::Ir {
+    fn conv(context: &mut Context, value: &Veryl) -> IrResult<Self> {
+        let mut components = vec![];
+
+        for x in &value.veryl_list {
+            // Dependency testbenches are skipped in pass1, so their symbols
+            // don't exist here; exclude them from conversion as well.
+            let items: Vec<&DescriptionItem> = if context.in_dependency {
+                crate::attribute::description_items_excluding_tests(&x.description_group)
+            } else {
+                x.description_group.as_ref().into()
+            };
+            for item in &items {
+                // ignore IrError of generic top-level components
+                let in_generic = context.in_generic;
+                if item.is_generic() {
+                    context.in_generic = true;
+                }
+
+                match item {
+                    DescriptionItem::DescriptionItemOptPublicDescriptionItem(x) => {
+                        match x.public_description_item.as_ref() {
+                            PublicDescriptionItem::ModuleDeclaration(x) => {
+                                let decl = x.module_declaration.as_ref();
+                                if let Some(sig) =
+                                    top_level_memo_sig(context, decl.identifier.as_ref())
+                                {
+                                    let token: TokenRange = decl.identifier.as_ref().into();
+                                    if let Ok(component) = get_component(context, &sig, token)
+                                        && let ir::Component::Module(m) = component.as_ref()
+                                    {
+                                        let mut component = m.clone();
+                                        if check_module_with_unevaluable_generic_parameters(
+                                            &decl.identifier,
+                                        ) {
+                                            component.suppress_unassigned = true;
+                                        }
+                                        components.push(ir::Component::Module(component));
+                                    }
+                                } else {
+                                    let ret: IrResult<ir::Module> = Conv::conv(context, decl);
+                                    if let Ok(mut component) = ret {
+                                        // suppress unassigned check for modules with unevaluable generic parameters
+                                        if check_module_with_unevaluable_generic_parameters(
+                                            &decl.identifier,
+                                        ) {
+                                            component.suppress_unassigned = true;
+                                        }
+                                        components.push(ir::Component::Module(component));
+                                    }
+                                }
+                            }
+                            PublicDescriptionItem::InterfaceDeclaration(x) => {
+                                let decl = x.interface_declaration.as_ref();
+                                if let Some(sig) =
+                                    top_level_memo_sig(context, decl.identifier.as_ref())
+                                {
+                                    let token: TokenRange = decl.identifier.as_ref().into();
+                                    let _ = get_component(context, &sig, token);
+                                } else {
+                                    let _: IrResult<ir::Interface> = Conv::conv(context, decl);
+                                }
+                            }
+                            PublicDescriptionItem::PackageDeclaration(x) => {
+                                let _: IrResult<()> =
+                                    Conv::conv(context, x.package_declaration.as_ref());
+                            }
+                            PublicDescriptionItem::ProtoDeclaration(x) => {
+                                match x.proto_declaration.proto_declaration_group.as_ref() {
+                                    ProtoDeclarationGroup::ProtoModuleDeclaration(x) => {
+                                        let _: IrResult<ir::Module> = Conv::conv(
+                                            context,
+                                            x.proto_module_declaration.as_ref(),
+                                        );
+                                    }
+                                    ProtoDeclarationGroup::ProtoInterfaceDeclaration(x) => {
+                                        let _: IrResult<()> = Conv::conv(
+                                            context,
+                                            x.proto_interface_declaration.as_ref(),
+                                        );
+                                    }
+                                    ProtoDeclarationGroup::ProtoPackageDeclaration(x) => {
+                                        let _: IrResult<()> = Conv::conv(
+                                            context,
+                                            x.proto_package_declaration.as_ref(),
+                                        );
+                                    }
+                                }
+                            }
+                            PublicDescriptionItem::AliasDeclaration(x) => {
+                                let _: IrResult<()> =
+                                    Conv::conv(context, x.alias_declaration.as_ref());
+                            }
+                            PublicDescriptionItem::FunctionDeclaration(x) => {
+                                conv_global_function(context, x.function_declaration.as_ref());
+                            }
+                        }
+                    }
+                    DescriptionItem::BindDeclaration(x) => {
+                        let _: IrResult<()> = Conv::conv(context, x.bind_declaration.as_ref());
+                    }
+                    DescriptionItem::EmbedDeclaration(x) => {
+                        let _: IrResult<()> = Conv::conv(context, x.embed_declaration.as_ref());
+                    }
+                    DescriptionItem::ImportDeclaration(x) => {
+                        let _: IrResult<ir::DeclarationBlock> =
+                            Conv::conv(context, x.import_declaration.as_ref());
+                    }
+                    _ => (),
+                }
+
+                if item.is_generic() {
+                    context.in_generic = in_generic;
+                }
+            }
+        }
+
+        Ok(ir::Ir { components })
+    }
+}
+
+fn conv_global_function(context: &mut Context, value: &FunctionDeclaration) {
+    let upper_context = context;
+    let mut context = Context::default();
+    context.inherit(upper_context);
+
+    context.in_global_func = Some(value.identifier.identifier_token.token);
+    let _: IrResult<()> = Conv::conv(&mut context, value);
+    context.in_global_func = None;
+
+    upper_context.inherit(&mut context);
+}
+
+fn collect_interface_members(context: &Context) -> HashMap<ir::VarId, Variable> {
+    // Rescanning every port per variable path is quadratic, and a module
+    // without modport ports has no interface members at all.
+    let modport_ports: Vec<(&VarPath, usize)> = context
+        .port_types
+        .iter()
+        .filter(|(_, (r#type, _))| matches!(r#type.kind, ir::TypeKind::Modport(_, _)))
+        .map(|(port, (r#type, _))| (port, r#type.array.dims()))
+        .collect();
+    if modport_ports.is_empty() {
+        return HashMap::default();
+    }
+
+    context
+        .var_paths
+        .iter()
+        .filter_map(|(path, (id, comptime))| {
+            if context.variables.contains_key(id) {
+                return None;
+            }
+            let (port, port_dimensions) = modport_ports
+                .iter()
+                .filter(|(port, _)| path.0.len() > port.0.len() && path.starts_with(&port.0))
+                .max_by_key(|(port, _)| port.0.len())?;
+            let mut variable = Variable::new(
+                *id,
+                path.clone(),
+                VarKind::Variable,
+                comptime.r#type.clone(),
+                vec![],
+                Affiliation::Module,
+                &comptime.token,
+                0,
+            );
+            variable.set_leading_array_path_offset(*port_dimensions, path.0.len() - port.0.len());
+            Some((*id, variable))
+        })
+        .collect()
+}
+
+impl Conv<&ModuleDeclaration> for ir::Module {
+    fn conv(context: &mut Context, value: &ModuleDeclaration) -> IrResult<Self> {
+        Conv::conv(context, (value, false))
+    }
+}
+
+impl Conv<(&ModuleDeclaration, bool)> for ir::Module {
+    fn conv(context: &mut Context, value: (&ModuleDeclaration, bool)) -> IrResult<Self> {
+        let (module_declaration, header_only) = value;
+
+        let mut declarations = vec![];
+
+        // each top-level component has independent context
+        let upper_context = context;
+        let mut context = Context::default();
+        context.inherit(upper_context);
+
+        let _guard = context.conv_profile_guard(module_declaration.identifier.text());
+
+        // pop_affiliation is not necessary because the local `context` will be dropped
+        context.push_affiliation(Affiliation::Module);
+
+        let signature = if let Ok(symbol) =
+            symbol_table::resolve(module_declaration.identifier.as_ref())
+            && let SymbolKind::Module(x) = &symbol.found.kind
+            && !x.is_proto
+        {
+            context.push_namespace(symbol.found.inner_namespace());
+            context.in_test_module = x.test.is_some();
+            if let Some(x) = x.default_clock {
+                let path = VarPath::new(symbol_table::get(x).unwrap().token.text);
+                context.set_default_clock(path, x);
+            }
+            if let Some(x) = x.default_reset {
+                let path = VarPath::new(symbol_table::get(x).unwrap().token.text);
+                context.set_default_reset(path, x);
+            }
+            ir::Signature::new(symbol.found.id)
+        } else {
+            let token: TokenRange = module_declaration.identifier.as_ref().into();
+            return Err(ir_error!(token));
+        };
+
+        if let Some(x) = &module_declaration.module_declaration_opt {
+            check_generic_bound(&mut context, &x.with_generic_parameter);
+            let items: Vec<_> = x
+                .with_generic_parameter
+                .with_generic_parameter_list
+                .as_ref()
+                .into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(&mut context, item);
+            }
+        }
+
+        if let Some(x) = &module_declaration.module_declaration_opt0 {
+            check_proto(
+                &mut context,
+                &module_declaration.identifier,
+                &x.scoped_identifier,
+            );
+        }
+
+        if let Some(x) = &module_declaration.module_declaration_opt1
+            && let Some(x) = &x.with_parameter.with_parameter_opt
+        {
+            let items: Vec<_> = x.with_parameter_list.as_ref().into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(&mut context, item);
+            }
+        }
+
+        if let Some(x) = &module_declaration.module_declaration_opt2
+            && let Some(x) = &x.port_declaration.port_declaration_opt
+        {
+            let items: Vec<_> = x.port_declaration_list.as_ref().into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(&mut context, item);
+            }
+        }
+
+        if !header_only {
+            let mut items = vec![];
+            for x in &module_declaration.module_declaration_list {
+                let group: Vec<_> = x.module_group.as_ref().into();
+                items.extend(group);
+            }
+
+            // Module items are order-free: initial/final bodies consume
+            // state that other declarations register during conversion
+            // (component parameters, elaborated instance components), so
+            // they convert after everything else. The declaration order in
+            // the resulting IR still follows the source.
+            let is_tb_block = |item: &&ModuleItem| {
+                matches!(
+                    item.generate_item.as_ref(),
+                    GenerateItem::InitialDeclaration(_) | GenerateItem::FinalDeclaration(_)
+                )
+            };
+            let mut blocks: Vec<Vec<ir::Declaration>> = Vec::new();
+            blocks.resize_with(items.len(), Vec::new);
+            for deferred in [false, true] {
+                for (i, item) in items.iter().enumerate() {
+                    if is_tb_block(item) != deferred {
+                        continue;
+                    }
+                    let ret: IrResult<ir::DeclarationBlock> =
+                        Conv::conv(&mut context, item.generate_item.as_ref());
+
+                    if let Ok(block) = ret {
+                        blocks[i] = block.0;
+                    }
+                }
+            }
+            for mut block in blocks {
+                declarations.append(&mut block);
+            }
+        }
+
+        // This check must be after default clock/reset are registered in context
+        if let (Some(clock), Some(reset)) =
+            (context.get_default_clock(), context.get_default_reset())
+        {
+            check_clock_domain(
+                &mut context,
+                &clock.0.comptime,
+                &reset.0.comptime,
+                &module_declaration.module.module_token.token,
+            );
+        }
+
+        declarations.retain(|x| !x.is_null());
+        let interface_members = collect_interface_members(&context);
+        let port_types = context.drain_port_types();
+        let variables = context.drain_variables();
+        let functions = context.drain_functions();
+
+        let mut ports = HashMap::default();
+
+        for (id, var) in &variables {
+            if var.kind.is_port() {
+                ports.insert(var.path.clone(), *id);
+            }
+        }
+
+        context.pop_namespace();
+        upper_context.inherit(&mut context);
+
+        Ok(ir::Module {
+            name: module_declaration.identifier.text(),
+            signature,
+            token: module_declaration.identifier.as_ref().into(),
+            ports,
+            port_types,
+            variables,
+            functions,
+            interface_members,
+            declarations,
+            suppress_unassigned: false,
+            per_decl_refs: HashMap::default(),
+            assign_tokens: HashMap::default(),
+            ff_table: ir::FfTable::default(),
+        })
+    }
+}
+
+impl Conv<&InterfaceDeclaration> for () {
+    fn conv(context: &mut Context, value: &InterfaceDeclaration) -> IrResult<Self> {
+        if let Ok(symbol) = symbol_table::resolve(value.identifier.as_ref())
+            && matches!(symbol.found.kind, SymbolKind::Interface(ref x) if !x.is_proto)
+        {
+            context.push_namespace(symbol.found.inner_namespace());
+        } else {
+            let token: TokenRange = value.identifier.as_ref().into();
+            return Err(ir_error!(token));
+        }
+
+        if let Some(x) = &value.interface_declaration_opt {
+            check_generic_bound(context, &x.with_generic_parameter);
+            let items: Vec<_> = x
+                .with_generic_parameter
+                .with_generic_parameter_list
+                .as_ref()
+                .into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(context, item);
+            }
+        }
+
+        if let Some(x) = &value.interface_declaration_opt0 {
+            check_proto(context, &value.identifier, &x.scoped_identifier);
+        }
+
+        if let Some(x) = &value.interface_declaration_opt1
+            && let Some(x) = &x.with_parameter.with_parameter_opt
+        {
+            let items: Vec<_> = x.with_parameter_list.as_ref().into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(context, item);
+            }
+        }
+
+        for x in &value.interface_declaration_list {
+            let items: Vec<_> = x.interface_group.as_ref().into();
+            for item in items {
+                match item {
+                    InterfaceItem::GenerateItem(x) => {
+                        let _: IrResult<ir::DeclarationBlock> =
+                            Conv::conv(context, x.generate_item.as_ref());
+                    }
+                    InterfaceItem::MixinDeclaration(x) => {
+                        let _: IrResult<()> = Conv::conv(context, x.mixin_declaration.as_ref());
+                    }
+                    InterfaceItem::ModportDeclaration(x) => {
+                        let _: IrResult<()> = Conv::conv(context, x.modport_declaration.as_ref());
+                    }
+                }
+            }
+        }
+
+        context.pop_namespace();
+
+        Ok(())
+    }
+}
+
+impl Conv<&InterfaceDeclaration> for ir::Interface {
+    fn conv(context: &mut Context, value: &InterfaceDeclaration) -> IrResult<Self> {
+        // each top-level component has independent context
+        let upper_context = context;
+        let mut context = Context::default();
+        context.inherit(upper_context);
+
+        let _guard = context.conv_profile_guard(value.identifier.text());
+
+        // pop_affiliation is not necessary because the local `context` will be dropped
+        context.push_affiliation(Affiliation::Interface);
+
+        let ret: IrResult<()> = Conv::conv(&mut context, value);
+
+        let var_paths = context.drain_var_paths();
+        let func_paths = context.drain_func_paths();
+        let mut variables = context.drain_variables();
+        let functions = context.drain_functions();
+        let modports = context.drain_modports();
+
+        let variables = variables
+            .extract_if(|_, v| v.affiliation != Affiliation::Function)
+            .collect();
+
+        context.pop_namespace();
+        upper_context.inherit(&mut context);
+
+        ret?;
+
+        Ok(ir::Interface {
+            name: value.identifier.text(),
+            var_paths,
+            func_paths,
+            variables,
+            functions,
+            modports,
+        })
+    }
+}
+
+impl Conv<&PackageDeclaration> for () {
+    fn conv(context: &mut Context, value: &PackageDeclaration) -> IrResult<Self> {
+        // each top-level component has independent context
+        let upper_context = context;
+        let mut context = Context::default();
+        context.inherit(upper_context);
+
+        let _guard = context.conv_profile_guard(value.identifier.text());
+
+        // pop_affiliation is not necessary because the local `context` will be dropped
+        context.push_affiliation(Affiliation::Package);
+
+        if let Ok(symbol) = symbol_table::resolve(value.identifier.as_ref())
+            && matches!(symbol.found.kind, SymbolKind::Package(ref x) if !x.is_proto)
+        {
+            context.push_namespace(symbol.found.inner_namespace());
+        } else {
+            let token: TokenRange = value.identifier.as_ref().into();
+            return Err(ir_error!(token));
+        }
+
+        if let Some(x) = &value.package_declaration_opt {
+            check_generic_bound(&mut context, &x.with_generic_parameter);
+        }
+
+        if let Some(x) = &value.package_declaration_opt0 {
+            check_proto(&mut context, &value.identifier, &x.scoped_identifier);
+        }
+
+        for x in &value.package_declaration_list {
+            let items: Vec<_> = x.package_group.as_ref().into();
+            for item in items {
+                match item {
+                    PackageItem::ConstDeclaration(x) => {
+                        let _: IrResult<ir::Declaration> =
+                            Conv::conv(&mut context, x.const_declaration.as_ref());
+                    }
+                    PackageItem::FunctionDeclaration(x) => {
+                        let _: IrResult<()> =
+                            Conv::conv(&mut context, x.function_declaration.as_ref());
+                    }
+                    PackageItem::StructUnionDeclaration(x) => {
+                        let _: IrResult<()> =
+                            Conv::conv(&mut context, x.struct_union_declaration.as_ref());
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        context.pop_namespace();
+        upper_context.inherit(&mut context);
+
+        Ok(())
+    }
+}
+
+impl Conv<&ProtoModuleDeclaration> for ir::Module {
+    fn conv(context: &mut Context, value: &ProtoModuleDeclaration) -> IrResult<Self> {
+        // each top-level component has independent context
+        let upper_context = context;
+        let mut context = Context::default();
+        context.inherit(upper_context);
+
+        // pop_affiliation is not necessary because the local `context` will be dropped
+        context.push_affiliation(Affiliation::ProtoModule);
+
+        let signature = if let Ok(symbol) = symbol_table::resolve(value.identifier.as_ref())
+            && matches!(symbol.found.kind, SymbolKind::Module(ref x) if x.is_proto)
+        {
+            context.push_namespace(symbol.found.inner_namespace());
+            ir::Signature::new(symbol.found.id)
+        } else {
+            let token: TokenRange = value.identifier.as_ref().into();
+            return Err(ir_error!(token));
+        };
+
+        if let Some(x) = &value.proto_module_declaration_opt
+            && let Some(x) = &x.with_parameter.with_parameter_opt
+        {
+            let items: Vec<_> = x.with_parameter_list.as_ref().into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(&mut context, item);
+            }
+        }
+
+        if let Some(x) = &value.proto_module_declaration_opt0
+            && let Some(x) = &x.port_declaration.port_declaration_opt
+        {
+            let items: Vec<_> = x.port_declaration_list.as_ref().into();
+            for item in items {
+                let _ret: IrResult<()> = Conv::conv(&mut context, item);
+            }
+        }
+
+        let interface_members = collect_interface_members(&context);
+        let port_types = context.drain_port_types();
+        let variables = context.drain_variables();
+
+        let mut ports = HashMap::default();
+
+        for (id, var) in &variables {
+            if var.kind.is_port() {
+                ports.insert(var.path.clone(), *id);
+            }
+        }
+
+        context.pop_namespace();
+        upper_context.inherit(&mut context);
+
+        Ok(ir::Module {
+            name: value.identifier.text(),
+            signature,
+            token: value.identifier.as_ref().into(),
+            ports,
+            port_types,
+            variables,
+            functions: HashMap::default(),
+            interface_members,
+            declarations: vec![],
+            suppress_unassigned: false,
+            per_decl_refs: HashMap::default(),
+            assign_tokens: HashMap::default(),
+            ff_table: ir::FfTable::default(),
+        })
+    }
+}
+
+impl Conv<&ProtoInterfaceDeclaration> for () {
+    fn conv(context: &mut Context, value: &ProtoInterfaceDeclaration) -> IrResult<Self> {
+        context.push_affiliation(Affiliation::ProtoInterface);
+
+        if let Ok(symbol) = symbol_table::resolve(value.identifier.as_ref())
+            && matches!(symbol.found.kind, SymbolKind::Interface(ref x) if x.is_proto)
+        {
+            context.push_namespace(symbol.found.inner_namespace());
+        } else {
+            let token: TokenRange = value.identifier.as_ref().into();
+            return Err(ir_error!(token));
+        }
+
+        for x in &value.proto_interface_declaration_list {
+            if let ProtoInterfaceItem::ProtoAliasDeclaration(x) = x.proto_interface_item.as_ref() {
+                let r#type = match x
+                    .proto_alias_declaration
+                    .proto_alias_declaration_group
+                    .as_ref()
+                {
+                    ProtoAliasDeclarationGroup::Module(_) => AliasType::ProtoModule,
+                    ProtoAliasDeclarationGroup::Interface(_) => AliasType::ProtoInterface,
+                    ProtoAliasDeclarationGroup::Package(_) => AliasType::ProtoPackage,
+                };
+                check_alias_target(
+                    context,
+                    &x.proto_alias_declaration.scoped_identifier,
+                    r#type,
+                );
+            }
+        }
+
+        context.pop_affiliation();
+        context.pop_namespace();
+        Ok(())
+    }
+}
+
+impl Conv<&ProtoPackageDeclaration> for () {
+    fn conv(context: &mut Context, value: &ProtoPackageDeclaration) -> IrResult<Self> {
+        context.push_affiliation(Affiliation::ProtoPackage);
+
+        if let Ok(symbol) = symbol_table::resolve(value.identifier.as_ref())
+            && matches!(symbol.found.kind, SymbolKind::Package(ref x) if x.is_proto)
+        {
+            context.push_namespace(symbol.found.inner_namespace());
+        } else {
+            let token: TokenRange = value.identifier.as_ref().into();
+            return Err(ir_error!(token));
+        }
+
+        for x in &value.proto_package_declaration_list {
+            if let ProtoPacakgeItem::ProtoAliasDeclaration(x) = x.proto_pacakge_item.as_ref() {
+                let r#type = match x
+                    .proto_alias_declaration
+                    .proto_alias_declaration_group
+                    .as_ref()
+                {
+                    ProtoAliasDeclarationGroup::Module(_) => AliasType::ProtoModule,
+                    ProtoAliasDeclarationGroup::Interface(_) => AliasType::ProtoInterface,
+                    ProtoAliasDeclarationGroup::Package(_) => AliasType::ProtoPackage,
+                };
+                check_alias_target(
+                    context,
+                    &x.proto_alias_declaration.scoped_identifier,
+                    r#type,
+                );
+            }
+        }
+
+        context.pop_affiliation();
+        context.pop_namespace();
+        Ok(())
+    }
+}

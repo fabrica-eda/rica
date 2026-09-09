@@ -1,0 +1,3038 @@
+use crate::BigUint;
+use crate::attribute::EnumEncodingItem;
+use crate::conv::Context;
+use crate::conv::utils::{TypePosition, eval_generic_expr, eval_size, eval_type};
+use crate::definition_table::DefinitionId;
+use crate::ir::{self, Shape};
+use crate::literal::Literal;
+use crate::literal_table;
+use crate::namespace::{DefineContext, Namespace};
+use crate::scope::{self, ScopeId};
+use crate::symbol_path::{
+    GenericSymbolPath, GenericSymbolPathKind, SymbolPath, SymbolPathNamespace,
+};
+use crate::symbol_table;
+use crate::value::Value;
+use crate::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use veryl_parser::Stringifier;
+use veryl_parser::resource_table::{self, PathId, StrId};
+use veryl_parser::token_range::TokenRange;
+use veryl_parser::veryl_grammar_trait::{self as syntax_tree, ArrayType};
+use veryl_parser::veryl_token::{Token, VerylToken};
+use veryl_parser::veryl_walker::VerylWalker;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SymbolId(pub usize);
+
+thread_local!(static SYMBOL_ID: RefCell<usize> = const { RefCell::new(0) });
+
+/// IDs start at 1: 0 is reserved as the unresolved-reference sentinel
+/// (the fragment codec relies on this).
+pub fn new_symbol_id() -> SymbolId {
+    SYMBOL_ID.with(|f| {
+        let mut ret = f.borrow_mut();
+        *ret += 1;
+        SymbolId(*ret)
+    })
+}
+
+/// Returns the last issued symbol ID value. Used to delimit per-file ID
+/// windows for fragment caching.
+pub fn peek_symbol_id() -> usize {
+    SYMBOL_ID.with(|f| *f.borrow())
+}
+
+/// Reserves `count` consecutive symbol IDs and returns the value the counter
+/// had before the reservation. The reserved IDs are `base+1..=base+count`.
+pub fn reserve_symbol_ids(count: usize) -> usize {
+    SYMBOL_ID.with(|f| {
+        let mut ret = f.borrow_mut();
+        let base = *ret;
+        *ret += count;
+        base
+    })
+}
+
+/// A single line of a doc comment with its source line number.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocCommentLine {
+    pub text: StrId,
+    pub line: u32,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct DocComment(pub Vec<DocCommentLine>);
+
+impl DocComment {
+    pub fn format(&self, single_line: bool) -> String {
+        let mut ret = String::new();
+        for entry in &self.0 {
+            let t = format!("{}", entry.text);
+            let t = t.trim_start_matches("///");
+            ret.push_str(t);
+            if single_line {
+                break;
+            }
+        }
+        ret
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Extract WaveDrom JSON from doc comment fenced code blocks.
+    pub fn extract_wavedrom(&self) -> Option<String> {
+        self.extract_wavedrom_block(false).map(|block| block.json)
+    }
+
+    /// Extract WaveDrom JSON only from ```wavedrom,test blocks.
+    pub fn extract_wavedrom_test(&self) -> Option<String> {
+        self.extract_wavedrom_block(true).map(|block| block.json)
+    }
+
+    /// Extract a WaveDrom block with full source location info.
+    pub fn extract_wavedrom_block(&self, test_only: bool) -> Option<WavedromBlock> {
+        let mut in_wavedrom = false;
+        let mut json_lines = Vec::new();
+        let mut fence_line = 0u32;
+        let mut end_line = 0u32;
+        let mut content_lines: Vec<(String, u32)> = Vec::new();
+
+        for entry in &self.0 {
+            let text = format!("{}", entry.text);
+            let trimmed = text.trim_start_matches("///").trim();
+            if !in_wavedrom {
+                let is_match = if test_only {
+                    if let Some(rest) = trimmed.strip_prefix("```wavedrom")
+                        && let Some(attrs) = rest.trim().strip_prefix(',')
+                    {
+                        attrs.trim() == "test"
+                    } else {
+                        false
+                    }
+                } else {
+                    trimmed.starts_with("```wavedrom")
+                };
+                if is_match {
+                    in_wavedrom = true;
+                    json_lines.clear();
+                    content_lines.clear();
+                    fence_line = entry.line;
+                }
+            } else if trimmed == "```" {
+                end_line = entry.line;
+                let json = json_lines.join("\n");
+                if !json.trim().is_empty() {
+                    return Some(WavedromBlock {
+                        json,
+                        fence_line,
+                        end_line,
+                        content_lines,
+                    });
+                }
+                in_wavedrom = false;
+            } else {
+                json_lines.push(trimmed.to_string());
+                content_lines.push((trimmed.to_string(), entry.line));
+            }
+        }
+
+        None
+    }
+}
+
+/// Extracted WaveDrom block with source location info.
+#[derive(Debug)]
+pub struct WavedromBlock {
+    pub json: String,
+    pub fence_line: u32,
+    pub end_line: u32,
+    pub content_lines: Vec<(String, u32)>,
+}
+
+impl WavedromBlock {
+    /// Find the source line number of a content line that contains the given text.
+    pub fn find_line_containing(&self, needle: &str) -> Option<u32> {
+        self.content_lines
+            .iter()
+            .find(|(text, _)| text.contains(needle))
+            .map(|(_, line)| *line)
+    }
+}
+
+pub type GenericTable = HashMap<StrId, GenericSymbolPath>;
+/// Generic argument tables keyed by the scope (plus ifdef context) of the
+/// generic instance.
+pub type GenericTables = HashMap<(ScopeId, DefineContext), GenericTable>;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GenericMap {
+    pub id: Option<SymbolId>,
+    pub map: GenericTable,
+}
+
+impl GenericMap {
+    pub fn generic(&self) -> bool {
+        !self.map.is_empty()
+    }
+
+    pub fn name(&self, include_namspace_prefix: bool, hashed_name: bool) -> String {
+        let symbol = symbol_table::get(self.id.unwrap()).unwrap();
+        if let SymbolKind::GenericInstance(x) = symbol.kind {
+            let base = symbol_table::get(x.base).unwrap();
+            if hashed_name {
+                format!(
+                    "{}__{}__{:x}",
+                    self.get_name_prefix(&base, include_namspace_prefix),
+                    base.token,
+                    self.calc_args_hash(&x.arguments),
+                )
+            } else {
+                format!(
+                    "{}{}",
+                    self.get_name_prefix(&base, include_namspace_prefix),
+                    symbol.token
+                )
+            }
+        } else {
+            format!(
+                "{}{}",
+                self.get_name_prefix(&symbol, include_namspace_prefix),
+                symbol.token
+            )
+        }
+    }
+
+    fn get_name_prefix(&self, symbol: &Symbol, include_namspace_prefix: bool) -> String {
+        let emit_namespace_preffix = match &symbol.kind {
+            SymbolKind::Module(x) if x.is_proto => false,
+            SymbolKind::Interface(x) if x.is_proto => false,
+            SymbolKind::Package(x) if x.is_proto => false,
+            SymbolKind::Module(_) | SymbolKind::Interface(_) | SymbolKind::Package(_) => {
+                include_namspace_prefix
+            }
+            SymbolKind::Function(x) if !x.is_proto => include_namspace_prefix && x.is_global(),
+            _ => false,
+        };
+        if emit_namespace_preffix {
+            format!("{}_", symbol.namespace)
+        } else {
+            "".to_string()
+        }
+    }
+
+    fn calc_args_hash(&self, args: &[GenericSymbolPath]) -> u64 {
+        let string_args: Vec<_> = args.iter().map(|x| x.to_string()).collect();
+        let mut hasher = DefaultHasher::new();
+        string_args.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+impl fmt::Display for GenericMap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = String::new();
+
+        for (k, v) in &self.map {
+            ret.push_str(&format!("{k}: {v}"));
+        }
+
+        ret.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Symbol {
+    pub token: Token,
+    pub id: SymbolId,
+    pub kind: SymbolKind,
+    pub namespace: Namespace,
+    /// Enclosing scope in the scope tree. Runtime-only (rebuilt by pass1),
+    /// so it is excluded from fragment persistence.
+    #[serde(skip)]
+    pub scope: ScopeId,
+    pub generic_instances: Vec<SymbolId>,
+    pub allow_unused: bool,
+    pub public: bool,
+    pub doc_comment: DocComment,
+}
+
+impl Symbol {
+    pub fn new(
+        token: &Token,
+        kind: SymbolKind,
+        namespace: &Namespace,
+        public: bool,
+        doc_comment: DocComment,
+    ) -> Self {
+        Self {
+            token: *token,
+            id: new_symbol_id(),
+            kind,
+            namespace: namespace.to_owned(),
+            scope: scope::intern_namespace(namespace),
+            generic_instances: Vec::new(),
+            allow_unused: false,
+            public,
+            doc_comment,
+        }
+    }
+
+    pub fn get_parent(&self) -> Option<Symbol> {
+        symbol_table::get_namespace_symbol(&self.namespace)
+    }
+
+    pub fn get_parent_component(&self) -> Option<Symbol> {
+        let parent = self.get_parent()?;
+        Symbol::trace_component_symbol(&parent)
+    }
+
+    fn trace_component_symbol(symbol: &Symbol) -> Option<Symbol> {
+        match &symbol.kind {
+            SymbolKind::Module(_)
+            | SymbolKind::Interface(_)
+            | SymbolKind::Package(_)
+            | SymbolKind::SystemVerilog => Some(symbol.clone()),
+            SymbolKind::AliasModule(x) => {
+                let symbol =
+                    symbol_table::resolve((&x.target.generic_path(), &symbol.namespace)).ok()?;
+                Symbol::trace_component_symbol(&symbol.found)
+            }
+            SymbolKind::AliasInterface(x) => {
+                let symbol =
+                    symbol_table::resolve((&x.target.generic_path(), &symbol.namespace)).ok()?;
+                Symbol::trace_component_symbol(&symbol.found)
+            }
+            SymbolKind::AliasPackage(x) => {
+                let symbol =
+                    symbol_table::resolve((&x.target.generic_path(), &symbol.namespace)).ok()?;
+                Symbol::trace_component_symbol(&symbol.found)
+            }
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base)?;
+                Symbol::trace_component_symbol(&symbol)
+            }
+            SymbolKind::GenericParameter(x) => {
+                if let Ok(ProtoBound::ProtoPackage(x)) =
+                    x.bound.resolve_proto_bound(&symbol.namespace)
+                {
+                    Symbol::trace_component_symbol(&x)
+                } else {
+                    None
+                }
+            }
+            SymbolKind::Function(_) => symbol.get_parent_component(),
+            _ => None,
+        }
+    }
+
+    pub fn get_parent_package(&self) -> Option<Symbol> {
+        let parent = self.get_parent_component()?;
+        if parent.is_package(true) {
+            Some(parent)
+        } else {
+            None
+        }
+    }
+
+    pub fn inner_namespace(&self) -> Namespace {
+        let mut ret = self.namespace.clone();
+        ret.push(self.token.text);
+        ret
+    }
+
+    pub fn generic_maps(&self) -> Vec<GenericMap> {
+        let mut ret = Vec::new();
+
+        let generic_instances = if matches!(self.kind, SymbolKind::GenericInstance(_))
+            || (!self.has_generic_paramters() && self.has_generic_consts())
+        {
+            &vec![self.id]
+        } else {
+            &self.generic_instances
+        };
+        for i in generic_instances {
+            let symbol = symbol_table::get(*i).unwrap();
+            let map = if let SymbolKind::GenericInstance(ref x) = symbol.kind {
+                self.generic_map(Some(symbol.id), &x.arguments)
+            } else {
+                self.generic_map(Some(symbol.id), &[])
+            };
+            ret.push(map);
+        }
+
+        // empty map for non-generic
+        if ret.is_empty() && !self.kind.is_generic() {
+            ret.push(GenericMap::default());
+        }
+        ret
+    }
+
+    pub fn generic_map(&self, id: Option<SymbolId>, arguments: &[GenericSymbolPath]) -> GenericMap {
+        let map = if arguments.is_empty() && !self.has_generic_consts() {
+            HashMap::default()
+        } else {
+            self.generic_table(arguments)
+        };
+        GenericMap { id, map }
+    }
+
+    pub fn generic_table(&self, arguments: &[GenericSymbolPath]) -> GenericTable {
+        let params = self.generic_parameters();
+        let n_args = arguments.len();
+        let mut map = GenericMap::default();
+
+        let match_arity = if params.len() > n_args {
+            params[n_args].1.default_value.is_some()
+        } else {
+            params.len() == n_args
+        };
+        if !match_arity {
+            // Too many or too few generic args are given.
+            // Return empty generic table.
+            return map.map;
+        }
+
+        for (i, arg) in arguments.iter().enumerate() {
+            if let Some((p, _)) = params.get(i) {
+                map.map.insert(*p, arg.clone());
+            }
+        }
+
+        for param in params.iter().skip(n_args) {
+            map.map
+                .insert(param.0, param.1.default_value.as_ref().unwrap().clone());
+        }
+
+        self.eval_generic_consts(&mut map);
+
+        map.map
+    }
+
+    pub fn eval_generic_consts(&self, generic_map: &mut GenericMap) {
+        for (name, r#const) in self.generic_consts() {
+            if let Some(path) = Self::expr_to_generic_symbol_path(&r#const.value, generic_map) {
+                generic_map.map.insert(name, path);
+            }
+        }
+    }
+
+    fn expr_to_generic_symbol_path(
+        expr: &syntax_tree::Expression,
+        generic_map: &GenericMap,
+    ) -> Option<GenericSymbolPath> {
+        fn eval_value(
+            context: &mut Context,
+            expr: &syntax_tree::Expression,
+        ) -> Option<(Value, TokenRange)> {
+            let (comptime, _) = eval_generic_expr(context, expr).ok()?;
+            comptime
+                .get_value()
+                .cloned()
+                .ok()
+                .map(|x| (x, comptime.token))
+        }
+
+        if let Some(factor) = expr.unwrap_factor() {
+            match factor {
+                syntax_tree::Factor::Number(x) => return Some(x.number.as_ref().into()),
+                syntax_tree::Factor::BooleanLiteral(x) => {
+                    return Some(x.boolean_literal.as_ref().into());
+                }
+                syntax_tree::Factor::IdentifierFactor(x)
+                    if x.identifier_factor.identifier_factor_opt.is_none() =>
+                {
+                    let mut context = Context::default();
+                    context.push_generic_map(vec![generic_map.clone()]);
+
+                    let path = context
+                        .resolve_path(x.identifier_factor.expression_identifier.as_ref().into());
+                    return Some(path);
+                }
+                syntax_tree::Factor::LParenExpressionRParen(x) => {
+                    return Self::expr_to_generic_symbol_path(&x.expression, generic_map);
+                }
+                syntax_tree::Factor::TypeExpression(x) => {
+                    return Self::expr_to_generic_symbol_path(
+                        &x.type_expression.expression,
+                        generic_map,
+                    );
+                }
+                syntax_tree::Factor::FactorTypeFactor(x) => {
+                    match x.factor_type_factor.factor_type.factor_type_group.as_ref() {
+                        syntax_tree::FactorTypeGroup::FixedType(x) => {
+                            return Some(x.fixed_type.as_ref().into());
+                        }
+                        syntax_tree::FactorTypeGroup::VariableTypeFactorTypeOpt(x) => {
+                            let mut width = Vec::new();
+                            if let Some(x) = &x.factor_type_opt {
+                                let mut context = Context::default();
+                                context.push_generic_map(vec![generic_map.clone()]);
+
+                                for expr in Vec::from(x.width.as_ref()) {
+                                    if let Some((x, _)) = eval_value(&mut context, expr)
+                                        && let Some(x) = x.to_usize()
+                                    {
+                                        width.push(x);
+                                    } else {
+                                        return None;
+                                    }
+                                }
+                            }
+
+                            let path = (x.variable_type.as_ref(), &width).into();
+                            return Some(path);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        let mut context = Context::default();
+        context.push_generic_map(vec![generic_map.clone()]);
+        if let Some((value, token)) = eval_value(&mut context, expr)
+            && !value.is_xz()
+        {
+            let text = format!("{}", value.payload());
+            let text = resource_table::insert_str(&text);
+            let token = Token::generate(text, token.beg.source.get_path().unwrap());
+
+            let literal_value = Literal::Value(value);
+            literal_table::insert(token.id, literal_value);
+
+            let mut path: GenericSymbolPath = (&token).into();
+            path.kind = GenericSymbolPathKind::ValueLiteral;
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    pub fn generic_parameters(&self) -> Vec<(StrId, GenericParameterProperty)> {
+        fn get_generic_parameter(id: SymbolId) -> (StrId, GenericParameterProperty) {
+            let symbol = symbol_table::get(id).unwrap();
+            if let SymbolKind::GenericParameter(x) = symbol.kind {
+                (symbol.token.text, x)
+            } else {
+                unreachable!()
+            }
+        }
+
+        match &self.kind {
+            SymbolKind::Function(x) if !x.is_proto => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            SymbolKind::Module(x) if !x.is_proto => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            SymbolKind::Interface(x) if !x.is_proto => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            SymbolKind::Package(x) if !x.is_proto => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            SymbolKind::Struct(x) => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            SymbolKind::Union(x) => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                symbol.generic_parameters()
+            }
+            SymbolKind::TbComponent(x) => x
+                .generic_parameters
+                .iter()
+                .map(|x| get_generic_parameter(*x))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn has_generic_paramters(&self) -> bool {
+        match &self.kind {
+            SymbolKind::Function(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Module(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Interface(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Package(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Struct(x) => !x.generic_parameters.is_empty(),
+            SymbolKind::Union(x) => !x.generic_parameters.is_empty(),
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                symbol.has_generic_paramters()
+            }
+            SymbolKind::TbComponent(x) => !x.generic_parameters.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub fn generic_consts(&self) -> Vec<(StrId, GenericConstProperty)> {
+        fn get_generic_const(id: SymbolId) -> (StrId, GenericConstProperty) {
+            let symbol = symbol_table::get(id).unwrap();
+            if let SymbolKind::GenericConst(x) = symbol.kind {
+                (symbol.token.text, x)
+            } else {
+                unreachable!()
+            }
+        }
+
+        match &self.kind {
+            SymbolKind::Function(x) if !x.is_proto => x
+                .generic_consts
+                .iter()
+                .map(|x| get_generic_const(*x))
+                .collect(),
+            SymbolKind::Module(x) if !x.is_proto => x
+                .generic_consts
+                .iter()
+                .map(|x| get_generic_const(*x))
+                .collect(),
+            SymbolKind::Interface(x) if !x.is_proto => x
+                .generic_consts
+                .iter()
+                .map(|x| get_generic_const(*x))
+                .collect(),
+            SymbolKind::Package(x) if !x.is_proto => x
+                .generic_consts
+                .iter()
+                .map(|x| get_generic_const(*x))
+                .collect(),
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                symbol.generic_consts()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn has_generic_consts(&self) -> bool {
+        match &self.kind {
+            SymbolKind::Function(x) => !x.generic_consts.is_empty(),
+            SymbolKind::Module(x) => !x.generic_consts.is_empty(),
+            SymbolKind::Interface(x) => !x.generic_consts.is_empty(),
+            SymbolKind::Package(x) => !x.generic_consts.is_empty(),
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                symbol.has_generic_consts()
+            }
+            _ => false,
+        }
+    }
+
+    pub fn generic_references(&self) -> Vec<GenericSymbolPath> {
+        let references = match &self.kind {
+            SymbolKind::Function(x) if !x.is_proto => &x.generic_references,
+            SymbolKind::Module(x) if !x.is_proto => &x.generic_references,
+            SymbolKind::Interface(x) if !x.is_proto => &x.generic_references,
+            SymbolKind::Package(x) if !x.is_proto => &x.generic_references,
+            SymbolKind::Struct(x) => &x.generic_references,
+            SymbolKind::Union(x) => &x.generic_references,
+            _ => return Vec::new(),
+        };
+        references
+            .iter()
+            .filter(|r| r.is_generic_reference())
+            .cloned()
+            .collect()
+    }
+
+    pub fn proto(&self) -> Option<Symbol> {
+        match &self.kind {
+            SymbolKind::Module(x) => {
+                if let Some(proto) = &x.proto {
+                    return symbol_table::resolve((&proto.generic_path(), &self.namespace))
+                        .map(|x| (*x.found).clone())
+                        .ok();
+                }
+            }
+            SymbolKind::AliasModule(x) => {
+                let symbol =
+                    symbol_table::resolve((&x.target.generic_path(), &self.namespace)).ok()?;
+                return if x.is_proto {
+                    Some((*symbol.found).clone())
+                } else {
+                    symbol.found.proto()
+                };
+            }
+            SymbolKind::Interface(x) => {
+                if let Some(proto) = &x.proto {
+                    return symbol_table::resolve((&proto.generic_path(), &self.namespace))
+                        .map(|x| (*x.found).clone())
+                        .ok();
+                } else if x.generic_parameters.is_empty() {
+                    return Some(self.clone());
+                }
+            }
+            SymbolKind::AliasInterface(x) => {
+                let symbol =
+                    symbol_table::resolve((&x.target.generic_path(), &self.namespace)).ok()?;
+                return if x.is_proto {
+                    Some((*symbol.found).clone())
+                } else {
+                    symbol.found.proto()
+                };
+            }
+            SymbolKind::Package(x) => {
+                if let Some(proto) = &x.proto {
+                    return symbol_table::resolve((&proto.generic_path(), &self.namespace))
+                        .map(|x| (*x.found).clone())
+                        .ok();
+                }
+            }
+            SymbolKind::AliasPackage(x) => {
+                let symbol =
+                    symbol_table::resolve((&x.target.generic_path(), &self.namespace)).ok()?;
+                return if x.is_proto {
+                    Some((*symbol.found).clone())
+                } else {
+                    symbol.found.proto()
+                };
+            }
+            SymbolKind::GenericParameter(x) => {
+                let proto = x.bound.resolve_proto_bound(&self.namespace).ok()?;
+                return proto.get_symbol();
+            }
+            _ => {}
+        }
+
+        None
+    }
+
+    pub fn alias_target(&self, include_proto: bool) -> Option<GenericSymbolPath> {
+        match &self.kind {
+            SymbolKind::AliasModule(x) if !x.is_proto || include_proto => Some(x.target.clone()),
+            SymbolKind::AliasInterface(x) if !x.is_proto || include_proto => Some(x.target.clone()),
+            SymbolKind::AliasPackage(x) if !x.is_proto || include_proto => Some(x.target.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_module(&self, include_proto: bool) -> bool {
+        match &self.kind {
+            SymbolKind::Module(x) if x.is_proto => return include_proto,
+            SymbolKind::Module(_) | SymbolKind::AliasModule(_) => return true,
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                return symbol.is_module(false);
+            }
+            SymbolKind::GenericParameter(x) => {
+                if let Ok(ProtoBound::ProtoModule(x)) = x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x.is_module(true);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_proto_module(&self, trace_generic_param: bool) -> bool {
+        match &self.kind {
+            SymbolKind::Module(x) if x.is_proto => return true,
+            SymbolKind::GenericParameter(x) if trace_generic_param => {
+                if let Ok(ProtoBound::ProtoModule(x)) = x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x.is_proto_module(trace_generic_param);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_interface(&self, include_proto: bool) -> bool {
+        match &self.kind {
+            SymbolKind::Interface(x) if x.is_proto => return include_proto,
+            SymbolKind::Interface(_) | SymbolKind::AliasInterface(_) => return true,
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                return symbol.is_interface(false);
+            }
+            SymbolKind::GenericParameter(x) => {
+                if let Ok(ProtoBound::ProtoInterface(x)) =
+                    x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x.is_interface(true);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_proto_interface(
+        &self,
+        trace_generic_param: bool,
+        include_non_generic_interface: bool,
+    ) -> bool {
+        match &self.kind {
+            SymbolKind::Interface(x) if x.is_proto => return true,
+            SymbolKind::Interface(x) => {
+                return include_non_generic_interface && x.generic_parameters.is_empty();
+            }
+            SymbolKind::GenericParameter(x) if trace_generic_param => {
+                if let Ok(ProtoBound::ProtoInterface(x)) =
+                    x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x
+                        .is_proto_interface(trace_generic_param, include_non_generic_interface);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_package(&self, include_proto: bool) -> bool {
+        match &self.kind {
+            SymbolKind::Package(x) if x.is_proto => return include_proto,
+            SymbolKind::Package(_) => return true,
+            SymbolKind::AliasPackage(x) => return !x.is_proto || include_proto,
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                return symbol.is_package(false);
+            }
+            SymbolKind::GenericParameter(x) => {
+                if let Ok(ProtoBound::ProtoPackage(x)) =
+                    x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x.is_package(true);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_component(&self, include_proto: bool) -> bool {
+        match &self.kind {
+            SymbolKind::Module(x) if x.is_proto => return include_proto,
+            SymbolKind::Interface(x) if x.is_proto => return include_proto,
+            SymbolKind::Package(x) if x.is_proto => return include_proto,
+            SymbolKind::Module(_) | SymbolKind::Interface(_) | SymbolKind::Package(_) => {
+                return true;
+            }
+            SymbolKind::AliasModule(x) if !x.is_proto => return true,
+            SymbolKind::AliasInterface(x) if !x.is_proto => return true,
+            SymbolKind::AliasPackage(x) if !x.is_proto => return true,
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                return symbol.is_component(false);
+            }
+            SymbolKind::GenericParameter(x) => {
+                if let Ok(ProtoBound::ProtoInterface(x)) =
+                    x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x.is_component(true);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_proto_package(&self, trace_generic_param: bool) -> bool {
+        match &self.kind {
+            SymbolKind::Package(x) if x.is_proto => return true,
+            SymbolKind::GenericParameter(x) if trace_generic_param => {
+                if let Ok(ProtoBound::ProtoPackage(x)) =
+                    x.bound.resolve_proto_bound(&self.namespace)
+                {
+                    return x.is_proto_package(trace_generic_param);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_importable(&self, include_proto: bool) -> bool {
+        match &self.kind {
+            SymbolKind::TypeDef(x) if x.is_proto => {
+                return include_proto;
+            }
+            SymbolKind::Parameter(x) if x.is_proto => {
+                return include_proto;
+            }
+            SymbolKind::Function(x) if x.is_proto => {
+                return include_proto;
+            }
+            SymbolKind::Parameter(_)
+            | SymbolKind::TypeDef(_)
+            | SymbolKind::Enum(_)
+            | SymbolKind::Struct(_)
+            | SymbolKind::Union(_)
+            | SymbolKind::Function(_)
+            | SymbolKind::AliasModule(_)
+            | SymbolKind::AliasInterface(_)
+            | SymbolKind::AliasPackage(_) => {
+                if let Some(parent) = self.get_parent() {
+                    return parent.is_package(include_proto);
+                }
+            }
+            SymbolKind::EnumMember(_) | SymbolKind::EnumMemberMangled => {
+                if let Some(parent) = self.get_parent() {
+                    return matches!(parent.kind, SymbolKind::Enum(_))
+                        || parent.is_importable(include_proto);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn is_variable_type(&self) -> bool {
+        match &self.kind {
+            SymbolKind::Enum(_)
+            | SymbolKind::Union(_)
+            | SymbolKind::Struct(_)
+            | SymbolKind::TypeDef(_)
+            | SymbolKind::SystemVerilog => true,
+            SymbolKind::Parameter(x) => matches!(x.r#type.kind, TypeKind::Type),
+            SymbolKind::GenericParameter(x) => matches!(x.bound, GenericBoundKind::Type),
+            SymbolKind::GenericConst(x) => matches!(x.bound, GenericBoundKind::Type),
+            SymbolKind::GenericInstance(x) => symbol_table::get(x.base)
+                .map(|x| x.is_variable_type())
+                .unwrap_or(false),
+            // `$tb::file` and `$tb::random` are testbench resources declared as `var`.
+            SymbolKind::TbComponent(x) => {
+                matches!(
+                    x.kind,
+                    TbComponentKind::File | TbComponentKind::Random | TbComponentKind::External(_)
+                )
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_casting_type(&self) -> bool {
+        let type_kind = match &self.kind {
+            SymbolKind::Parameter(x) => &x.r#type.kind,
+            SymbolKind::GenericParameter(x) => {
+                if let GenericBoundKind::Proto(x) = &x.bound {
+                    &x.kind
+                } else {
+                    return matches!(x.bound, GenericBoundKind::Type);
+                }
+            }
+            SymbolKind::GenericConst(x) => {
+                if let GenericBoundKind::Proto(x) = &x.bound {
+                    &x.kind
+                } else {
+                    return matches!(x.bound, GenericBoundKind::Type);
+                }
+            }
+            // `$tb::file` is a variable type but not a cast target: `x as
+            // $tb::file` is meaningless and must be a type error.
+            SymbolKind::TbComponent(_) => return false,
+            _ => return self.is_variable_type(),
+        };
+        matches!(
+            type_kind,
+            TypeKind::Type
+                | TypeKind::U8
+                | TypeKind::U16
+                | TypeKind::U32
+                | TypeKind::U64
+                | TypeKind::I8
+                | TypeKind::I16
+                | TypeKind::I32
+                | TypeKind::I64
+                | TypeKind::P8
+                | TypeKind::P16
+                | TypeKind::P32
+                | TypeKind::P64
+        )
+    }
+
+    pub fn is_struct(&self) -> bool {
+        match &self.kind {
+            SymbolKind::Struct(_) => true,
+            SymbolKind::TypeDef(x) if !x.is_proto => {
+                let namespace = Some(&self.namespace);
+                if let Some(r#type) = &x.r#type
+                    && let Some((_, Some(symbol))) = r#type.trace_user_defined(namespace)
+                {
+                    symbol.is_struct()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_union(&self) -> bool {
+        match &self.kind {
+            SymbolKind::Union(_) => true,
+            SymbolKind::TypeDef(x) if !x.is_proto => {
+                let namespace = Some(&self.namespace);
+                if let Some(r#type) = &x.r#type
+                    && let Some((_, Some(symbol))) = r#type.trace_user_defined(namespace)
+                {
+                    symbol.is_union()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_global_function(&self) -> bool {
+        match &self.kind {
+            SymbolKind::Function(x) if !x.is_proto => x.is_global(),
+            SymbolKind::GenericInstance(x) => {
+                let symbol = symbol_table::get(x.base).unwrap();
+                symbol.is_global_function()
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SymbolKind {
+    Port(PortProperty),
+    Variable(VariableProperty),
+    Module(ModuleProperty),
+    AliasModule(AliasModuleProperty),
+    Interface(InterfaceProperty),
+    AliasInterface(AliasInterfaceProperty),
+    Function(FunctionProperty),
+    Parameter(ParameterProperty),
+    Instance(InstanceProperty),
+    Block,
+    Package(PackageProperty),
+    AliasPackage(AliasPackageProperty),
+    Struct(StructProperty),
+    StructMember(StructMemberProperty),
+    Union(UnionProperty),
+    UnionMember(UnionMemberProperty),
+    TypeDef(TypeDefProperty),
+    Enum(EnumProperty),
+    EnumMember(EnumMemberProperty),
+    EnumMemberMangled,
+    Modport(ModportProperty),
+    Genvar,
+    ModportVariableMember(ModportVariableMemberProperty),
+    ModportFunctionMember(ModportFunctionMemberProperty),
+    SystemVerilog,
+    Namespace,
+    SystemFunction(SystemFuncitonProperty),
+    GenericParameter(GenericParameterProperty),
+    GenericConst(GenericConstProperty),
+    GenericInstance(GenericInstanceProperty),
+    ClockDomain,
+    Test(TestProperty),
+    Embed,
+    TbComponent(TbComponentProperty),
+    ProjectProperty(ProjectPropertyValueProperty),
+    PropNamespace,
+}
+
+impl SymbolKind {
+    /// Whether a `::member` segment can be traced into this kind, i.e. it is a
+    /// navigable container rather than a leaf. Used to prefer a package over a
+    /// same-named imported item when resolving a path prefix.
+    pub fn can_have_path_member(&self) -> bool {
+        match self {
+            // A proto module is a signature, not a navigable container.
+            SymbolKind::Module(x) => !x.is_proto,
+            SymbolKind::Function(_)
+            | SymbolKind::Struct(_)
+            | SymbolKind::Union(_)
+            | SymbolKind::Modport(_)
+            | SymbolKind::ModportFunctionMember(_)
+            | SymbolKind::EnumMember(_)
+            | SymbolKind::EnumMemberMangled
+            | SymbolKind::Block
+            | SymbolKind::SystemFunction(_)
+            | SymbolKind::Genvar
+            | SymbolKind::ClockDomain
+            | SymbolKind::Test(_)
+            | SymbolKind::Embed => false,
+            _ => true,
+        }
+    }
+
+    pub fn to_kind_name(&self) -> String {
+        match self {
+            SymbolKind::Port(x) => match x.direction {
+                Direction::Modport => "modport".to_string(),
+                Direction::Import => "function import".to_string(),
+                _ => format!("{} port", x.direction),
+            },
+            SymbolKind::Variable(_) => "variable".to_string(),
+            SymbolKind::Module(x) if x.is_proto => "proto module".to_string(),
+            SymbolKind::Module(_) => "module".to_string(),
+            SymbolKind::AliasModule(x) => if x.is_proto {
+                "proto alias module"
+            } else {
+                "alias module"
+            }
+            .to_string(),
+            SymbolKind::Interface(x) if x.is_proto => "proto interface".to_string(),
+            SymbolKind::Interface(_) => "interface".to_string(),
+            SymbolKind::AliasInterface(x) => if x.is_proto {
+                "proto alias interface"
+            } else {
+                "alias interface"
+            }
+            .to_string(),
+            SymbolKind::Function(x) if x.is_proto => "proto function".to_string(),
+            SymbolKind::Function(_) => "function".to_string(),
+            SymbolKind::Parameter(x) if x.is_proto => "proto const".to_string(),
+            SymbolKind::Parameter(_) => "parameter".to_string(),
+            SymbolKind::Instance(_) => "instance".to_string(),
+            SymbolKind::Block => "block".to_string(),
+            SymbolKind::Package(x) if x.is_proto => "proto package".to_string(),
+            SymbolKind::Package(_) => "package".to_string(),
+            SymbolKind::AliasPackage(x) => if x.is_proto {
+                "proto alias package"
+            } else {
+                "alias package"
+            }
+            .to_string(),
+            SymbolKind::Struct(_) => "struct".to_string(),
+            SymbolKind::StructMember(_) => "struct member".to_string(),
+            SymbolKind::Union(_) => "union".to_string(),
+            SymbolKind::UnionMember(_) => "union member".to_string(),
+            SymbolKind::TypeDef(x) if x.is_proto => "proto typedef".to_string(),
+            SymbolKind::TypeDef(_) => "typedef".to_string(),
+            SymbolKind::Enum(_) => "enum".to_string(),
+            SymbolKind::EnumMember(_) => "enum member".to_string(),
+            SymbolKind::EnumMemberMangled => "enum member mangled".to_string(),
+            SymbolKind::Modport(_) => "modport".to_string(),
+            SymbolKind::Genvar => "genvar".to_string(),
+            SymbolKind::ModportVariableMember(x) => match x.direction {
+                Direction::Input | Direction::Output | Direction::Inout => {
+                    format!("modport {} variable member", x.direction)
+                }
+                _ => unreachable!(),
+            },
+            SymbolKind::ModportFunctionMember(_) => "modport function member".to_string(),
+            SymbolKind::SystemVerilog => "systemverilog item".to_string(),
+            SymbolKind::Namespace => "namespace".to_string(),
+            SymbolKind::SystemFunction(_) => "system function".to_string(),
+            SymbolKind::GenericParameter(_) => "generic parameter".to_string(),
+            SymbolKind::GenericConst(_) => "generic const".to_string(),
+            SymbolKind::GenericInstance(_) => "generic instance".to_string(),
+            SymbolKind::ClockDomain => "clock domain".to_string(),
+            SymbolKind::Test(_) => "test".to_string(),
+            SymbolKind::Embed => "embed".to_string(),
+            SymbolKind::TbComponent(x) => format!("testbench {}", x.kind),
+            SymbolKind::ProjectProperty(_) => "project property".to_string(),
+            SymbolKind::PropNamespace => "$prop namespace".to_string(),
+        }
+    }
+
+    /// True for a proto alias (`proto alias module`/`interface`/`package`).
+    pub fn is_proto_alias(&self) -> bool {
+        matches!(self, SymbolKind::AliasModule(x) if x.is_proto)
+            || matches!(self, SymbolKind::AliasInterface(x) if x.is_proto)
+            || matches!(self, SymbolKind::AliasPackage(x) if x.is_proto)
+    }
+
+    pub fn is_generic(&self) -> bool {
+        match self {
+            SymbolKind::Module(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Interface(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Function(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Package(x) if !x.is_proto => !x.generic_parameters.is_empty(),
+            SymbolKind::Struct(x) => !x.generic_parameters.is_empty(),
+            SymbolKind::Union(x) => !x.generic_parameters.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub fn is_clock(&self) -> bool {
+        match self {
+            SymbolKind::Port(x) => x.r#type.kind.is_clock(),
+            SymbolKind::Variable(x) => x.r#type.kind.is_clock(),
+            _ => false,
+        }
+    }
+
+    pub fn can_be_default_clock(&self) -> bool {
+        match self {
+            SymbolKind::Port(x) => x.r#type.can_be_default_clock(),
+            SymbolKind::Variable(x) => x.r#type.can_be_default_clock(),
+            _ => false,
+        }
+    }
+
+    pub fn is_reset(&self) -> bool {
+        match self {
+            SymbolKind::Port(x) => x.r#type.kind.is_reset(),
+            SymbolKind::Variable(x) => x.r#type.kind.is_reset(),
+            _ => false,
+        }
+    }
+
+    pub fn can_be_default_reset(&self) -> bool {
+        match self {
+            SymbolKind::Port(x) => x.r#type.can_be_default_reset(),
+            SymbolKind::Variable(x) => x.r#type.can_be_default_reset(),
+            _ => false,
+        }
+    }
+
+    pub fn is_function(&self) -> bool {
+        match self {
+            SymbolKind::Function(_)
+            | SymbolKind::SystemVerilog
+            | SymbolKind::ModportFunctionMember(..)
+            | SymbolKind::SystemFunction(_) => true,
+            SymbolKind::GenericInstance(x) => {
+                let base = symbol_table::get(x.base).unwrap();
+                matches!(
+                    base.kind,
+                    SymbolKind::Function(_)
+                        | SymbolKind::SystemVerilog
+                        | SymbolKind::ModportFunctionMember(..)
+                        | SymbolKind::SystemFunction(_)
+                )
+            }
+            _ => false,
+        }
+    }
+
+    pub fn get_type(&self) -> Option<&Type> {
+        match self {
+            SymbolKind::Port(x) => Some(&x.r#type),
+            SymbolKind::Variable(x) => Some(&x.r#type),
+            SymbolKind::Function(x) => x.ret.as_ref(),
+            SymbolKind::Parameter(x) => Some(&x.r#type),
+            SymbolKind::StructMember(x) => Some(&x.r#type),
+            SymbolKind::UnionMember(x) => Some(&x.r#type),
+            SymbolKind::TypeDef(x) if !x.is_proto => x.r#type.as_ref(),
+            SymbolKind::ProjectProperty(x) => Some(&x.r#type),
+            _ => None,
+        }
+    }
+
+    pub fn get_type_mut(&mut self) -> Option<&mut Type> {
+        match self {
+            SymbolKind::Port(x) => Some(&mut x.r#type),
+            SymbolKind::Variable(x) => Some(&mut x.r#type),
+            SymbolKind::Function(x) => x.ret.as_mut(),
+            SymbolKind::Parameter(x) => Some(&mut x.r#type),
+            SymbolKind::StructMember(x) => Some(&mut x.r#type),
+            SymbolKind::UnionMember(x) => Some(&mut x.r#type),
+            SymbolKind::TypeDef(x) if !x.is_proto => x.r#type.as_mut(),
+            SymbolKind::ProjectProperty(x) => Some(&mut x.r#type),
+            _ => None,
+        }
+    }
+
+    pub fn get_parameters(&self) -> &[Parameter] {
+        match self {
+            SymbolKind::Module(x) if !x.is_proto => &x.parameters,
+            SymbolKind::Interface(x) if !x.is_proto => &x.parameters,
+            _ => &[],
+        }
+    }
+
+    pub fn has_parameters(&self) -> bool {
+        match self {
+            SymbolKind::Module(x) if !x.is_proto => !x.parameters.is_empty(),
+            SymbolKind::Interface(x) if !x.is_proto => !x.parameters.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub fn get_generic_parameters(&self) -> &[SymbolId] {
+        match self {
+            SymbolKind::Module(x) if !x.is_proto => &x.generic_parameters,
+            SymbolKind::Interface(x) if !x.is_proto => &x.generic_parameters,
+            SymbolKind::Function(x) if !x.is_proto => &x.generic_parameters,
+            SymbolKind::Package(x) if !x.is_proto => &x.generic_parameters,
+            SymbolKind::Struct(x) => &x.generic_parameters,
+            SymbolKind::Union(x) => &x.generic_parameters,
+            _ => &[],
+        }
+    }
+
+    pub fn get_mixin_sources(&self) -> &[GenericSymbolPath] {
+        match self {
+            SymbolKind::Interface(x) => &x.mixin_sources,
+            _ => &[],
+        }
+    }
+
+    pub fn has_mixin_sources(&self) -> bool {
+        match self {
+            SymbolKind::Interface(x) => !x.mixin_sources.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub fn get_definition(&self) -> Option<DefinitionId> {
+        match self {
+            SymbolKind::Module(x) if !x.is_proto => Some(x.definition),
+            SymbolKind::Interface(x) => x.definition,
+            SymbolKind::Function(x) if !x.is_proto => x.definition,
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for SymbolKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = match self {
+            SymbolKind::Port(x) => {
+                format!("port ({} {})", x.direction, x.r#type)
+            }
+            SymbolKind::Variable(x) => {
+                format!("variable ({})", x.r#type)
+            }
+            SymbolKind::Module(x) if x.is_proto => {
+                format!(
+                    "proto module ({} params, {} ports)",
+                    x.parameters.len(),
+                    x.ports.len()
+                )
+            }
+            SymbolKind::Module(x) => {
+                format!(
+                    "module ({} generic, {} params, {} ports)",
+                    x.generic_parameters.len(),
+                    x.parameters.len(),
+                    x.ports.len()
+                )
+            }
+            SymbolKind::AliasModule(x) => {
+                let prefix = if x.is_proto { "proto alias" } else { "alias" };
+                format!("{prefix} module (target {})", x.target)
+            }
+            SymbolKind::Interface(x) if x.is_proto => {
+                format!("proto interface ({} params)", x.parameters.len())
+            }
+            SymbolKind::Interface(x) => {
+                format!(
+                    "interface ({} generic, {} params)",
+                    x.generic_parameters.len(),
+                    x.parameters.len()
+                )
+            }
+            SymbolKind::AliasInterface(x) => {
+                let prefix = if x.is_proto { "proto alias" } else { "alias" };
+                format!("{prefix} interface (target {})", x.target)
+            }
+            SymbolKind::Function(x) if x.is_proto => {
+                format!(
+                    "proto function ({} generic, {} args)",
+                    x.generic_parameters.len(),
+                    x.ports.len()
+                )
+            }
+            SymbolKind::Function(x) => {
+                format!(
+                    "function ({} generic, {} args)",
+                    x.generic_parameters.len(),
+                    x.ports.len()
+                )
+            }
+            SymbolKind::Parameter(x) if x.is_proto => {
+                format!("proto localparam ({})", x.r#type)
+            }
+            SymbolKind::Parameter(x) => {
+                if let Some(value) = &x.value {
+                    let mut stringifier = Stringifier::new();
+                    stringifier.expression(value);
+                    format!(
+                        "{} ({}) = {}",
+                        x.kind.to_sv_snippet(),
+                        x.r#type,
+                        stringifier.as_str()
+                    )
+                } else {
+                    format!("{} ({})", x.kind.to_sv_snippet(), x.r#type)
+                }
+            }
+            SymbolKind::Instance(x) => {
+                let type_name = x.type_name.to_string();
+                format!("instance ({type_name})")
+            }
+            SymbolKind::Block => "block".to_string(),
+            SymbolKind::Package(x) if x.is_proto => "proto package".to_string(),
+            SymbolKind::Package(x) => {
+                format!("package ({} generic)", x.generic_parameters.len())
+            }
+            SymbolKind::AliasPackage(x) => {
+                let prefix = if x.is_proto { "proto alias" } else { "alias" };
+                format!("{prefix} package (target {})", x.target)
+            }
+            SymbolKind::Struct(_) => "struct".to_string(),
+            SymbolKind::StructMember(x) => {
+                format!("struct member ({})", x.r#type)
+            }
+            SymbolKind::Union(_) => "union".to_string(),
+            SymbolKind::UnionMember(x) => {
+                format!("union member ({})", x.r#type)
+            }
+            SymbolKind::TypeDef(x) if x.is_proto => {
+                if let Some(ref r#type) = x.r#type {
+                    format!("proto typedef alias ({type})")
+                } else {
+                    "proto typedef".to_string()
+                }
+            }
+            SymbolKind::TypeDef(x) => {
+                if let Some(ref r#type) = x.r#type {
+                    format!("typedef alias ({type})")
+                } else {
+                    "typedef".to_string()
+                }
+            }
+            SymbolKind::Enum(x) => {
+                if let Some(ref r#type) = x.r#type {
+                    format!("enum ({type})")
+                } else {
+                    "enum ()".to_string()
+                }
+            }
+            SymbolKind::EnumMember(x) => {
+                if let EnumMemberValue::ExplicitValue(ref expression, ref _evaluated) = x.value {
+                    let mut stringifier = Stringifier::new();
+                    stringifier.expression(expression);
+                    format!("enum member = {}", stringifier.as_str())
+                } else {
+                    "enum member".to_string()
+                }
+            }
+            SymbolKind::EnumMemberMangled => "enum member mangled".to_string(),
+            SymbolKind::Modport(x) => {
+                format!("modport ({} ports)", x.members.len())
+            }
+            SymbolKind::Genvar => "genvar".to_string(),
+            SymbolKind::ModportVariableMember(x) => {
+                format!("modport variable member ({})", x.direction)
+            }
+            SymbolKind::ModportFunctionMember(_) => "modport function member".to_string(),
+            SymbolKind::SystemVerilog => "systemverilog item".to_string(),
+            SymbolKind::Namespace => "namespace".to_string(),
+            SymbolKind::SystemFunction(_) => "system function".to_string(),
+            SymbolKind::GenericParameter(_) => "generic parameter".to_string(),
+            SymbolKind::GenericConst(_) => "generic const".to_string(),
+            SymbolKind::GenericInstance(_) => "generic instance".to_string(),
+            SymbolKind::ClockDomain => "clock domain".to_string(),
+            SymbolKind::Test(_) => "test".to_string(),
+            SymbolKind::Embed => "embed".to_string(),
+            SymbolKind::TbComponent(x) => format!("testbench {} component", x.kind),
+            SymbolKind::ProjectProperty(x) => {
+                format!(
+                    "project property ({}) = {}",
+                    x.value.type_name(),
+                    x.value.value_string()
+                )
+            }
+            SymbolKind::PropNamespace => "$prop namespace".to_string(),
+        };
+        text.fmt(f)
+    }
+}
+
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum Direction {
+    Input,
+    Output,
+    Inout,
+    Interface,
+    Modport,
+    Import,
+}
+
+impl Direction {
+    pub fn converse(&self) -> Direction {
+        match self {
+            Direction::Input => Direction::Output,
+            Direction::Output => Direction::Input,
+            _ => *self,
+        }
+    }
+
+    pub fn is_input(&self) -> bool {
+        self == &Direction::Input
+    }
+
+    pub fn is_output(&self) -> bool {
+        self == &Direction::Output
+    }
+}
+
+impl fmt::Display for Direction {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = match self {
+            Direction::Input => "input".to_string(),
+            Direction::Output => "output".to_string(),
+            Direction::Inout => "inout".to_string(),
+            Direction::Interface => "interface".to_string(),
+            Direction::Modport => "modport".to_string(),
+            Direction::Import => "import".to_string(),
+        };
+        text.fmt(f)
+    }
+}
+
+impl From<&syntax_tree::Direction> for Direction {
+    fn from(value: &syntax_tree::Direction) -> Self {
+        match value {
+            syntax_tree::Direction::Input(_) => Direction::Input,
+            syntax_tree::Direction::Output(_) => Direction::Output,
+            syntax_tree::Direction::Inout(_) => Direction::Inout,
+            syntax_tree::Direction::Modport(_) => Direction::Modport,
+            syntax_tree::Direction::Import(_) => Direction::Import,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Type {
+    pub modifier: Vec<TypeModifier>,
+    pub kind: TypeKind,
+    pub width: Vec<syntax_tree::Expression>,
+    pub array: Vec<syntax_tree::Expression>,
+    pub array_type: Option<syntax_tree::ArrayType>,
+    pub is_const: bool,
+    pub token: TokenRange,
+}
+
+impl Type {
+    pub fn create_inferred(token: TokenRange) -> Self {
+        Self {
+            modifier: vec![],
+            kind: TypeKind::Inferred,
+            width: vec![],
+            array: vec![],
+            array_type: None,
+            is_const: false,
+            token,
+        }
+    }
+
+    pub fn is_compatible(&self, other: &Type) -> bool {
+        self.to_string() == other.to_string()
+    }
+
+    pub fn has_modifier(&self, kind: &TypeModifierKind) -> bool {
+        self.modifier.iter().any(|x| x.kind == *kind)
+    }
+
+    pub fn find_modifier(&self, kind: &TypeModifierKind) -> Option<TypeModifier> {
+        self.modifier.iter().find(|x| x.kind == *kind).cloned()
+    }
+
+    pub fn is_signed(&self) -> bool {
+        if self.kind.is_fixed() {
+            self.kind.is_signed()
+        } else {
+            self.has_modifier(&TypeModifierKind::Signed)
+        }
+    }
+
+    pub fn is_inferred(&self) -> bool {
+        matches!(self.kind, TypeKind::Inferred)
+    }
+
+    pub fn can_be_default_clock(&self) -> bool {
+        self.kind.is_clock() && self.width.is_empty() && self.array.is_empty()
+    }
+
+    pub fn can_be_default_reset(&self) -> bool {
+        self.kind.is_reset() && self.width.is_empty() && self.array.is_empty()
+    }
+
+    pub fn get_user_defined(&self) -> Option<UserDefinedType> {
+        if let TypeKind::UserDefined(x) = &self.kind {
+            return Some(x.clone());
+        }
+
+        None
+    }
+
+    pub fn trace_user_defined(
+        &self,
+        namespace: Option<&Namespace>,
+    ) -> Option<(Type, Option<Symbol>)> {
+        if let TypeKind::UserDefined(x) = &self.kind {
+            let symbol = if let Some(namespace) = namespace {
+                symbol_table::resolve((&x.path.generic_path(), namespace)).ok()?
+            } else {
+                symbol_table::resolve(SymbolPathNamespace::from_token(
+                    x.path.generic_path(),
+                    x.path.paths[0].base.id,
+                ))
+                .ok()?
+            };
+            match &symbol.found.kind {
+                SymbolKind::TypeDef(x) => {
+                    if let Some(r#type) = &x.r#type {
+                        return r#type.trace_user_defined(Some(&symbol.found.namespace));
+                    } else {
+                        return Some((self.clone(), Some((*symbol.found).clone())));
+                    }
+                }
+                SymbolKind::Module(_)
+                | SymbolKind::Interface(_)
+                | SymbolKind::Package(_)
+                | SymbolKind::Enum(_)
+                | SymbolKind::Struct(_)
+                | SymbolKind::Union(_)
+                | SymbolKind::Modport(_) => {
+                    return Some((self.clone(), Some((*symbol.found).clone())));
+                }
+                _ => {}
+            }
+        }
+
+        Some((self.clone(), None))
+    }
+
+    pub fn to_ir_type(&self, context: &mut Context, pos: TypePosition) -> ir::IrResult<ir::Type> {
+        let mut width = match &self.kind {
+            TypeKind::U8 => Shape::new(vec![Some(8)]),
+            TypeKind::U16 => Shape::new(vec![Some(16)]),
+            TypeKind::U32 => Shape::new(vec![Some(32)]),
+            TypeKind::U64 => Shape::new(vec![Some(64)]),
+            TypeKind::P8 => Shape::new(vec![Some(8)]),
+            TypeKind::P16 => Shape::new(vec![Some(16)]),
+            TypeKind::P32 => Shape::new(vec![Some(32)]),
+            TypeKind::P64 => Shape::new(vec![Some(64)]),
+            TypeKind::I8 => Shape::new(vec![Some(8)]),
+            TypeKind::I16 => Shape::new(vec![Some(16)]),
+            TypeKind::I32 => Shape::new(vec![Some(32)]),
+            TypeKind::I64 => Shape::new(vec![Some(64)]),
+            TypeKind::F32 => Shape::new(vec![Some(32)]),
+            TypeKind::F64 => Shape::new(vec![Some(64)]),
+            TypeKind::Clock
+            | TypeKind::ClockPosedge
+            | TypeKind::ClockNegedge
+            | TypeKind::Reset
+            | TypeKind::ResetAsyncHigh
+            | TypeKind::ResetAsyncLow
+            | TypeKind::ResetSyncHigh
+            | TypeKind::ResetSyncLow
+            | TypeKind::Bit
+            | TypeKind::Logic => {
+                let mut ret = Shape::default();
+
+                if self.width.is_empty() {
+                    ret.push(Some(1));
+                } else {
+                    let allow_inferable = matches!(&self.kind, TypeKind::Bit | TypeKind::Logic)
+                        && self.width.len() == 1
+                        && pos == TypePosition::Enum;
+                    for w in &self.width {
+                        let (_, value) = eval_size(context, w, allow_inferable)?;
+                        ret.push(value);
+                    }
+                }
+
+                ret
+            }
+            TypeKind::UserDefined(_) => {
+                let mut ret = Shape::default();
+                for w in &self.width {
+                    let (_, value) = eval_size(context, w, false)?;
+                    ret.push(value);
+                }
+
+                ret
+            }
+            TypeKind::BBool
+            | TypeKind::LBool
+            | TypeKind::Type
+            | TypeKind::String
+            | TypeKind::AbstractInterface(_) => {
+                // TODO packed array is forbidden
+                Shape::default()
+            }
+            TypeKind::Any => Shape::default(),
+            TypeKind::Inferred => Shape::default(),
+        };
+
+        let mut array = Shape::default();
+
+        let mut array_expr: Vec<ir::WidthExpr> = vec![];
+        let mut array_expr_valid = true;
+        for w in &self.array {
+            let (_, value) = eval_size(context, w, false)?;
+            if let Some(expr) = try_syntax_expr_to_param_width(w) {
+                array_expr.push(expr);
+            } else if let Some(n) = value {
+                array_expr.push(ir::WidthExpr::Concrete(n));
+            } else {
+                array_expr_valid = false;
+            }
+            array.push(value);
+        }
+
+        let mut signed = match &self.kind {
+            TypeKind::I8 | TypeKind::I16 | TypeKind::I32 | TypeKind::I64 => true,
+            TypeKind::Bit | TypeKind::Logic => self.is_signed(),
+            _ => {
+                if let Some(x) = self.find_modifier(&TypeModifierKind::Signed) {
+                    context.insert_error(crate::AnalyzerError::fixed_type_with_signed_modifier(
+                        &x.token.token.into(),
+                    ));
+                }
+                false
+            }
+        };
+
+        let is_positive = matches!(
+            &self.kind,
+            TypeKind::P8 | TypeKind::P16 | TypeKind::P32 | TypeKind::P64
+        );
+
+        let kind = match &self.kind {
+            TypeKind::Clock => ir::TypeKind::Clock,
+            TypeKind::ClockPosedge => ir::TypeKind::ClockPosedge,
+            TypeKind::ClockNegedge => ir::TypeKind::ClockNegedge,
+            TypeKind::Reset => ir::TypeKind::Reset,
+            TypeKind::ResetAsyncHigh => ir::TypeKind::ResetAsyncHigh,
+            TypeKind::ResetAsyncLow => ir::TypeKind::ResetAsyncLow,
+            TypeKind::ResetSyncHigh => ir::TypeKind::ResetSyncHigh,
+            TypeKind::ResetSyncLow => ir::TypeKind::ResetSyncLow,
+            TypeKind::Bit
+            | TypeKind::BBool
+            | TypeKind::P8
+            | TypeKind::P16
+            | TypeKind::P32
+            | TypeKind::P64
+            | TypeKind::U8
+            | TypeKind::U16
+            | TypeKind::U32
+            | TypeKind::U64
+            | TypeKind::I8
+            | TypeKind::I16
+            | TypeKind::I32
+            | TypeKind::I64 => ir::TypeKind::Bit,
+            TypeKind::F32 => ir::TypeKind::F32,
+            TypeKind::F64 => ir::TypeKind::F64,
+            TypeKind::LBool | TypeKind::Logic => ir::TypeKind::Logic,
+            TypeKind::Type => ir::TypeKind::Type,
+            TypeKind::String => ir::TypeKind::String,
+            TypeKind::UserDefined(x) => {
+                let mut r#type = eval_type(context, &x.path, pos)?;
+
+                width.append(r#type.width_mut());
+                array.append(&mut r#type.array);
+                signed = r#type.signed;
+
+                r#type.kind
+            }
+            TypeKind::AbstractInterface(x) => ir::TypeKind::AbstractInterface(*x),
+            TypeKind::Any => ir::TypeKind::Unknown,
+            TypeKind::Inferred => ir::TypeKind::Unknown,
+        };
+
+        let width_expr = build_width_expr(&self.width, &width);
+        let mut r#type = ir::Type::new(kind);
+        r#type.signed = signed;
+        r#type.is_positive = is_positive;
+        // Inner typedef/user-defined dims were appended after this type's
+        // own dims; extend the symbolic dims with their numeric values so
+        // the expr list still describes the whole shape.
+        for n in array.as_slice().iter().skip(array_expr.len()) {
+            if let Some(n) = n {
+                array_expr.push(ir::WidthExpr::Concrete(*n));
+            } else {
+                array_expr_valid = false;
+            }
+        }
+        if array_expr_valid && array_expr.len() == array.as_slice().len() {
+            r#type.set_array_expr(array_expr);
+        }
+        r#type.array = array;
+        if width_expr.len() == width.as_slice().len() {
+            r#type.set_parametric_width(width, width_expr);
+        } else {
+            r#type.set_concrete_width(width);
+        }
+        Ok(r#type)
+    }
+}
+
+fn build_width_expr(sources: &[syntax_tree::Expression], width: &Shape) -> Vec<ir::WidthExpr> {
+    let shape_slice = width.as_slice();
+    if sources.len() != shape_slice.len() {
+        return ir::WidthExpr::from_shape(width);
+    }
+    let mut result = Vec::with_capacity(shape_slice.len());
+    for (src, slot) in sources.iter().zip(shape_slice.iter()) {
+        if let Some(expr) = try_syntax_expr_to_param_width(src) {
+            result.push(expr);
+        } else if let Some(n) = slot {
+            result.push(ir::WidthExpr::Concrete(*n));
+        } else {
+            return ir::WidthExpr::from_shape(width);
+        }
+    }
+    result
+}
+
+fn try_syntax_expr_to_param_width(expr: &syntax_tree::Expression) -> Option<ir::WidthExpr> {
+    let if_expr = &*expr.if_expression;
+    if !if_expr.if_expression_list.is_empty() {
+        return None;
+    }
+    let e01 = &*if_expr.expression01;
+    if !e01.expression01_list.is_empty() {
+        return None;
+    }
+    let e02 = &*e01.expression02;
+    if !e02.expression02_list.is_empty() || e02.expression02_opt.is_some() {
+        return None;
+    }
+    let factor = &*e02.factor;
+    let id_factor = match factor {
+        syntax_tree::Factor::IdentifierFactor(x) => &x.identifier_factor,
+        _ => return None,
+    };
+    if id_factor.identifier_factor_opt.is_some() {
+        return None;
+    }
+    let scoped = &*id_factor.expression_identifier;
+    if scoped.expression_identifier_opt.is_some()
+        || !scoped.expression_identifier_list.is_empty()
+        || !scoped.expression_identifier_list0.is_empty()
+    {
+        return None;
+    }
+    let symbol = symbol_table::resolve(scoped.scoped_identifier.as_ref()).ok()?;
+    if !matches!(symbol.found.kind, SymbolKind::Parameter(ref x) if !x.is_proto) {
+        return None;
+    }
+    let parent = symbol.found.get_parent()?;
+    match parent.kind {
+        SymbolKind::Module(_) | SymbolKind::Interface(_) | SymbolKind::Package(_) => {
+            Some(ir::WidthExpr::Param(symbol.found.token.text))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeKind {
+    Clock,
+    ClockPosedge,
+    ClockNegedge,
+    Reset,
+    ResetAsyncHigh,
+    ResetAsyncLow,
+    ResetSyncHigh,
+    ResetSyncLow,
+    Bit,
+    Logic,
+    U8,
+    U16,
+    U32,
+    U64,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    Type,
+    BBool,
+    LBool,
+    String,
+    UserDefined(UserDefinedType),
+    AbstractInterface(Option<StrId>),
+    P8,
+    P16,
+    P32,
+    P64,
+    Any,
+    Inferred,
+}
+
+impl TypeKind {
+    pub fn is_clock(&self) -> bool {
+        matches!(
+            self,
+            TypeKind::Clock | TypeKind::ClockPosedge | TypeKind::ClockNegedge
+        )
+    }
+
+    pub fn is_reset(&self) -> bool {
+        matches!(
+            self,
+            TypeKind::Reset
+                | TypeKind::ResetAsyncHigh
+                | TypeKind::ResetAsyncLow
+                | TypeKind::ResetSyncHigh
+                | TypeKind::ResetSyncLow
+        )
+    }
+
+    pub fn is_2state(&self) -> bool {
+        matches!(
+            self,
+            TypeKind::Bit
+                | TypeKind::BBool
+                | TypeKind::U8
+                | TypeKind::U16
+                | TypeKind::U32
+                | TypeKind::U64
+                | TypeKind::I8
+                | TypeKind::I16
+                | TypeKind::I32
+                | TypeKind::I64
+                | TypeKind::F32
+                | TypeKind::F64
+        )
+    }
+
+    pub fn is_4state(&self) -> bool {
+        self.is_clock() | self.is_reset() | (*self == TypeKind::Logic)
+    }
+
+    pub fn is_fixed(&self) -> bool {
+        matches!(
+            self,
+            TypeKind::U8
+                | TypeKind::U16
+                | TypeKind::U32
+                | TypeKind::U64
+                | TypeKind::I8
+                | TypeKind::I16
+                | TypeKind::I32
+                | TypeKind::I64
+                | TypeKind::F32
+                | TypeKind::F64
+                | TypeKind::BBool
+                | TypeKind::LBool
+                | TypeKind::String
+        )
+    }
+
+    pub fn is_signed(&self) -> bool {
+        matches!(
+            self,
+            TypeKind::I8
+                | TypeKind::I16
+                | TypeKind::I32
+                | TypeKind::I64
+                | TypeKind::F32
+                | TypeKind::F64
+        )
+    }
+
+    pub fn is_type(&self) -> bool {
+        matches!(self, TypeKind::Type)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserDefinedType {
+    pub path: GenericSymbolPath,
+    // TODO remove this field because actual UserDefinedType should be resolved with replacing
+    // generic arguments
+    pub symbol: Option<SymbolId>,
+}
+
+impl From<&syntax_tree::ScopedIdentifier> for UserDefinedType {
+    fn from(value: &syntax_tree::ScopedIdentifier) -> Self {
+        let path: GenericSymbolPath = value.into();
+        Self { path, symbol: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeModifierKind {
+    Tri,
+    Signed,
+    Default,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeModifier {
+    pub kind: TypeModifierKind,
+    pub token: VerylToken,
+}
+
+impl From<&syntax_tree::TypeModifier> for TypeModifier {
+    fn from(value: &syntax_tree::TypeModifier) -> Self {
+        let (kind, token) = match value {
+            syntax_tree::TypeModifier::Tri(x) => (TypeModifierKind::Tri, &x.tri.tri_token),
+            syntax_tree::TypeModifier::Signed(x) => {
+                (TypeModifierKind::Signed, &x.signed.signed_token)
+            }
+            syntax_tree::TypeModifier::Defaul(x) => {
+                (TypeModifierKind::Default, &x.defaul.default_token)
+            }
+        };
+        TypeModifier {
+            kind,
+            token: token.clone(),
+        }
+    }
+}
+
+impl fmt::Display for TypeModifier {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.kind {
+            TypeModifierKind::Tri => "tri".to_string().fmt(f),
+            TypeModifierKind::Signed => "signed".to_string().fmt(f),
+            TypeModifierKind::Default => "default".to_string().fmt(f),
+        }
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut text = String::new();
+        for x in &self.modifier {
+            text.push_str(&x.to_string());
+        }
+        match &self.kind {
+            TypeKind::Clock => text.push_str("clock"),
+            TypeKind::ClockPosedge => text.push_str("clock posedge"),
+            TypeKind::ClockNegedge => text.push_str("clock negedge"),
+            TypeKind::Reset => text.push_str("reset"),
+            TypeKind::ResetAsyncHigh => text.push_str("reset async high"),
+            TypeKind::ResetAsyncLow => text.push_str("reset async low"),
+            TypeKind::ResetSyncHigh => text.push_str("reset sync high"),
+            TypeKind::ResetSyncLow => text.push_str("reset sync low"),
+            TypeKind::Bit => text.push_str("bit"),
+            TypeKind::Logic => text.push_str("logic"),
+            TypeKind::P8 => text.push_str("p8"),
+            TypeKind::P16 => text.push_str("p16"),
+            TypeKind::P32 => text.push_str("p32"),
+            TypeKind::P64 => text.push_str("p64"),
+            TypeKind::U8 => text.push_str("u8"),
+            TypeKind::U16 => text.push_str("u16"),
+            TypeKind::U32 => text.push_str("u32"),
+            TypeKind::U64 => text.push_str("u64"),
+            TypeKind::I8 => text.push_str("i8"),
+            TypeKind::I16 => text.push_str("i16"),
+            TypeKind::I32 => text.push_str("i32"),
+            TypeKind::I64 => text.push_str("i64"),
+            TypeKind::F32 => text.push_str("f32"),
+            TypeKind::F64 => text.push_str("f64"),
+            TypeKind::Type => text.push_str("type"),
+            TypeKind::BBool => text.push_str("bbool"),
+            TypeKind::LBool => text.push_str("lbool"),
+            TypeKind::String => text.push_str("string"),
+            TypeKind::UserDefined(x) => {
+                text.push_str(&x.path.to_string());
+            }
+            TypeKind::AbstractInterface(x) => {
+                if let Some(x) = x {
+                    text.push_str(&format!("interface::{x}"));
+                } else {
+                    text.push_str("interface");
+                }
+            }
+            TypeKind::Any => text.push_str("any"),
+            TypeKind::Inferred => text.push('_'),
+        }
+        if !self.width.is_empty() {
+            text.push('<');
+            for (i, x) in self.width.iter().enumerate() {
+                if i != 0 {
+                    text.push_str(", ");
+                }
+                let mut stringifier = Stringifier::new();
+                stringifier.expression(x);
+                text.push_str(stringifier.as_str());
+            }
+            text.push('>');
+        }
+        if !self.array.is_empty() {
+            text.push_str(" [");
+            for (i, x) in self.array.iter().enumerate() {
+                if i != 0 {
+                    text.push_str(", ");
+                }
+                let mut stringifier = Stringifier::new();
+                stringifier.expression(x);
+                text.push_str(stringifier.as_str());
+            }
+            text.push(']');
+        }
+        text.fmt(f)
+    }
+}
+
+impl TryFrom<&syntax_tree::Expression> for Type {
+    type Error = ();
+
+    fn try_from(value: &syntax_tree::Expression) -> Result<Self, Self::Error> {
+        let value = value.if_expression.as_ref();
+        let value = if value.if_expression_list.is_empty() {
+            value.expression01.as_ref()
+        } else {
+            return Err(());
+        };
+        let value = if value.expression01_list.is_empty() {
+            value.expression02.as_ref()
+        } else {
+            return Err(());
+        };
+        let value = if !value.expression02_list.is_empty() || value.expression02_opt.is_some() {
+            return Err(());
+        } else {
+            value.factor.as_ref()
+        };
+
+        match value {
+            syntax_tree::Factor::FactorTypeFactor(x) => {
+                let factor = &x.factor_type_factor;
+
+                let mut modifier = Vec::new();
+                for x in &factor.factor_type_factor_list {
+                    modifier.push(TypeModifier::from(&*x.type_modifier));
+                }
+                let mut factor_type: Type = factor.factor_type.as_ref().into();
+                factor_type.modifier = modifier;
+                Ok(factor_type)
+            }
+            syntax_tree::Factor::IdentifierFactor(x) => {
+                let factor = &x.identifier_factor;
+
+                if factor.identifier_factor_opt.is_some() {
+                    Err(())
+                } else {
+                    let x = factor.expression_identifier.as_ref();
+                    if !x.expression_identifier_list.is_empty() {
+                        return Err(());
+                    }
+                    if !x.expression_identifier_list0.is_empty() {
+                        return Err(());
+                    }
+
+                    let r#type: UserDefinedType = x.scoped_identifier.as_ref().into();
+                    let kind = TypeKind::UserDefined(r#type);
+                    let width: Vec<_> = if let Some(ref x) = x.expression_identifier_opt {
+                        let width: Vec<_> = x.width.as_ref().into();
+                        width.iter().map(|x| (*x).clone()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    Ok(Type {
+                        kind,
+                        modifier: vec![],
+                        width,
+                        array: vec![],
+                        array_type: None,
+                        is_const: false,
+                        token: factor.as_ref().into(),
+                    })
+                }
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<&syntax_tree::FixedType> for Type {
+    fn from(value: &syntax_tree::FixedType) -> Self {
+        let kind = match value {
+            syntax_tree::FixedType::P8(_) => TypeKind::P8,
+            syntax_tree::FixedType::P16(_) => TypeKind::P16,
+            syntax_tree::FixedType::P32(_) => TypeKind::P32,
+            syntax_tree::FixedType::P64(_) => TypeKind::P64,
+            syntax_tree::FixedType::U8(_) => TypeKind::U8,
+            syntax_tree::FixedType::U16(_) => TypeKind::U16,
+            syntax_tree::FixedType::U32(_) => TypeKind::U32,
+            syntax_tree::FixedType::U64(_) => TypeKind::U64,
+            syntax_tree::FixedType::I8(_) => TypeKind::I8,
+            syntax_tree::FixedType::I16(_) => TypeKind::I16,
+            syntax_tree::FixedType::I32(_) => TypeKind::I32,
+            syntax_tree::FixedType::I64(_) => TypeKind::I64,
+            syntax_tree::FixedType::F32(_) => TypeKind::F32,
+            syntax_tree::FixedType::F64(_) => TypeKind::F64,
+            syntax_tree::FixedType::BBool(_) => TypeKind::BBool,
+            syntax_tree::FixedType::LBool(_) => TypeKind::LBool,
+            syntax_tree::FixedType::Strin(_) => TypeKind::String,
+        };
+        Type {
+            kind,
+            modifier: vec![],
+            width: vec![],
+            array: vec![],
+            array_type: None,
+            is_const: false,
+            token: value.into(),
+        }
+    }
+}
+
+impl From<&syntax_tree::FactorType> for Type {
+    fn from(value: &syntax_tree::FactorType) -> Self {
+        match value.factor_type_group.as_ref() {
+            syntax_tree::FactorTypeGroup::VariableTypeFactorTypeOpt(x) => {
+                let kind = match x.variable_type.as_ref() {
+                    syntax_tree::VariableType::Clock(_) => TypeKind::Clock,
+                    syntax_tree::VariableType::ClockPosedge(_) => TypeKind::ClockPosedge,
+                    syntax_tree::VariableType::ClockNegedge(_) => TypeKind::ClockNegedge,
+                    syntax_tree::VariableType::Reset(_) => TypeKind::Reset,
+                    syntax_tree::VariableType::ResetAsyncHigh(_) => TypeKind::ResetAsyncHigh,
+                    syntax_tree::VariableType::ResetAsyncLow(_) => TypeKind::ResetAsyncLow,
+                    syntax_tree::VariableType::ResetSyncHigh(_) => TypeKind::ResetSyncHigh,
+                    syntax_tree::VariableType::ResetSyncLow(_) => TypeKind::ResetSyncLow,
+                    syntax_tree::VariableType::Logic(_) => TypeKind::Logic,
+                    syntax_tree::VariableType::Bit(_) => TypeKind::Bit,
+                };
+                let width: Vec<_> = if let Some(ref x) = x.factor_type_opt {
+                    let width: Vec<_> = x.width.as_ref().into();
+                    width.iter().map(|x| (*x).clone()).collect()
+                } else {
+                    Vec::new()
+                };
+                Type {
+                    kind,
+                    modifier: vec![],
+                    width,
+                    array: vec![],
+                    array_type: None,
+                    is_const: false,
+                    token: value.into(),
+                }
+            }
+            syntax_tree::FactorTypeGroup::FixedType(x) => {
+                let kind = match x.fixed_type.as_ref() {
+                    syntax_tree::FixedType::P8(_) => TypeKind::P8,
+                    syntax_tree::FixedType::P16(_) => TypeKind::P16,
+                    syntax_tree::FixedType::P32(_) => TypeKind::P32,
+                    syntax_tree::FixedType::P64(_) => TypeKind::P64,
+                    syntax_tree::FixedType::U8(_) => TypeKind::U8,
+                    syntax_tree::FixedType::U16(_) => TypeKind::U16,
+                    syntax_tree::FixedType::U32(_) => TypeKind::U32,
+                    syntax_tree::FixedType::U64(_) => TypeKind::U64,
+                    syntax_tree::FixedType::I8(_) => TypeKind::I8,
+                    syntax_tree::FixedType::I16(_) => TypeKind::I16,
+                    syntax_tree::FixedType::I32(_) => TypeKind::I32,
+                    syntax_tree::FixedType::I64(_) => TypeKind::I64,
+                    syntax_tree::FixedType::F32(_) => TypeKind::F32,
+                    syntax_tree::FixedType::F64(_) => TypeKind::F64,
+                    syntax_tree::FixedType::BBool(_) => TypeKind::BBool,
+                    syntax_tree::FixedType::LBool(_) => TypeKind::LBool,
+                    syntax_tree::FixedType::Strin(_) => TypeKind::String,
+                };
+                Type {
+                    kind,
+                    modifier: vec![],
+                    width: vec![],
+                    array: vec![],
+                    array_type: None,
+                    is_const: false,
+                    token: value.into(),
+                }
+            }
+        }
+    }
+}
+
+impl From<&syntax_tree::ScalarType> for Type {
+    fn from(value: &syntax_tree::ScalarType) -> Self {
+        let mut modifier = Vec::new();
+        for x in &value.scalar_type_list {
+            modifier.push(TypeModifier::from(&*x.type_modifier));
+        }
+
+        let array_type = ArrayType {
+            scalar_type: Box::new(value.clone()),
+            array_type_opt: None,
+        };
+
+        match &*value.scalar_type_group {
+            syntax_tree::ScalarTypeGroup::UserDefinedTypeScalarTypeOpt(x) => {
+                let r#type: UserDefinedType = x.user_defined_type.scoped_identifier.as_ref().into();
+                let kind = TypeKind::UserDefined(r#type);
+                let width: Vec<_> = if let Some(ref x) = x.scalar_type_opt {
+                    let width: Vec<_> = x.width.as_ref().into();
+                    width.iter().map(|x| (*x).clone()).collect()
+                } else {
+                    Vec::new()
+                };
+                Type {
+                    kind,
+                    modifier,
+                    width,
+                    array: vec![],
+                    array_type: Some(array_type),
+                    is_const: false,
+                    token: value.into(),
+                }
+            }
+            syntax_tree::ScalarTypeGroup::FactorType(x) => {
+                let factor_type: Type = x.factor_type.as_ref().into();
+                Type {
+                    kind: factor_type.kind,
+                    modifier,
+                    width: factor_type.width,
+                    array: vec![],
+                    array_type: Some(array_type),
+                    is_const: false,
+                    token: value.into(),
+                }
+            }
+        }
+    }
+}
+
+impl From<&syntax_tree::ArrayType> for Type {
+    fn from(value: &syntax_tree::ArrayType) -> Self {
+        let scalar_type: Type = value.scalar_type.as_ref().into();
+        let mut array_type = scalar_type.array_type.unwrap();
+        let array: Vec<_> = if let Some(ref x) = value.array_type_opt {
+            array_type.array_type_opt.replace(x.clone());
+            let x: Vec<_> = x.array.as_ref().into();
+            x.iter().map(|x| (*x).clone()).collect()
+        } else {
+            Vec::new()
+        };
+        Type {
+            kind: scalar_type.kind,
+            modifier: scalar_type.modifier,
+            width: scalar_type.width,
+            array,
+            array_type: Some(array_type),
+            is_const: false,
+            token: value.into(),
+        }
+    }
+}
+
+impl From<&syntax_tree::ScopedIdentifier> for Type {
+    fn from(value: &syntax_tree::ScopedIdentifier) -> Self {
+        let r#type: UserDefinedType = value.into();
+        let kind = TypeKind::UserDefined(r#type);
+        Type {
+            kind,
+            modifier: vec![],
+            width: vec![],
+            array: vec![],
+            array_type: None,
+            is_const: false,
+            token: value.into(),
+        }
+    }
+}
+
+impl From<&syntax_tree::GenericProtoBound> for Type {
+    fn from(value: &syntax_tree::GenericProtoBound) -> Self {
+        match value {
+            syntax_tree::GenericProtoBound::ScopedIdentifier(x) => {
+                x.scoped_identifier.as_ref().into()
+            }
+            syntax_tree::GenericProtoBound::FixedType(x) => x.fixed_type.as_ref().into(),
+        }
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+pub enum ClockDomain {
+    Explicit(SymbolId),
+    Inferred(SymbolId),
+    Implicit,
+    #[default]
+    None,
+}
+
+impl ClockDomain {
+    pub fn domain_id(&self) -> Option<SymbolId> {
+        match self {
+            ClockDomain::Explicit(id) | ClockDomain::Inferred(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    pub fn compatible(&self, x: &ClockDomain) -> bool {
+        match (self, x) {
+            (ClockDomain::None, _) | (_, ClockDomain::None) => true,
+            (a, b) => match (a.domain_id(), b.domain_id()) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => true,
+                _ => false,
+            },
+        }
+    }
+
+    /// Combine two operands' clock domains for the result: `None` yields the
+    /// other side, else the concrete (id-bearing) domain wins (keeps CDC alive).
+    pub fn merge(&self, other: &ClockDomain) -> ClockDomain {
+        match (self, other) {
+            (ClockDomain::None, x) | (x, ClockDomain::None) => *x,
+            (x, y) => {
+                if x.domain_id().is_some() {
+                    *x
+                } else {
+                    *y
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for ClockDomain {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = match self {
+            ClockDomain::Explicit(x) | ClockDomain::Inferred(x) => {
+                format!("'{}", symbol_table::get(*x).unwrap().token)
+            }
+            ClockDomain::Implicit => "'_".to_string(),
+            ClockDomain::None => "".to_string(),
+        };
+        text.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariableProperty {
+    pub r#type: Type,
+    pub affiliation: Affiliation,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub clock_domain: ClockDomain,
+    pub loop_variable: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Affiliation {
+    ProjectNamespace,
+    Module,
+    Interface,
+    Package,
+    StatementBlock,
+    Function,
+    Modport,
+    ProtoModule,
+    ProtoInterface,
+    ProtoPackage,
+    AlwaysComb,
+    AlwaysFf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortProperty {
+    pub token: Token,
+    pub r#type: Type,
+    pub direction: Direction,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub clock_domain: ClockDomain,
+    pub default_value: Option<syntax_tree::Expression>,
+    pub is_proto: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Port {
+    pub token: VerylToken,
+    pub symbol: SymbolId,
+}
+
+impl fmt::Display for Port {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = format!("{} [{}]", self.name(), self.property().direction);
+        text.fmt(f)
+    }
+}
+
+impl Port {
+    pub fn property(&self) -> PortProperty {
+        if let SymbolKind::Port(x) = self.symbol().kind {
+            x.clone()
+        } else {
+            unreachable!()
+        }
+    }
+
+    pub fn symbol(&self) -> Symbol {
+        symbol_table::get(self.symbol).unwrap()
+    }
+
+    pub fn name(&self) -> StrId {
+        self.token.token.text
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ParameterKind {
+    Param,
+    Const,
+}
+
+impl ParameterKind {
+    pub fn is_const(&self) -> bool {
+        matches!(self, ParameterKind::Const)
+    }
+
+    pub fn to_sv_snippet(&self) -> String {
+        if self.is_const() {
+            "localparam".to_string()
+        } else {
+            "parameter".to_string()
+        }
+    }
+}
+
+impl From<&ParameterKind> for ir::VarKind {
+    fn from(value: &ParameterKind) -> Self {
+        match value {
+            ParameterKind::Param => ir::VarKind::Param,
+            ParameterKind::Const => ir::VarKind::Const,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParameterProperty {
+    pub token: Token,
+    pub is_proto: bool,
+    pub r#type: Type,
+    pub kind: ParameterKind,
+    // `None` for a proto const, which has no value.
+    pub value: Option<syntax_tree::Expression>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Parameter {
+    pub name: StrId,
+    pub symbol: SymbolId,
+}
+
+impl fmt::Display for Parameter {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = format!("{} [{}]", self.name, self.property().r#type);
+        text.fmt(f)
+    }
+}
+
+impl Parameter {
+    pub fn property(&self) -> ParameterProperty {
+        if let SymbolKind::Parameter(x) = symbol_table::get(self.symbol).unwrap().kind {
+            x.clone()
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleProperty {
+    pub range: TokenRange,
+    pub is_proto: bool,
+    pub proto: Option<GenericSymbolPath>,
+    pub generic_parameters: Vec<SymbolId>,
+    pub generic_consts: Vec<SymbolId>,
+    pub generic_references: Vec<GenericSymbolPath>,
+    pub parameters: Vec<Parameter>,
+    pub ports: Vec<Port>,
+    pub default_clock: Option<SymbolId>,
+    pub default_reset: Option<SymbolId>,
+    pub definition: DefinitionId,
+    pub test: Option<TestProperty>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasModuleProperty {
+    pub target: GenericSymbolPath,
+    pub is_proto: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceProperty {
+    pub range: TokenRange,
+    pub is_proto: bool,
+    pub proto: Option<GenericSymbolPath>,
+    pub generic_parameters: Vec<SymbolId>,
+    pub generic_consts: Vec<SymbolId>,
+    pub generic_references: Vec<GenericSymbolPath>,
+    pub mixin_sources: Vec<GenericSymbolPath>,
+    pub parameters: Vec<Parameter>,
+    pub members: Vec<SymbolId>,
+    // `None` for a proto interface, which has no definition.
+    pub definition: Option<DefinitionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasInterfaceProperty {
+    pub target: GenericSymbolPath,
+    pub is_proto: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionProperty {
+    pub affiliation: Affiliation,
+    pub is_proto: bool,
+    pub range: TokenRange,
+    pub generic_parameters: Vec<SymbolId>,
+    pub generic_consts: Vec<SymbolId>,
+    pub generic_references: Vec<GenericSymbolPath>,
+    pub ports: Vec<Port>,
+    pub ret: Option<Type>,
+    pub reference_paths: Vec<GenericSymbolPath>,
+    pub constantable: Option<bool>,
+    #[serde(default)]
+    pub write_paths: Vec<GenericSymbolPath>,
+    #[serde(default)]
+    pub call_sites: Vec<FunctionCallSite>,
+    #[serde(default)]
+    pub conditional_effects: Box<ConditionalFunctionEffects>,
+    pub definition: Option<DefinitionId>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct ConditionalFunctionEffects {
+    pub side_effect_contexts: Vec<DefineContext>,
+    pub formal_write_contexts: Vec<FunctionWrite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FunctionWrite {
+    pub path: GenericSymbolPath,
+    pub define_context: DefineContext,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCallSite {
+    pub callee: GenericSymbolPath,
+    pub arguments: Vec<FunctionCallArgument>,
+    #[serde(default)]
+    pub range: TokenRange,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCallArgument {
+    pub name: Option<StrId>,
+    pub targets: Vec<GenericSymbolPath>,
+}
+
+impl FunctionProperty {
+    pub fn is_global(&self) -> bool {
+        self.affiliation == Affiliation::ProjectNamespace
+    }
+
+    pub fn has_side_effect_in(&self, defines: &HashSet<StrId>) -> bool {
+        self.conditional_effects
+            .side_effect_contexts
+            .iter()
+            .any(|x| x.is_active(defines))
+    }
+
+    pub fn written_output_paths(&self, defines: &HashSet<StrId>) -> Vec<&GenericSymbolPath> {
+        self.conditional_effects
+            .formal_write_contexts
+            .iter()
+            .filter(|x| x.define_context.is_active(defines))
+            .map(|x| &x.path)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemFuncitonProperty {
+    pub ports: Vec<Port>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectTarget {
+    pub identifiers: Vec<ConnectTargetIdentifier>,
+    pub expression: syntax_tree::Expression,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectTargetIdentifier {
+    pub path: Vec<(StrId, Vec<syntax_tree::Expression>)>,
+}
+
+impl ConnectTargetIdentifier {
+    pub fn path(&self) -> Vec<StrId> {
+        self.path.iter().map(|x| x.0).collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.path.is_empty()
+    }
+
+    pub fn is_partial(&self) -> bool {
+        self.path.iter().any(|x| !x.1.is_empty())
+    }
+}
+
+impl From<&syntax_tree::ExpressionIdentifier> for ConnectTargetIdentifier {
+    fn from(value: &syntax_tree::ExpressionIdentifier) -> Self {
+        let path: SymbolPath = value.scoped_identifier.as_ref().into();
+
+        let mut ret = vec![];
+        for (i, x) in path.as_slice().iter().enumerate() {
+            if i == path.as_slice().len() - 1 {
+                let select: Vec<_> = value
+                    .expression_identifier_list
+                    .iter()
+                    .map(|x| x.select.expression.as_ref().clone())
+                    .collect();
+                ret.push((*x, select));
+            } else {
+                ret.push((*x, vec![]));
+            }
+        }
+
+        for x in &value.expression_identifier_list0 {
+            let text = x.identifier.identifier_token.token.text;
+            let select: Vec<_> = x
+                .expression_identifier_list0_list
+                .iter()
+                .map(|x| x.select.expression.as_ref().clone())
+                .collect();
+            ret.push((text, select));
+        }
+        Self { path: ret }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstanceProperty {
+    pub array: Vec<syntax_tree::Expression>,
+    pub type_name: GenericSymbolPath,
+    pub parameter_connects: HashMap<Token, ConnectTarget>,
+    pub port_connects: HashMap<Token, ConnectTarget>,
+    pub clock_domain: ClockDomain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageProperty {
+    pub range: TokenRange,
+    pub is_proto: bool,
+    pub proto: Option<GenericSymbolPath>,
+    pub generic_parameters: Vec<SymbolId>,
+    pub generic_consts: Vec<SymbolId>,
+    pub generic_references: Vec<GenericSymbolPath>,
+    pub members: Vec<SymbolId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AliasPackageProperty {
+    pub target: GenericSymbolPath,
+    pub is_proto: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructProperty {
+    pub members: Vec<SymbolId>,
+    pub generic_parameters: Vec<SymbolId>,
+    pub generic_references: Vec<GenericSymbolPath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructMemberProperty {
+    pub r#type: Type,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnionProperty {
+    pub members: Vec<SymbolId>,
+    pub generic_parameters: Vec<SymbolId>,
+    pub generic_references: Vec<GenericSymbolPath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnionMemberProperty {
+    pub r#type: Type,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeDefProperty {
+    pub is_proto: bool,
+    // `None` for a proto typedef declared without a type.
+    pub r#type: Option<Type>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumProperty {
+    pub r#type: Option<Type>,
+    pub width: usize,
+    pub members: Vec<SymbolId>,
+    pub encoding: EnumEncodingItem,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EnumMemberValue {
+    Unresolved,
+    ImplicitValue(BigUint),
+    ExplicitValue(syntax_tree::Expression, Option<BigUint>),
+    UnevaluableValue,
+}
+
+impl EnumMemberValue {
+    pub fn value(&self) -> Option<&BigUint> {
+        match self {
+            EnumMemberValue::Unresolved => None,
+            EnumMemberValue::ImplicitValue(value) => Some(value),
+            EnumMemberValue::ExplicitValue(_expression, evaluated) => evaluated.as_ref(),
+            EnumMemberValue::UnevaluableValue => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnumMemberProperty {
+    pub value: EnumMemberValue,
+    pub prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModportProperty {
+    pub interface: SymbolId,
+    pub members: Vec<SymbolId>,
+    pub default: Option<ModportDefault>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModportDefault {
+    Input,
+    Output,
+    Same(Vec<Token>),
+    Converse(Vec<Token>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModportVariableMemberProperty {
+    pub direction: Direction,
+    pub variable: SymbolId,
+    /// For a member generated by `..same`/`..converse`, the target modport member
+    /// it came from. Its guard applies on top of the variable's own.
+    pub generated_from: Option<SymbolId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModportFunctionMemberProperty {
+    pub function: SymbolId,
+    /// See [`ModportVariableMemberProperty::generated_from`].
+    pub generated_from: Option<SymbolId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GenericBoundKind {
+    Type,
+    Inst(GenericSymbolPath),
+    Proto(Box<Type>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProtoBound {
+    ProtoModule(Symbol),
+    ProtoInterface(Symbol),
+    ProtoPackage(Symbol),
+    FactorType(Type),
+    Enum((Symbol, Type)),
+    Struct((Symbol, Type)),
+    Union((Symbol, Type)),
+}
+
+impl ProtoBound {
+    pub fn get_symbol(&self) -> Option<Symbol> {
+        match self {
+            ProtoBound::ProtoModule(x)
+            | ProtoBound::ProtoInterface(x)
+            | ProtoBound::ProtoPackage(x)
+            | ProtoBound::Enum((x, _))
+            | ProtoBound::Struct((x, _))
+            | ProtoBound::Union((x, _)) => Some(x.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_variable_type(&self) -> bool {
+        matches!(
+            self,
+            ProtoBound::FactorType(_)
+                | ProtoBound::Enum(_)
+                | ProtoBound::Struct(_)
+                | ProtoBound::Union(_)
+        )
+    }
+}
+
+impl GenericBoundKind {
+    pub fn is_compatible(&self, other: &GenericBoundKind) -> bool {
+        self.to_string() == other.to_string()
+    }
+
+    pub fn resolve_inst_bound(&self, namespace: &Namespace) -> Result<Symbol, Option<SymbolId>> {
+        let GenericBoundKind::Inst(path) = self else {
+            return Err(None);
+        };
+
+        if let Ok(symbol) = symbol_table::resolve_generic_structural(path, namespace) {
+            if symbol.found.is_proto_interface(false, true) {
+                Ok((*symbol.found).clone())
+            } else {
+                Err(Some(symbol.found.id))
+            }
+        } else {
+            Err(None)
+        }
+    }
+
+    pub fn resolve_proto_bound(
+        &self,
+        namespace: &Namespace,
+    ) -> Result<ProtoBound, Option<SymbolId>> {
+        let GenericBoundKind::Proto(proto) = self else {
+            return Err(None);
+        };
+
+        let Some((r#type, symbol)) = proto.trace_user_defined(Some(namespace)) else {
+            return Err(None);
+        };
+        if symbol.is_none() {
+            return Ok(ProtoBound::FactorType(r#type));
+        }
+
+        let symbol = symbol.unwrap();
+        match &symbol.kind {
+            SymbolKind::Module(x) if x.is_proto => Ok(ProtoBound::ProtoModule(symbol)),
+            SymbolKind::Interface(x) if x.is_proto => Ok(ProtoBound::ProtoInterface(symbol)),
+            SymbolKind::Package(x) if x.is_proto => Ok(ProtoBound::ProtoPackage(symbol)),
+            SymbolKind::Enum(_) => Ok(ProtoBound::Enum((symbol, r#type))),
+            SymbolKind::Struct(_) => Ok(ProtoBound::Struct((symbol, r#type))),
+            SymbolKind::Union(_) => Ok(ProtoBound::Union((symbol, r#type))),
+            _ => Err(Some(symbol.id)),
+        }
+    }
+}
+
+impl fmt::Display for GenericBoundKind {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let text = match self {
+            GenericBoundKind::Type => "type".to_string(),
+            GenericBoundKind::Inst(x) => x.to_string(),
+            GenericBoundKind::Proto(x) => x.to_string(),
+        };
+        text.fmt(f)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericParameterProperty {
+    pub bound: GenericBoundKind,
+    pub default_value: Option<GenericSymbolPath>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericConstProperty {
+    pub bound: GenericBoundKind,
+    pub value: syntax_tree::Expression,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericInstanceProperty {
+    pub base: SymbolId,
+    pub arguments: Vec<GenericSymbolPath>,
+    pub affiliation_symbols: Vec<SymbolId>,
+}
+
+impl GenericInstanceProperty {
+    pub fn base_symbol(&self) -> Symbol {
+        symbol_table::get(self.base).unwrap()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TestType {
+    Inline,
+    CocotbEmbed(Box<syntax_tree::EmbedContent>),
+    CocotbInclude(StrId),
+    Native,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestProperty {
+    pub r#type: TestType,
+    pub path: PathId,
+    pub top: Option<StrId>,
+    pub ignored: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TbComponentKind {
+    ClockGen,
+    ResetGen,
+    File,
+    /// Random-number generator declared as `var r: $tb::random::<T>;`. The
+    /// element type is a generic argument (see `TbComponentProperty`), so it
+    /// is resolved through the normal generic pipeline.
+    Random,
+    /// User-defined verification component declared in `[[components]]` of
+    /// Veryl.toml; the payload is the component name.
+    External(StrId),
+}
+
+impl std::fmt::Display for TbComponentKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TbComponentKind::ClockGen => write!(f, "clock_gen"),
+            TbComponentKind::ResetGen => write!(f, "reset_gen"),
+            TbComponentKind::File => write!(f, "file"),
+            TbComponentKind::Random => write!(f, "random"),
+            TbComponentKind::External(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TbComponentProperty {
+    pub kind: TbComponentKind,
+    /// Generic type parameters, held like other symbols' `generic_parameters`.
+    /// Only `$tb::random::<T>` carries one (the synthesized `T`); the other
+    /// builtins and external components leave this empty.
+    pub generic_parameters: Vec<SymbolId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectPropertyValueProperty {
+    pub value: veryl_metadata::ProjectProperty,
+    pub r#type: Type,
+}
+
+impl ProjectPropertyValueProperty {
+    pub fn new(value: &veryl_metadata::ProjectProperty, token: TokenRange) -> Self {
+        let kind = match value {
+            veryl_metadata::ProjectProperty::Int(_) => TypeKind::I64,
+            veryl_metadata::ProjectProperty::Bool(_) => TypeKind::BBool,
+        };
+        let r#type = Type {
+            modifier: vec![],
+            kind,
+            width: vec![],
+            array: vec![],
+            array_type: None,
+            is_const: true,
+            token,
+        };
+        Self {
+            value: value.clone(),
+            r#type,
+        }
+    }
+}

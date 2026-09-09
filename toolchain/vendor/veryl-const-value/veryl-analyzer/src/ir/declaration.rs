@@ -1,0 +1,504 @@
+use crate::conv::Context;
+use crate::ir::assign_table::{AssignContext, AssignTable};
+use crate::ir::{
+    AssignDestination, Component, Comptime, Expression, FfTable, Statement, VarId, VarIndex,
+    VarSelect,
+};
+use crate::value::Value;
+use indent::indent_all_by;
+use std::fmt;
+use std::sync::Arc;
+use veryl_parser::resource_table::StrId;
+use veryl_parser::token_range::TokenRange;
+
+/// How many leading segments of `segs` a node's qualified path -- its generate
+/// prefix `hierarchy` then `name` -- consumes, or `None` if `segs` does not start
+/// with it. A plain node has no prefix and consumes one segment. Shared by the
+/// analyzer's reference classification and the simulator's meta walk so both
+/// match alike.
+pub fn qualified_prefix_len(hierarchy: &[StrId], name: StrId, segs: &[StrId]) -> Option<usize> {
+    if hierarchy.len() < segs.len()
+        && segs[..hierarchy.len()] == *hierarchy
+        && segs[hierarchy.len()] == name
+    {
+        Some(hierarchy.len() + 1)
+    } else {
+        None
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct DeclarationBlock(pub Vec<Declaration>);
+
+impl DeclarationBlock {
+    pub fn new(decl: Declaration) -> Self {
+        Self(vec![decl])
+    }
+}
+
+#[derive(Clone)]
+pub enum Declaration {
+    Comb(CombDeclaration),
+    Ff(Box<FfDeclaration>),
+    Inst(Box<InstDeclaration>),
+    External(Box<ExternalDeclaration>),
+    Initial(InitialDeclaration),
+    Final(FinalDeclaration),
+    Unsupported(TokenRange),
+    Null,
+}
+
+impl Declaration {
+    pub fn new_comb(statements: Vec<Statement>) -> Self {
+        Self::Comb(CombDeclaration { statements })
+    }
+
+    pub fn new_ff(clock: FfClock, reset: Option<FfReset>, statements: Vec<Statement>) -> Self {
+        Self::Ff(Box::new(FfDeclaration {
+            clock,
+            reset,
+            statements,
+        }))
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Declaration::Null)
+    }
+
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        match self {
+            Declaration::Comb(x) => x.eval_assign(context, assign_table),
+            Declaration::Ff(x) => x.eval_assign(context, assign_table),
+            Declaration::Inst(x) => x.eval_assign(context, assign_table),
+            Declaration::External(x) => x.eval_assign(context, assign_table),
+            Declaration::Initial(x) => x.eval_assign(context, assign_table),
+            Declaration::Final(x) => x.eval_assign(context, assign_table),
+            Declaration::Unsupported(_) => (),
+            Declaration::Null => (),
+        }
+        // NOTE: `assign_table.refernced` is intentionally NOT cleared here.
+        // The only caller (`Module::eval_assign`) creates a fresh per-decl
+        // `AssignTable`, so leaking the cumulative `refernced` map up to the
+        // caller has no effect on subsequent iterations -- but it lets the
+        // caller capture the per-decl reference masks for combinational loop
+        // detection before dropping the table.
+    }
+
+    pub fn gather_ff(&self, context: &mut Context, table: &mut FfTable, decl: usize) {
+        match self {
+            Declaration::Ff(x) => x.gather_ff(context, table, decl),
+            Declaration::Comb(x) => x.gather_ff_comb(context, table, decl),
+            Declaration::Inst(x) => x.gather_ff(context, table, decl),
+            Declaration::External(x) => x.gather_ff(context, table, decl),
+            _ => {}
+        }
+    }
+}
+
+impl fmt::Display for Declaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Declaration::Comb(x) => x.fmt(f),
+            Declaration::Ff(x) => x.fmt(f),
+            Declaration::Inst(x) => x.fmt(f),
+            Declaration::External(x) => x.fmt(f),
+            Declaration::Initial(x) => x.fmt(f),
+            Declaration::Final(x) => x.fmt(f),
+            Declaration::Unsupported(_) => "/* unsupported */".fmt(f),
+            Declaration::Null => "".fmt(f),
+        }
+    }
+}
+
+/// Instance of a user-defined verification component
+/// (`inst x: $comp::<name>`). Port directions are unknown until the
+/// simulator loads the component, so each connection keeps both the readable
+/// expression (input use) and, when it is a plain variable reference, the
+/// assign destination (output use).
+#[derive(Clone)]
+pub struct ExternalDeclaration {
+    pub name: StrId,
+    /// Component export name (`$comp::<name>`).
+    pub component: StrId,
+    pub params: Vec<(StrId, ExternalParamValue)>,
+    pub connects: Vec<ExternalConnect>,
+    /// True for the method-only form (`var g: $comp::x;`),
+    /// false for `inst`. Checked against the component's declared kind at
+    /// load time.
+    pub is_var_form: bool,
+    pub token: TokenRange,
+}
+
+/// Elaboration-time parameter of a user-defined component.
+#[derive(Clone, Debug)]
+pub enum ExternalParamValue {
+    Value(Value),
+    Str(String),
+}
+
+#[derive(Clone)]
+pub struct ExternalConnect {
+    pub port: StrId,
+    pub expr: Expression,
+    /// Present when the connection is a plain variable reference, making
+    /// the port usable as a component output.
+    pub output: Option<AssignDestination>,
+    /// Whether the port is offered to the component as an input. False
+    /// only for modport members whose direction fixes them as outputs.
+    pub input: bool,
+    /// The connection name a modport-expanded member came from. Members
+    /// of a group pass the unused-port check as long as the component
+    /// uses at least one of them.
+    pub group: Option<StrId>,
+    /// The interface member name of a modport-expanded connection; ports
+    /// are matched to it by the manifest's (group, member) record.
+    pub member: Option<StrId>,
+    pub is_clock: bool,
+    pub is_reset: bool,
+    pub width: u32,
+    pub token: TokenRange,
+}
+
+impl ExternalDeclaration {
+    /// Direction is unknown until load time; treat plain-variable
+    /// connections like SystemVerilog blackbox ports (may be read or
+    /// driven).
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        for connect in &self.connects {
+            if let Some(dst) = &connect.output {
+                dst.eval_assign(context, assign_table, AssignContext::SystemVerilog);
+            }
+        }
+    }
+
+    /// See [`InstDeclaration::gather_ff`]: register the variables read by
+    /// connection expressions as comb-context reads.
+    pub fn gather_ff(&self, context: &mut Context, table: &mut FfTable, decl: usize) {
+        for connect in &self.connects {
+            connect.expr.gather_ff(context, table, decl, None, false);
+        }
+    }
+}
+
+impl fmt::Display for ExternalDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "external {}: {} {{", self.name, self.component)?;
+        for (name, value) in &self.params {
+            writeln!(
+                f,
+                "{}",
+                indent_all_by(4, format!("param {name}: {value:?}"))
+            )?;
+        }
+        for connect in &self.connects {
+            writeln!(
+                f,
+                "{}",
+                indent_all_by(4, format!("{}: {}", connect.port, connect.expr))
+            )?;
+        }
+        write!(f, "}}")
+    }
+}
+
+#[derive(Clone)]
+pub struct CombDeclaration {
+    pub statements: Vec<Statement>,
+}
+
+impl CombDeclaration {
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        for x in &self.statements {
+            x.eval_assign(context, assign_table, AssignContext::Comb, &[]);
+        }
+    }
+
+    pub fn gather_ff_comb(&self, context: &mut Context, table: &mut FfTable, decl: usize) {
+        for x in &self.statements {
+            x.gather_ff_comb_assign(context, table, decl);
+        }
+    }
+}
+
+impl fmt::Display for CombDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = "comb {\n".to_string();
+
+        for x in &self.statements {
+            let text = format!("{}\n", x);
+            ret.push_str(&indent_all_by(2, text));
+        }
+
+        ret.push('}');
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct FfClock {
+    pub id: VarId,
+    pub index: VarIndex,
+    pub select: VarSelect,
+    pub comptime: Comptime,
+}
+
+impl fmt::Display for FfClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format!("{}{}{}", self.id, self.index, self.select).fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct FfReset {
+    pub id: VarId,
+    pub index: VarIndex,
+    pub select: VarSelect,
+    pub comptime: Comptime,
+}
+
+impl fmt::Display for FfReset {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format!("{}{}{}", self.id, self.index, self.select).fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct FfDeclaration {
+    pub clock: FfClock,
+    pub reset: Option<FfReset>,
+    pub statements: Vec<Statement>,
+}
+
+impl FfDeclaration {
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        for x in &self.statements {
+            x.eval_assign(context, assign_table, AssignContext::Ff, &[]);
+        }
+    }
+
+    pub fn gather_ff(&self, context: &mut Context, table: &mut FfTable, decl: usize) {
+        for x in &self.statements {
+            x.gather_ff(context, table, decl);
+        }
+    }
+}
+
+impl fmt::Display for FfDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = if let Some(x) = &self.reset {
+            format!("ff ({}, {}) {{\n", self.clock, x)
+        } else {
+            format!("ff ({}) {{\n", self.clock)
+        };
+
+        for x in &self.statements {
+            let text = format!("{}\n", x);
+            ret.push_str(&indent_all_by(2, text));
+        }
+
+        ret.push('}');
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct InstInput {
+    pub id: VarId,
+    /// One entry per port array element for a slice of an unpacked array
+    /// (`i: arr[2*n+:2]`), which has no single-expression form; one entry
+    /// otherwise.
+    pub exprs: Vec<Expression>,
+}
+
+impl InstInput {
+    pub fn single(&self) -> Option<&Expression> {
+        if self.exprs.len() == 1 {
+            Some(&self.exprs[0])
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for InstInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = format!("{} <- ", self.id);
+
+        if self.exprs.len() == 1 {
+            ret.push_str(&format!("{}", self.exprs[0]));
+        } else if !self.exprs.is_empty() {
+            ret.push_str(&format!("{{{}", self.exprs[0]));
+            for e in &self.exprs[1..] {
+                ret.push_str(&format!(", {}", e));
+            }
+            ret.push('}');
+        }
+
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct InstOutput {
+    pub id: VarId,
+    pub dst: Vec<AssignDestination>,
+}
+
+impl fmt::Display for InstOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = format!("{} -> ", self.id);
+
+        if self.dst.len() == 1 {
+            ret.push_str(&format!("{}", self.dst[0]));
+        } else if !self.dst.is_empty() {
+            ret.push_str(&format!("{{{}", self.dst[0]));
+            for d in &self.dst[1..] {
+                ret.push_str(&format!(", {}", d));
+            }
+            ret.push('}');
+        }
+
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct InstInterfaceBinding {
+    pub child: VarId,
+    pub parent: VarId,
+    pub index: VarIndex,
+    pub select: VarSelect,
+}
+
+#[derive(Clone)]
+pub struct InstDeclaration {
+    pub name: StrId,
+    /// Generate-block prefix addressing this instance, e.g. `["g_leaf[0]"]`;
+    /// empty for a plain instance. Each segment is a combined `label[index]`, the
+    /// same form generate variables use in their `VarPath`.
+    pub hierarchy: Vec<StrId>,
+    pub inputs: Vec<InstInput>,
+    pub outputs: Vec<InstOutput>,
+    /// Bindings for interface members captured by imported modport functions.
+    /// These members do not appear in `inputs` or `outputs` because the
+    /// modport exposes the function rather than the underlying signal.
+    pub interface_bindings: Vec<InstInterfaceBinding>,
+    /// `Arc`-shared: without it, repeated instantiations of the same generic
+    /// module each deep-clone the `Component`, blowing pass2 memory.
+    pub component: Arc<Component>,
+    pub token: TokenRange,
+}
+
+impl InstDeclaration {
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        for x in &self.outputs {
+            for dst in &x.dst {
+                dst.eval_assign(context, assign_table, AssignContext::Ff);
+            }
+        }
+
+        if let Component::SystemVerilog(x) = self.component.as_ref() {
+            for dst in &x.connects {
+                dst.eval_assign(context, assign_table, AssignContext::SystemVerilog);
+            }
+        }
+    }
+
+    /// Register the variables read by each instance input expression so
+    /// downstream analyses (e.g. comb-to-FF hoist reach) can see that
+    /// those reads happen in a comb context (effectively a continuous-
+    /// assign of the expression to the child port).  Tagged
+    /// `from_ff=false` so the `is_ff` classifier ignores them.
+    pub fn gather_ff(&self, context: &mut Context, table: &mut FfTable, decl: usize) {
+        for input in &self.inputs {
+            for expr in &input.exprs {
+                expr.gather_ff(context, table, decl, None, false);
+            }
+        }
+    }
+}
+
+impl fmt::Display for InstDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let qualified = self
+            .hierarchy
+            .iter()
+            .map(|x| x.to_string())
+            .chain(std::iter::once(self.name.to_string()))
+            .collect::<Vec<_>>()
+            .join(".");
+        let mut ret = format!("inst {} (\n", qualified);
+
+        for x in &self.inputs {
+            let text = format!("{};\n", x);
+            ret.push_str(&indent_all_by(2, text));
+        }
+
+        for x in &self.outputs {
+            let text = format!("{};\n", x);
+            ret.push_str(&indent_all_by(2, text));
+        }
+
+        ret.push_str(") {\n");
+
+        let text = format!("{}\n", self.component);
+        ret.push_str(&indent_all_by(2, text));
+
+        ret.push('}');
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct InitialDeclaration {
+    pub statements: Vec<Statement>,
+}
+
+impl InitialDeclaration {
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        for x in &self.statements {
+            x.eval_assign(context, assign_table, AssignContext::Initial, &[]);
+        }
+    }
+}
+
+impl fmt::Display for InitialDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = "initial {\n".to_string();
+
+        for x in &self.statements {
+            let text = format!("{}\n", x);
+            ret.push_str(&indent_all_by(2, text));
+        }
+
+        ret.push('}');
+        ret.fmt(f)
+    }
+}
+
+#[derive(Clone)]
+pub struct FinalDeclaration {
+    pub statements: Vec<Statement>,
+}
+
+impl FinalDeclaration {
+    pub fn eval_assign(&self, context: &mut Context, assign_table: &mut AssignTable) {
+        for x in &self.statements {
+            x.eval_assign(context, assign_table, AssignContext::Final, &[]);
+        }
+    }
+}
+
+impl fmt::Display for FinalDeclaration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ret = "final {\n".to_string();
+
+        for x in &self.statements {
+            let text = format!("{}\n", x);
+            ret.push_str(&indent_all_by(2, text));
+        }
+
+        ret.push('}');
+        ret.fmt(f)
+    }
+}

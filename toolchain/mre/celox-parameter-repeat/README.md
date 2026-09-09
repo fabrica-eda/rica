@@ -1,6 +1,6 @@
 # Celox: parameter override loses the declared bit width in repetition
 
-Pinned Celox: `7ff0dd2b8c4a92efd9a1aabe376240c6dff3f9c9`.
+Originally observed with Celox: `7ff0dd2b8c4a92efd9a1aabe376240c6dff3f9c9`.
 A combinational module declares `param ENABLE: bit = 0`; the native builder sets
 `.param("ENABLE", 1)`. With `a = 0xffffffffffffffff`, these equivalent masks differ:
 
@@ -44,3 +44,18 @@ The artifact suffix is build-specific; the observed rlib SHA-256 is
 [passing boolean unit oracle](../../measurements/2026-09-09-rv64-early-bitmanip/simple-oracle-02.log).
 
 The initial failed CPU runs are excluded from IPC/performance results.
+
+## Fix (2026-09-09)
+
+The original reproduction is fixed at the Celox caller: top-level overrides are
+now fitted to their declared parameter type before `Context::push_override`.
+The final regression covers four execution backends, dependent widths, signed
+values, truncation and wide parameters. The CPU's explicit-boolean workaround
+remains to preserve the already qualified RTL.
+
+An additional ordinary-HDL control exposed stale constant value/evaluation
+metadata in Veryl, without using `.param()`. That has a separate patch; the two
+responsibilities and the withdrawn initial approach are documented in the
+[diagnosis and verification report](../../measurements/2026-09-09-celox-parameter-width/README.md).
+The source of this MRE is unchanged. Use the current build's exact rlib and omit
+`--expect-unfixed` to require zero mismatches after applying the patches.

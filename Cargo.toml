@@ -19,6 +19,14 @@ struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "4
 texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
 texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
 
+[patch."https://github.com/celox-sim/celox.git"]
+# Type top-level parameter overrides before passing them to Veryl's IR API.
+celox = { path = "toolchain/vendor/celox-parameter-width/celox" }
+
+[patch.crates-io]
+# Keep constant-folding metadata consistent with fitted constant storage.
+veryl-analyzer = { path = "toolchain/vendor/veryl-const-value/veryl-analyzer" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -346,7 +346,6 @@ dependencies = [
 [[package]]
 name = "celox"
 version = "0.4.6"
-source = "git+https://github.com/celox-sim/celox.git?rev=7ff0dd2b8c4a92efd9a1aabe376240c6dff3f9c9#7ff0dd2b8c4a92efd9a1aabe376240c6dff3f9c9"
 dependencies = [
  "bit-set",
  "celox-analysis",
@@ -3684,8 +3683,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "veryl-analyzer"
 version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27642985fd83ff90aeea356cbc70f63d2ac83988e1e1bae9e7b0bd63fe61fcf8"
 dependencies = [
  "bimap",
  "daggy",
