@@ -4,10 +4,10 @@ See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
 The current board build is **scalar RV64 with full M and B (Zba/Zbb/Zbs)
 integer extensions**, integer compressed instructions (Zca), Zicsr and Zifencei.
-`HardwareCompactEarlyDivideTestTop` uses a compact 64-entry BTB, 2-bit direction
+`HardwareCompactInterruptTestTop` uses a compact 64-entry BTB, 2-bit direction
 prediction, an eight-entry RAS and a 4 KiB synchronous instruction cache.
 It enables `FAST_LSU=6`, `EARLY_BITMANIP=1`, `EARLY_TAKEN_FETCH=1` and
-`EARLY_DIVIDE=1`, with DSP multiplication.
+`EARLY_DIVIDE=1`, with DSP multiplication and `ENABLE_INTERRUPTS=1`.
 
 Division skips unnecessary iterations for zero divisors, zero quotients, large
 divisors and leading zero dividend bytes. Native and mapped tests preserve all
@@ -16,59 +16,70 @@ signed/word results and cancellation behavior. Worst MDU latency remains at most
 four cycles, measured from acceptance of start to done. The instruction cache
 computes adjacent line carries in parallel, preserving its existing cycle behavior.
 
-The core remains M-mode only. `WFI` executes as a legal NOP; writes to fixed WARL
-`misa` are accepted and ignored. An assembly boot test checks these operations,
-MSCRATCH stack exchange, a small trap frame, ECALL and MRET on hardware.
+The core implements precise M-mode interrupt entry, `mie/mip`, full interrupt
+causes, and MMIO MSIP/MTIME/MTIMECMP. Interrupt-control CSR writes and MRET
+evaluate the resulting interrupt state before a successor executes. On hardware,
+two tasks switch 16 times under timer interrupts while preserving every integer
+register and MEPC; this program passes three runs. The board connects software
+and timer interrupts; external interrupt levels are tested in CPU simulation.
+See the [machine platform contract](RV64_MACHINE_PLATFORM.md) for the memory map,
+62.4 MHz timebase, reset behavior and current limits.
+
+The core remains M-mode only. `WFI` is a legal NOP and fixed WARL `misa` writes
+are accepted and ignored. Boot tests also cover MSCRATCH stack exchange,
+trap frames, ECALL and MRET. A, U/S modes, PMP and Sv39 are subsequent steps.
 
 CPU **124.8 MHz / memory 62.4 MHz** is retained. After reserving **200 ps each
 for setup and hold**, STA gives **0 ps setup / +90 ps hold** (nominal +200/+290 ps).
-All **17,305 setup and hold checks** pass, including 515 JTCK paths at 6 MHz,
-with the same four reviewed external/CDC exceptions. The design uses **29,361
-cells, 16 DSPs and 150 EBRs**, adding 433 cells to the previous qualified image.
+All **17,741 setup and 17,741 hold checks** pass, including 515 JTCK paths at 6 MHz,
+with the same four reviewed external/CDC exceptions. The design uses **30,857
+cells, 8,336 FFs, 16 DSPs and 150 EBRs**, adding 1,496 cells to the early-division image.
 Two normal-tool synthesis/import/STA/bitgen runs reproduce identical checkpoint
 and bitstream bytes from the final RTL.
 
-The exact bitstream passed **234 distinct physical ELFs, 70 diagnostic repetitions,
-and 16 executions through the updated default runner: 320 PASS** using Windows D2XX/XVC.
+The exact bitstream passed **236 distinct physical ELFs, 70 diagnostic repetitions,
+four extra OS runs and 16 executions through the updated default runner:
+326 PASS** using Windows D2XX/XVC.
 The following are medians of three runs of identical ELFs, including startup and checks:
 
-| Diagnostic | Previous → current cycles | Current IPC | IPC × 124.8 MHz (MIPS) | Speedup |
-| --- | ---: | ---: | ---: | ---: |
-| m_divide | 24,482 → 21,445 | 0.120308 | 15.014409 | **1.141618×** |
-| small | 26,039 → 15,389 | 0.151667 | 18.928014 | **1.692053×** |
-| wide | 26,038 → 17,333 | 0.134656 | 16.805123 | **1.502221×** |
-| words | 17,846 → 17,834 | 0.130874 | 16.333027 | **1.000673×** |
+| Diagnostic | Early division → current cycles | Current IPC | IPC × 124.8 MHz (MIPS) |
+| --- | ---: | ---: | ---: |
+| alu_chain | 5,992 → 5,993 | 0.770232 | 96.124946 |
+| load_store | 4,424 → 4,425 | 0.291525 | 36.382373 |
+| m_divide | 21,445 → 21,445 | 0.120308 | 15.014409 |
+| small | 15,389 → 15,389 | 0.151667 | 18.928014 |
+| wide | 17,333 → 17,332 | 0.134664 | 16.806093 |
+| words | 17,834 → 17,835 | 0.130866 | 16.332111 |
 
-The other 31 diagnostics differ by at most one cycle. Retired instruction counts
-are identical in all 35 comparisons; their geometric-mean speedup is 1.030938×.
-The C cases use the same Clang-generated ELF on both images; no change in work
-or instruction count is used to produce the speedup.
+All 35 fixed-work diagnostics retain identical ELF bytes and retired counts.
+Cycle differences are within ±1, with a geometric-mean speed ratio of 0.999982×.
+Interrupt support preserves ordinary throughput at the same clock. The timer
+preemption program is recorded separately because its work is timer driven.
 
-With early division enabled and disabled, the CPU/memory model passes 234 ELFs
-in both serialized clock orders (**936 PASS**). All 35 coincident-edge diagnostics
-match physical retired counts and differ by zero or one cycle. The workspace
-passes **217 tests with one existing ignored mapped-board test**. The new cache
-address logic also matches wrapping arithmetic for 70,688 native/mapped inputs.
+The enabled CPU/memory model passes 236 ELFs in both serialized clock orders
+(**472 PASS**); the disabled comparison passes all previous 234 ELFs twice
+(**468 PASS**). All 37 coincident-edge programs pass. The 35 fixed-work programs
+match physical retired counts and differ by zero or one cycle. Workspace and
+updated test-target runs cover **229 tests with one existing ignored mapped-board
+test**. Timer and CSR tests include ECP5 mapping, and core tests inject interrupts
+at 180 arrival placements across three predictor configurations.
 
 Select the current model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension
---early-bitmanip --early-taken-fetch --early-divide`. Add `--timed-clocks` for
+--early-bitmanip --early-taken-fetch --early-divide --machine-interrupts`. Add `--timed-clocks` for
 coincident CPU/memory edges. The no-flag Core/model retains the legacy comparison
 configuration. The default hardware image is
-`build/riscv-hardware-compact-early-divide-124p8-20260910.bit`.
+`build/riscv-hardware-compact-interrupt-124p8-20260910.bit`.
 
 The next ISA target is a custom OS with **M/S/U modes and Sv39**. The
-[OS ISA/platform plan](RV64_OS_ISA_PLAN.md) sequences machine interrupts and strict
-memory decode, A, U-mode/PMP and supervisor virtual memory.
-The additional `HardwareCompactInterruptTestTop` / `--machine-interrupts`
-configuration now implements machine interrupt entry and MMIO timer/MSIP; see the
-[platform contract](RV64_MACHINE_PLATFORM.md) and its
-[separate qualification record](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md).
-Strict access faults, A, lower privilege modes and Sv39 remain subsequent steps.
+[OS ISA/platform plan](RV64_OS_ISA_PLAN.md) proceeds from the qualified interrupt
+foundation to strict memory decode/access faults and external I/O, then A,
+U-mode/PMP and supervisor virtual memory.
 
 See the [integer ISA implementation and next steps](RV64_INTEGER_ISA_PLAN.md),
-[current implementation and qualification record](../toolchain/measurements/2026-09-10-rv64-early-divide/README.md),
-[all current IPC/clock measurements](../toolchain/measurements/2026-09-10-rv64-early-divide/PERFORMANCE.md),
+[current implementation and qualification record](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md),
+[all current IPC/clock measurements](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/PERFORMANCE.md),
+[previous early-division measurements](../toolchain/measurements/2026-09-10-rv64-early-divide/README.md),
 [previous target-preview measurements](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md),
 [previous early-forwarding measurements](../toolchain/measurements/2026-09-09-rv64-early-bitmanip/README.md),
 [previous Zbs measurements](../toolchain/measurements/2026-09-09-rv64-zbs/README.md),
@@ -95,7 +106,8 @@ The predictor configurations are available without editing RTL:
 | **Compact predictor + DSP M + Zba + Zbb** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension` (hardware-memory RTL) | `HardwareCompactZbbDspM4KTestTop` |
 | Compact predictor + DSP M + B | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension` (hardware-memory RTL) | `HardwareCompactZbsDspM4KTestTop` |
 | Compact predictor + DSP M + B + early forwarding/target preview | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension --early-bitmanip --early-taken-fetch` (hardware-memory RTL) | `HardwareCompactTakenFetchTestTop` |
-| **Current: compact predictor + DSP M + B + early forwarding/target preview/division** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension --early-bitmanip --early-taken-fetch --early-divide` (hardware-memory RTL) | `HardwareCompactEarlyDivideTestTop` |
+| Compact predictor + DSP M + B + early forwarding/target preview/division | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension --early-bitmanip --early-taken-fetch --early-divide` (hardware-memory RTL) | `HardwareCompactEarlyDivideTestTop` |
+| **Current: compact predictor + DSP M + B + early forwarding/target preview/division + machine interrupts** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension --early-bitmanip --early-taken-fetch --early-divide --machine-interrupts` (hardware-memory RTL) | `HardwareCompactInterruptTestTop` |
 | Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
 | Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
 | Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |

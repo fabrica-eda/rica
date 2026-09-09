@@ -1034,10 +1034,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
-    // CPU/memory stay at 124.8/62.4 MHz. This early-division image passed
+    // CPU/memory stay at 124.8/62.4 MHz. This machine-interrupt image passed
     // STA with 200 ps setup/hold reserves and RV64_INTEGER_ISA_PLAN.md qualification.
-    let mut bitstream =
-        project.join("build/riscv-hardware-compact-early-divide-124p8-20260910.bit");
+    let mut bitstream = project.join("build/riscv-hardware-compact-interrupt-124p8-20260910.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

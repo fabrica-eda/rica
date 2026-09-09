@@ -4,8 +4,10 @@
 compact predictor, 4 KiB instruction cache, `FAST_LSU=6`, DSP M, B and early division.
 The qualification status and exact bitstream are recorded in
 [the interrupt measurement record](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md).
-The default hardware runner continues to select its qualified image until the
-replacement passes setup/hold, checked bitgen and physical tests.
+The default hardware runner selects
+`build/riscv-hardware-compact-interrupt-124p8-20260910.bit`, qualified at
+124.8 MHz with 200 ps setup/hold reserves and 326 physical executions.
+Its SHA-256 is `48f9939da65666197fc5f70ede7690ea1d7515bea00bacb017b87f5087861466`.
 
 ## Interrupt interface and architectural boundary
 
@@ -109,6 +111,9 @@ priority, precise MEPC and immediate re-entry after MRET. The
 all x1–x31 registers and MEPC, and checks each task's register values and progress.
 The execution time of this second test is timer driven, so its instruction count
 is not a fixed-work performance benchmark.
+Both programs pass the serialized clock orders, coincident-edge simulation and
+three physical runs. On hardware, the context-switch program retires 21,393
+instructions in 100,290–100,291 CPU cycles; the timed model gives 100,291 cycles.
 
 The native/mapped timer oracle covers 10,248 stimulus edges per backend:
 byte lanes/masks, reserved slots, reset, freeze, wraparound and pending latency.

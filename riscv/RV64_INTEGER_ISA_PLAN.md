@@ -459,4 +459,11 @@ OS起動試験はMSCRATCHでのstack交換、trap frame、ECALL→MRETも実機�
 [検証と認定状態](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md)。
 2タスクの全整数contextをtimerで切り替える試験を追加し、
 既存35性能診断は同時clockモデルで命令数・cycleとも不変。
+124.8 MHzで実機認定し、既定imageを割り込み対応版へ更新した。
+setup／hold各200 ps予約後に0／+90 ps、17,741 checks各、既存4例外。
+236 ELF＋性能診断70反復＋OS試験4反復＋既定runner 16実行の **326 PASS**。
+2タスク16回切り替えは実機3回とも成功。固定処理35診断の実機3回中央値は、
+従来early-divide版と同一命令数・±1 cycle以内で、幾何平均の速度比0.999982倍。
+ALU診断のIPCは0.770232、load/storeは0.291525。
+[全IPC・クロック・時間](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/PERFORMANCE.md)。
 次は範囲外アクセスの例外化と外部I/Oを整え、A、U/PMP、S/Sv39へ進む。
