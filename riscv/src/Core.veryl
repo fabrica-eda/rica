@@ -282,103 +282,106 @@ module Core #(
     var rf_read_data_a : logic<64>;
     var rf_read_data_b : logic<64>;
 
-    var cm_forward_data         : logic<64>          ;
-    var forwarded_rs1           : logic<64>          ;
-    var forwarded_rs2           : logic<64>          ;
-    var rx_operand_a            : logic<64>          ;
-    var rx_operand_b            : logic<64>          ;
-    var alu_operand_a           : logic<64>          ;
-    var alu_operand_b           : logic<64>          ;
-    var lsu_address             : logic<ADDRESS_BITS>;
-    var bypass_data             : logic<64>          ;
-    var execute_store_data      : logic<64>          ;
-    var ex_bypass_hit_rs1       : logic              ;
-    var ex_bypass_hit_rs2       : logic              ;
-    var redirect_addend_a       : logic<64>          ;
-    var redirect_low            : logic<17>          ;
-    var redirect_high_c0        : logic<17>          ;
-    var redirect_high_c1        : logic<17>          ;
-    var redirect_high           : logic<17>          ;
-    var redirect_sum            : logic<64>          ;
-    var ex_branch_equal         : logic              ;
-    var ex_compare_less_high    : logic              ;
-    var ex_compare_less_low     : logic              ;
-    var ex_compare_unsigned     : logic              ;
-    var ex_compare_result       : logic              ;
-    var ex_branch_taken         : logic              ;
-    var cm_branch_taken         : logic              ;
-    var cm_compare_unsigned     : logic              ;
-    var cm_compare_result       : logic              ;
-    var rx_control_fallthrough  : logic              ;
-    var ex_redirect_valid       : logic              ;
-    var branch_redirect_valid   : logic              ;
-    var redirect_valid          : logic              ;
-    var ex_redirect_target      : logic<ADDRESS_BITS>;
-    var redirect_target         : logic<ADDRESS_BITS>;
-    var redirect_pending_q      : logic              ;
-    var redirect_preserve_cm    : logic              ;
-    var redirect_preserve_cm_q  : logic              ;
-    var redirect_discards_cm    : logic              ;
-    var redirect_event_delay_q  : logic              ;
-    var redirect_flush_wb_q     : logic              ;
-    var redirect_target_q       : logic<ADDRESS_BITS>;
-    var pending_redirect_target : logic<ADDRESS_BITS>;
-    var execution_hazard        : logic              ;
-    var decode_operand_match_rx : logic              ;
-    var rx_result_can_bypass    : logic              ;
-    var decode_execution_hazard : logic              ;
-    var rx_execution_hazard_q   : logic              ;
-    var backend_wait            : logic              ;
-    var memory_wait             : logic              ;
-    var muldiv_wait             : logic              ;
-    var muldiv_start            : logic              ;
-    var muldiv_done             : logic              ;
-    var muldiv_result           : logic<64>          ;
-    var cm_muldiv_pending_q     : logic              ;
-    var rx_is_muldiv_q          : logic              ;
-    var ex_is_muldiv_q          : logic              ;
-    var data_request_sequence_q : logic              ;
-    var csr_source              : logic<64>          ;
-    var csr_write_value         : logic<64>          ;
-    var fetch_access_allowed    : logic              ;
-    var fetch_access_boundary   : logic              ;
-    var fetch_fault_address     : logic<64>          ;
-    var fetch_access_size       : logic<2>           ;
-    var lsu_access_allowed      : logic              ;
-    var lsu_access_boundary     : logic              ;
-    var lsu_fault_address       : logic<64>          ;
-    var lsu_access_size         : logic<2>           ;
-    var lsu_access_fault        : logic              ;
-    var rx_fetch_fault_q        : logic              ;
-    var rx_fault_boundary_q     : logic              ;
-    var ex_fetch_fault_q        : logic              ;
-    var ex_fault_boundary_q     : logic              ;
-    var redirect_upper_c0       : logic<32>          ;
-    var redirect_upper_c1       : logic<32>          ;
-    var redirect_upper          : logic<32>          ;
-    var ex_exception            : logic              ;
-    var ex_exception_cause      : logic<64>          ;
-    var ex_exception_value      : logic<64>          ;
-    var cm_trap_event           : logic              ;
-    var cm_mret_event           : logic              ;
-    var cm_system_redirect      : logic              ;
-    var ex_irq_fence            : logic              ;
-    var ex_system_barrier       : logic              ;
-    var cm_irq_fence_event      : logic              ;
-    var interrupt_drain         : logic              ;
-    var interrupt_event         : logic              ;
-    var interrupt_resume_pc_q   : logic<ADDRESS_BITS>;
-    var frontend_hold           : logic              ;
-    var cm_fence_i_event        : logic              ;
-    var cm_retire_event         : logic              ;
-    var decompressed_instruction: logic<32>          ;
-    var compressed_illegal      : logic              ;
-    var rx_control_kind         : logic<3>           ;
-    var ex_control_kind_q       : logic<3>           ;
-    var ex_actual_next_pc       : logic<ADDRESS_BITS>;
-    var ex_prediction_mismatch  : logic              ;
-    var cm_actual_next_pc       : logic<ADDRESS_BITS>;
-    var cm_prediction_mismatch  : logic              ;
+    var cm_forward_data         : logic<64>              ;
+    var forwarded_rs1           : logic<64>              ;
+    var forwarded_rs2           : logic<64>              ;
+    var rx_operand_a            : logic<64>              ;
+    var rx_operand_b            : logic<64>              ;
+    var alu_operand_a           : logic<64>              ;
+    var alu_operand_b           : logic<64>              ;
+    var lsu_address             : logic<ADDRESS_BITS>    ;
+    var lsu_sum_c0              : logic<17>           [4];
+    var lsu_sum_c1              : logic<17>           [4];
+    var lsu_carry               : logic<4>               ;
+    var bypass_data             : logic<64>              ;
+    var execute_store_data      : logic<64>              ;
+    var ex_bypass_hit_rs1       : logic                  ;
+    var ex_bypass_hit_rs2       : logic                  ;
+    var redirect_addend_a       : logic<64>              ;
+    var redirect_low            : logic<17>              ;
+    var redirect_high_c0        : logic<17>              ;
+    var redirect_high_c1        : logic<17>              ;
+    var redirect_high           : logic<17>              ;
+    var redirect_sum            : logic<64>              ;
+    var ex_branch_equal         : logic                  ;
+    var ex_compare_less_high    : logic                  ;
+    var ex_compare_less_low     : logic                  ;
+    var ex_compare_unsigned     : logic                  ;
+    var ex_compare_result       : logic                  ;
+    var ex_branch_taken         : logic                  ;
+    var cm_branch_taken         : logic                  ;
+    var cm_compare_unsigned     : logic                  ;
+    var cm_compare_result       : logic                  ;
+    var rx_control_fallthrough  : logic                  ;
+    var ex_redirect_valid       : logic                  ;
+    var branch_redirect_valid   : logic                  ;
+    var redirect_valid          : logic                  ;
+    var ex_redirect_target      : logic<ADDRESS_BITS>    ;
+    var redirect_target         : logic<ADDRESS_BITS>    ;
+    var redirect_pending_q      : logic                  ;
+    var redirect_preserve_cm    : logic                  ;
+    var redirect_preserve_cm_q  : logic                  ;
+    var redirect_discards_cm    : logic                  ;
+    var redirect_event_delay_q  : logic                  ;
+    var redirect_flush_wb_q     : logic                  ;
+    var redirect_target_q       : logic<ADDRESS_BITS>    ;
+    var pending_redirect_target : logic<ADDRESS_BITS>    ;
+    var execution_hazard        : logic                  ;
+    var decode_operand_match_rx : logic                  ;
+    var rx_result_can_bypass    : logic                  ;
+    var decode_execution_hazard : logic                  ;
+    var rx_execution_hazard_q   : logic                  ;
+    var backend_wait            : logic                  ;
+    var memory_wait             : logic                  ;
+    var muldiv_wait             : logic                  ;
+    var muldiv_start            : logic                  ;
+    var muldiv_done             : logic                  ;
+    var muldiv_result           : logic<64>              ;
+    var cm_muldiv_pending_q     : logic                  ;
+    var rx_is_muldiv_q          : logic                  ;
+    var ex_is_muldiv_q          : logic                  ;
+    var data_request_sequence_q : logic                  ;
+    var csr_source              : logic<64>              ;
+    var csr_write_value         : logic<64>              ;
+    var fetch_access_allowed    : logic                  ;
+    var fetch_access_boundary   : logic                  ;
+    var fetch_fault_address     : logic<64>              ;
+    var fetch_access_size       : logic<2>               ;
+    var lsu_access_allowed      : logic                  ;
+    var lsu_access_boundary     : logic                  ;
+    var lsu_fault_address       : logic<64>              ;
+    var lsu_access_size         : logic<2>               ;
+    var lsu_access_fault        : logic                  ;
+    var rx_fetch_fault_q        : logic                  ;
+    var rx_fault_boundary_q     : logic                  ;
+    var ex_fetch_fault_q        : logic                  ;
+    var ex_fault_boundary_q     : logic                  ;
+    var redirect_upper_c0       : logic<32>              ;
+    var redirect_upper_c1       : logic<32>              ;
+    var redirect_upper          : logic<32>              ;
+    var ex_exception            : logic                  ;
+    var ex_exception_cause      : logic<64>              ;
+    var ex_exception_value      : logic<64>              ;
+    var cm_trap_event           : logic                  ;
+    var cm_mret_event           : logic                  ;
+    var cm_system_redirect      : logic                  ;
+    var ex_irq_fence            : logic                  ;
+    var ex_system_barrier       : logic                  ;
+    var cm_irq_fence_event      : logic                  ;
+    var interrupt_drain         : logic                  ;
+    var interrupt_event         : logic                  ;
+    var interrupt_resume_pc_q   : logic<ADDRESS_BITS>    ;
+    var frontend_hold           : logic                  ;
+    var cm_fence_i_event        : logic                  ;
+    var cm_retire_event         : logic                  ;
+    var decompressed_instruction: logic<32>              ;
+    var compressed_illegal      : logic                  ;
+    var rx_control_kind         : logic<3>               ;
+    var ex_control_kind_q       : logic<3>               ;
+    var ex_actual_next_pc       : logic<ADDRESS_BITS>    ;
+    var ex_prediction_mismatch  : logic                  ;
+    var cm_actual_next_pc       : logic<ADDRESS_BITS>    ;
+    var cm_prediction_mismatch  : logic                  ;
 
     var predictor_ready                : logic    ;
     var predictor_wait                 : logic    ;
@@ -890,8 +893,26 @@ module Core #(
         execute_bus.operand_a = alu_operand_a;
         execute_bus.operand_b = alu_operand_b;
         lsu_address           = alu_operand_a[31:0] + alu_operand_b[31:0];
+        // Loads/stores only add a base and offset. Do not route address
+        // permission checks through the ALU's Zba/subtract/word selectors.
+        // Four short carry-select slices also keep a dependent address's
+        // carry propagation ahead of the region and end-byte comparisons.
+        for i in 0..4 {
+            lsu_sum_c0[i] = {1'b0, alu_operand_a[i * 16+:16]} + {1'b0, alu_operand_b[i * 16+:16]};
+            lsu_sum_c1[i] = {1'b0, alu_operand_a[i * 16+:16]} + {1'b0, alu_operand_b[i * 16+:16]} + 17'd1;
+        }
+        lsu_carry[0] = 1'b0;
+        lsu_carry[1] = lsu_sum_c0[0][16];
+        lsu_carry[2] = lsu_sum_c0[1][16] || (lsu_sum_c1[1][16] && lsu_carry[1]);
+        lsu_carry[3] = lsu_sum_c0[2][16] || (lsu_sum_c1[2][16] && lsu_carry[2]);
         if STRICT_MEMORY {
-            lsu_address = execute_bus.arithmetic;
+            for i in 0..4 {
+                if lsu_carry[i] {
+                    lsu_address[i * 16+:16] = lsu_sum_c1[i][15:0];
+                } else {
+                    lsu_address[i * 16+:16] = lsu_sum_c0[i][15:0];
+                }
+            }
         }
         lsu_access_size = ex_load_size_q;
         if ex_is_store_q {
@@ -1333,7 +1354,7 @@ module Core #(
         // Hold the architectural store indication for the complete CM
         // transaction. HardwareMemory performs the physical write only when
         // the request sequence changes, so this cannot duplicate the write.
-        data_we               = cm_valid_q && cm_is_store_q && !redirect_discards_cm;
+        data_we               = cm_valid_q && cm_is_store_q && !cm_exception_q && !redirect_discards_cm;
         data_request_sequence = data_request_sequence_q;
         // There is no architectural halt instruction. This output remains for
         // the board debug ABI and will be used by a future debug halt request.
@@ -1866,10 +1887,15 @@ module Core #(
                 cm_raw_instr_q      = ex_raw_instr_q;
                 cm_rd_q             = ex_rd_q;
                 cm_write_enable_q   = ex_write_enable_q;
-                cm_is_load_q        = ex_is_load_q && !ex_exception && !lsu_access_fault;
-                cm_load_size_q      = ex_load_size_q;
-                cm_load_unsigned_q  = ex_load_unsigned_q;
-                cm_is_store_q       = ex_is_store_q && !ex_exception && !lsu_access_fault;
+                // Keep operation tags independent of the late address check.
+                // Faults issue no request token: after the older CM operation
+                // drains, its response already matches the unchanged token,
+                // so a faulting memory tag cannot introduce a memory wait.
+                // Trap/WB and data_we separately suppress all side effects.
+                cm_is_load_q       = ex_is_load_q;
+                cm_load_size_q     = ex_load_size_q;
+                cm_load_unsigned_q = ex_load_unsigned_q;
+                cm_is_store_q      = ex_is_store_q;
                 // Only an older CM redirect makes the current EX memory
                 // instruction wrong-path.  A prediction-kind repair owned by
                 // this same load/store redirects younger fetch but must not

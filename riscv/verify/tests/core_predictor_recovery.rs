@@ -2178,6 +2178,75 @@ fn access_faulting_loads_and_stores_never_issue_or_commit() {
 }
 
 #[test]
+fn access_effective_address_uses_signed_offset_and_xlen_wraparound() {
+    for (address, allowed) in [
+        (0x300_u64, true),
+        (0x8000_fffe, true),
+        (0x8001_0000, true),
+        (0xfff, true),
+        (0x1000, false),
+        (0x0000_0001_0000_0000, false),
+        (0x0001_0000_0000_0000, false),
+        (0xffff_ffff_ffff_ffff, false),
+    ] {
+        for offset in [-2048_i32, -17, -1, 0, 1, 17, 2047] {
+            for store in [false, true] {
+                let mut program = access_program();
+                let mut pc = 8;
+                let base = address.wrapping_sub(offset as u64);
+                append_constant(&mut program, &mut pc, 2, base);
+                // No gap after the base producer: also exercise the bypass.
+                let instruction = if store {
+                    encode_sd(0, 2, offset) & !(7 << 12) // SB
+                } else {
+                    (encode_ld(31, 2, offset) & !(7 << 12)) | 4 << 12 // LBU
+                };
+                program.insert(pc, instruction);
+                program.insert(pc + 4, encode_jal(0, 0));
+                let mut driver = CoreDriver::with_config(program, ACCESS_CONFIG);
+                let mut retired = false;
+                let mut trapped = false;
+                let mut token = 0;
+                let mut requests = 0;
+                for _ in 0..300 {
+                    let next_token = driver.value("data_request_sequence");
+                    if token != next_token {
+                        assert!(allowed, "invalid {address:x} issued a request");
+                        assert_eq!(driver.value("data_addr"), address);
+                        token = next_token;
+                        requests += 1;
+                    }
+                    driver.acknowledge_data_request();
+                    let cycle = driver.step();
+                    if !allowed {
+                        assert!(!cycle.data_we && !cycle.commit_mem_we);
+                    }
+                    if cycle.commit_valid && cycle.commit_pc == pc {
+                        retired = true;
+                        break;
+                    }
+                    if cycle.commit_valid && cycle.commit_pc == 0x408 {
+                        trapped = true;
+                        break;
+                    }
+                }
+                assert_eq!(
+                    retired, allowed,
+                    "base {base:x}, offset {offset}, store {store}"
+                );
+                assert_eq!(trapped, !allowed);
+                assert_eq!(requests, usize::from(allowed));
+                if !allowed {
+                    assert_eq!(driver.csr_value("mcause_q"), if store { 7 } else { 5 });
+                    assert_eq!(driver.csr_value("mepc_q") << 1, u64::from(pc));
+                    assert_eq!(driver.csr_value("mtval_q"), address);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn access_fault_on_invalid_control_target_preserves_full_pc_and_jalr_link() {
     for config in [ACCESS_CONFIG, 98_432, 98_436] {
         for target in [
