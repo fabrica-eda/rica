@@ -1,0 +1,200 @@
+{
+  "veryl_version": "0.21.0",
+  "base_commit": "2e32d53f056eef323225a91079af92574d18f726",
+  "baseline_clean": true,
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "c_compiler": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "patch": "toolchain/vendor/veryl-const-value/fix.patch",
+  "patch_sha256": "355eba73739b2fc578f7475fe08637cb23db69f3dc2db5a65511820473dd615c",
+  "sources": {
+    "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+    "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+  },
+  "runs": [
+    {
+      "build": "baseline",
+      "backend": "interpret",
+      "command": [
+        "veryl",
+        "test",
+        "--backend",
+        "interpret",
+        "--no-capture",
+        "--seed",
+        "1"
+      ],
+      "binary_sha256": "108da75fef17bffcb0210f1195fda6398debca0e7181f6299a19ef6ded6c8d1e",
+      "start_unix": 1788941310.1494896,
+      "seconds": 1.8716692924499512,
+      "source_sha256": {
+        "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+        "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+      },
+      "source_unchanged": true,
+      "exit_code": 1,
+      "display": "a=ffffffffffffffff o=00000000000000ff",
+      "log": "baseline-interpret.log",
+      "log_sha256": "04e5d193ec132dc4b78bae0046089365a059e90ffb184b44fecd123fb6420956"
+    },
+    {
+      "build": "baseline",
+      "backend": "cranelift",
+      "command": [
+        "veryl",
+        "test",
+        "--backend",
+        "cranelift",
+        "--no-capture",
+        "--seed",
+        "1"
+      ],
+      "binary_sha256": "108da75fef17bffcb0210f1195fda6398debca0e7181f6299a19ef6ded6c8d1e",
+      "start_unix": 1788941310.152706,
+      "seconds": 1.9076783657073975,
+      "source_sha256": {
+        "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+        "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+      },
+      "source_unchanged": true,
+      "exit_code": 1,
+      "display": "a=ffffffffffffffff o=00000000000000ff",
+      "log": "baseline-cranelift.log",
+      "log_sha256": "055f4363ee0e65c159d0b578152141a0187f79ae19d19cdcc5556dcbf285d3e1"
+    },
+    {
+      "build": "baseline",
+      "backend": "cc",
+      "command": [
+        "veryl",
+        "test",
+        "--backend",
+        "cc",
+        "--no-capture",
+        "--seed",
+        "1"
+      ],
+      "binary_sha256": "108da75fef17bffcb0210f1195fda6398debca0e7181f6299a19ef6ded6c8d1e",
+      "start_unix": 1788941310.1522114,
+      "seconds": 1.8875031471252441,
+      "source_sha256": {
+        "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+        "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+      },
+      "source_unchanged": true,
+      "exit_code": 1,
+      "display": "a=ffffffffffffffff o=00000000000000ff",
+      "log": "baseline-cc.log",
+      "log_sha256": "3805542a3026295ab8fabf345110e99d5e324da156eed841cb126c32c794f149"
+    },
+    {
+      "build": "patched",
+      "backend": "interpret",
+      "command": [
+        "veryl",
+        "test",
+        "--backend",
+        "interpret",
+        "--no-capture",
+        "--seed",
+        "1"
+      ],
+      "binary_sha256": "c7926a962e2068ac3498ee04334280401a228c5f6973b132fd3fa2b53e70d527",
+      "start_unix": 1788941394.557433,
+      "seconds": 1.7840211391448975,
+      "source_sha256": {
+        "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+        "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+      },
+      "source_unchanged": true,
+      "exit_code": 0,
+      "display": "a=ffffffffffffffff o=ffffffffffffffff",
+      "log": "patched-interpret.log",
+      "log_sha256": "0a9c4e189b40ffe98e13cef6d2b837937d48fb7b64e01c4d8d36364cfb7fb2ac"
+    },
+    {
+      "build": "patched",
+      "backend": "cranelift",
+      "command": [
+        "veryl",
+        "test",
+        "--backend",
+        "cranelift",
+        "--no-capture",
+        "--seed",
+        "1"
+      ],
+      "binary_sha256": "c7926a962e2068ac3498ee04334280401a228c5f6973b132fd3fa2b53e70d527",
+      "start_unix": 1788941394.507106,
+      "seconds": 1.8508532047271729,
+      "source_sha256": {
+        "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+        "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+      },
+      "source_unchanged": true,
+      "exit_code": 0,
+      "display": "a=ffffffffffffffff o=ffffffffffffffff",
+      "log": "patched-cranelift.log",
+      "log_sha256": "2be8d2894a73c44cb9504d0de32f132dc5f8470ab0cfc2a9652c8c63a218892f"
+    },
+    {
+      "build": "patched",
+      "backend": "cc",
+      "command": [
+        "veryl",
+        "test",
+        "--backend",
+        "cc",
+        "--no-capture",
+        "--seed",
+        "1"
+      ],
+      "binary_sha256": "c7926a962e2068ac3498ee04334280401a228c5f6973b132fd3fa2b53e70d527",
+      "start_unix": 1788941394.5596,
+      "seconds": 1.814258337020874,
+      "source_sha256": {
+        "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+        "src/signed_constant.veryl": "6b16a23cf676d451146ab2cfb72c8e281a9a4e233a3a2a26644b6a2aa1e9279e"
+      },
+      "source_unchanged": true,
+      "exit_code": 0,
+      "display": "a=ffffffffffffffff o=ffffffffffffffff",
+      "log": "patched-cc.log",
+      "log_sha256": "7159a062dd00421f7b20fbb8e4ac140d1b6fa0699392525b2ec019ede0dabca8"
+    }
+  ],
+  "controls": {
+    "build": "baseline",
+    "backend": "interpret",
+    "passed": 4,
+    "failed": 1,
+    "command": [
+      "veryl",
+      "test",
+      "--backend",
+      "interpret",
+      "--no-capture",
+      "--seed",
+      "1"
+    ],
+    "binary_sha256": "108da75fef17bffcb0210f1195fda6398debca0e7181f6299a19ef6ded6c8d1e",
+    "source_sha256": {
+      "Veryl.toml": "2bac25649b31a2d2be1a9a368718b6375e69d3c6509605649374a1e556be79c5",
+      "src/constant_metadata.veryl": "f46818d3133ec45a022f8193a9d1d726e45bc4e56884dd9010a524528fa5b99e",
+      "src/variants.veryl": "5e8001f892d576fe0508c112ce2c22b02e011c770f08d48df61eb971f1bec551"
+    },
+    "source_unchanged": true,
+    "exit_code": 1,
+    "log": "controls-interpret.log",
+    "log_sha256": "17681a60f55a1ccdb26752f0ffd08b400006671ff82341d78dd7c915e6fc14bf",
+    "passing_tests": [
+      "test_constant_mask",
+      "test_default_mask",
+      "test_inline_constant_mask",
+      "test_override_mask"
+    ],
+    "failing_tests": [
+      "test_signed_mask"
+    ]
+  }
+}
