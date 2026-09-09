@@ -2654,6 +2654,103 @@ fn interrupt_arrival_sweep_preserves_load_divide_store_and_taken_compressed_trac
 }
 
 #[test]
+fn interrupt_acceptance_preserves_cause_and_pc_when_pending_levels_change() {
+    for config in [
+        INTERRUPTS_CONFIG,
+        32_896,
+        32_900,
+        ACCESS_CONFIG,
+        98_432,
+        98_436,
+    ] {
+        for (pending, changed, cause) in [(7, 0, 11), (7, 2, 11), (2, 7, 7)] {
+            let mut program =
+                interrupt_program([(20, encode_sd(1, 0, 0x300)), (24, encode_jal(0, 0))]);
+            program.insert(0x414, encode_jal(0, 0)); // Stay in the masked handler.
+            let mut driver = CoreDriver::with_config(program, config);
+            driver.set_interrupts(pending);
+            let mut accepted = 0;
+            let mut entered = 0;
+            let mut inspected = false;
+            for _ in 0..300 {
+                let accepting = driver.value("interrupt_accept") != 0;
+                if accepting {
+                    accepted += 1;
+                }
+                if driver.value("interrupt_event") != 0 {
+                    entered += 1;
+                    assert_eq!(driver.value("interrupt_resume_pc_q"), 20);
+                    assert_eq!(driver.value("ex_valid_q"), 0);
+                    assert_eq!(driver.value("cm_valid_q"), 0);
+                }
+                assert_eq!(driver.value("data_request_sequence"), 0);
+                let cycle = driver.step();
+                if accepting {
+                    // The interrupt has been accepted at an empty boundary.
+                    // Withdrawal or a new, higher-priority level must not
+                    // change the already selected trap at the following edge.
+                    driver.set_interrupts(changed);
+                }
+                if cycle.commit_valid {
+                    assert_ne!(cycle.commit_pc, 20);
+                    match cycle.commit_pc {
+                        0x400 => assert_eq!(cycle.commit_data, (1 << 63) | cause),
+                        0x404 => assert_eq!(cycle.commit_data, 20),
+                        0x408 => assert_eq!(cycle.commit_data, 0),
+                        0x40c => {
+                            assert_eq!(cycle.commit_data, 0x1880);
+                            inspected = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert_eq!((accepted, entered, inspected), (1, 1, true));
+        }
+    }
+}
+
+#[test]
+fn interrupt_withdrawn_at_empty_boundary_is_not_accepted() {
+    for config in [
+        INTERRUPTS_CONFIG,
+        32_896,
+        32_900,
+        ACCESS_CONFIG,
+        98_432,
+        98_436,
+    ] {
+        let mut driver = CoreDriver::with_config(
+            interrupt_program([(20, encode_addi(31, 0, 42)), (24, encode_jal(0, 0))]),
+            config,
+        );
+        driver.set_interrupts(7);
+        let mut withdrawn = false;
+        let mut resumed = false;
+        for _ in 0..300 {
+            if driver.value("interrupt_accept") != 0 {
+                assert!(!withdrawn);
+                // Remove the level before the accepting edge, after draining.
+                driver.set_interrupts(0);
+                assert_eq!(driver.value("interrupt_accept"), 0);
+                withdrawn = true;
+            }
+            assert_eq!(driver.value("interrupt_event"), 0);
+            let cycle = driver.step();
+            if cycle.commit_valid {
+                assert!(cycle.commit_pc < 0x400);
+                if cycle.commit_pc == 20 {
+                    assert_eq!(cycle.commit_data, 42);
+                    resumed = true;
+                    break;
+                }
+            }
+        }
+        assert!(withdrawn && resumed);
+    }
+}
+
+#[test]
 fn withdrawn_interrupt_during_memory_wait_resumes_held_operands_without_a_trap() {
     let mut driver = CoreDriver::with_config(
         interrupt_program([

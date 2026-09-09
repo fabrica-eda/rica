@@ -1,0 +1,90 @@
+/// Data permissions from a base and the implemented signed 12-bit immediate.
+/// Decode the three possible 4 KiB pages in parallel with the low address sum.
+module PhysicalOffsetAccessCheck #(
+    param ENABLE_TIMER: bit = 0,
+) (
+    base         : input  logic<64>,
+    offset       : input  logic<12>,
+    size         : input  logic<2> ,
+    allowed      : output logic    ,
+    boot_boundary: output logic    ,
+    ram_boundary : output logic    ,
+) {
+    var low_sum       : logic<13>;
+    var boot_current  : logic    ;
+    var boot_next     : logic    ;
+    var boot_previous : logic    ;
+    var ram_current   : logic    ;
+    var ram_next      : logic    ;
+    var ram_previous  : logic    ;
+    var end_current   : logic    ;
+    var end_next      : logic    ;
+    var end_previous  : logic    ;
+    var timer_current : logic    ;
+    var timer_next    : logic    ;
+    var timer_previous: logic    ;
+    var ram           : logic    ;
+    var boot          : logic    ;
+    var end_page      : logic    ;
+    var timer         : logic    ;
+    var aligned       : logic    ;
+    var byte_last     : logic<3> ;
+    var end_lane      : logic<4> ;
+    var crossing      : logic    ;
+
+    always_comb {
+        low_sum        = {1'b0, base[11:0]} + {1'b0, offset};
+        boot_current   = base[63:12] == 52'd0;
+        boot_next      = base[63:12] == 52'hf_ffff_ffff_ffff;
+        boot_previous  = base[63:12] == 52'd1;
+        ram_current    = (base[63:18] == 46'h2000) && (base[17:12] != 6'h3f);
+        ram_next       = ((base[63:18] == 46'h2000) && (base[17:12] <= 6'h3d)) || (base[63:12] == 52'h7_ffff);
+        ram_previous   = (base[63:18] == 46'h2000) && (base[17:12] != 6'd0);
+        end_current    = base[63:12] == 52'h8_003e;
+        end_next       = base[63:12] == 52'h8_003d;
+        end_previous   = base[63:12] == 52'h8_003f;
+        timer_current  = ENABLE_TIMER && (base[63:16] == 48'h0200);
+        timer_next     = ENABLE_TIMER
+            && (((base[63:16] == 48'h0200) && (base[15:12] != 4'hf)) || (base[63:12] == 52'h1fff));
+        timer_previous = ENABLE_TIMER
+            && (((base[63:16] == 48'h0200) && (base[15:12] != 4'd0)) || (base[63:12] == 52'h2010));
+
+        boot     = boot_current;
+        ram      = ram_current;
+        end_page = end_current;
+        timer    = timer_current;
+        if !offset[11] && low_sum[12] {
+            boot     = boot_next;
+            ram      = ram_next;
+            end_page = end_next;
+            timer    = timer_next;
+        } else if offset[11] && !low_sum[12] {
+            boot     = boot_previous;
+            ram      = ram_previous;
+            end_page = end_previous;
+            timer    = timer_previous;
+        }
+        byte_last = 3'd0;
+        aligned   = 1'b1;
+        case size {
+            2'd1: {
+                byte_last = 3'd1;
+                aligned   = low_sum[0] == 1'b0;
+            }
+            2'd2: {
+                byte_last = 3'd3;
+                aligned   = low_sum[1:0] == 2'd0;
+            }
+            2'd3: {
+                byte_last = 3'd7;
+                aligned   = low_sum[2:0] == 3'd0;
+            }
+            default: {}
+        }
+        end_lane      = {1'b0, low_sum[2:0]} + {1'b0, byte_last};
+        crossing      = (low_sum[11:3] == 9'h1ff) && end_lane[3];
+        boot_boundary = boot && crossing;
+        ram_boundary  = end_page && crossing;
+        allowed       = ((boot || ram) && !(boot_boundary || ram_boundary)) || (timer && aligned);
+    }
+}

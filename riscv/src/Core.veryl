@@ -290,6 +290,7 @@ module Core #(
     var alu_operand_a           : logic<64>              ;
     var alu_operand_b           : logic<64>              ;
     var lsu_address             : logic<ADDRESS_BITS>    ;
+    var lsu_offset              : logic<64>              ;
     var lsu_sum_c0              : logic<17>           [4];
     var lsu_sum_c1              : logic<17>           [4];
     var lsu_carry               : logic<4>               ;
@@ -348,7 +349,8 @@ module Core #(
     var fetch_fault_address     : logic<64>              ;
     var fetch_access_size       : logic<2>               ;
     var lsu_access_allowed      : logic                  ;
-    var lsu_access_boundary     : logic                  ;
+    var lsu_boot_boundary       : logic                  ;
+    var lsu_ram_boundary        : logic                  ;
     var lsu_fault_address       : logic<64>              ;
     var lsu_access_size         : logic<2>               ;
     var lsu_access_fault        : logic                  ;
@@ -369,6 +371,10 @@ module Core #(
     var ex_system_barrier       : logic                  ;
     var cm_irq_fence_event      : logic                  ;
     var interrupt_drain         : logic                  ;
+    var interrupt_drain_q       : logic                  ;
+    var interrupt_accept        : logic                  ;
+    var interrupt_claimed_q     : logic                  ;
+    var interrupt_cause_q       : logic<4>               ;
     var interrupt_event         : logic                  ;
     var interrupt_resume_pc_q   : logic<ADDRESS_BITS>    ;
     var frontend_hold           : logic                  ;
@@ -694,15 +700,15 @@ module Core #(
         crosses_bound: fetch_access_boundary,
         fault_address: fetch_fault_address  ,
     );
-    inst lsu_access: PhysicalAccessCheck #(
+    inst lsu_access: PhysicalOffsetAccessCheck #(
         ENABLE_TIMER: ENABLE_INTERRUPTS,
     ) (
-        address      : lsu_address        ,
-        size         : lsu_access_size    ,
-        instruction  : 1'b0               ,
-        allowed      : lsu_access_allowed ,
-        crosses_bound: lsu_access_boundary,
-        fault_address: lsu_fault_address  ,
+        base         : alu_operand_a             ,
+        offset       : ex_redirect_offset_q[11:0],
+        size         : lsu_access_size           ,
+        allowed      : lsu_access_allowed        ,
+        boot_boundary: lsu_boot_boundary         ,
+        ram_boundary : lsu_ram_boundary          ,
     );
 
     always_comb {
@@ -897,9 +903,13 @@ module Core #(
         // permission checks through the ALU's Zba/subtract/word selectors.
         // Four short carry-select slices also keep a dependent address's
         // carry propagation ahead of the region and end-byte comparisons.
+        // Every implemented load/store has a signed 12-bit immediate. The
+        // redirect-offset register already holds that instruction's immediate;
+        // taking it here avoids the general operand-B forwarding selector.
+        lsu_offset = {ex_redirect_offset_q[11] repeat 52, ex_redirect_offset_q[11:0]};
         for i in 0..4 {
-            lsu_sum_c0[i] = {1'b0, alu_operand_a[i * 16+:16]} + {1'b0, alu_operand_b[i * 16+:16]};
-            lsu_sum_c1[i] = {1'b0, alu_operand_a[i * 16+:16]} + {1'b0, alu_operand_b[i * 16+:16]} + 17'd1;
+            lsu_sum_c0[i] = {1'b0, alu_operand_a[i * 16+:16]} + {1'b0, lsu_offset[i * 16+:16]};
+            lsu_sum_c1[i] = {1'b0, alu_operand_a[i * 16+:16]} + {1'b0, lsu_offset[i * 16+:16]} + 17'd1;
         }
         lsu_carry[0] = 1'b0;
         lsu_carry[1] = lsu_sum_c0[0][16];
@@ -918,7 +928,15 @@ module Core #(
         if ex_is_store_q {
             lsu_access_size = ex_store_size_q;
         }
-        lsu_access_fault = STRICT_MEMORY && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
+        // Classify the possible base pages while the low effective address
+        // is added. Request/trap control need not wait for the upper sum.
+        lsu_access_fault  = STRICT_MEMORY && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
+        lsu_fault_address = lsu_address;
+        if lsu_boot_boundary {
+            lsu_fault_address = 64'h0000_0000_0000_1000;
+        } else if lsu_ram_boundary {
+            lsu_fault_address = 64'h0000_0000_8003_f000;
+        }
         if ex_bypass_q.store_data {
             execute_store_data = bypass_data;
         } else {
@@ -1129,13 +1147,17 @@ module Core #(
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
         // younger instruction without a compare-result-to-CSR timing path.
-        // Stop issuing while a currently enabled level is pending. EX and CM
-        // retain ownership until their memory/MDU operations finish. Only an
-        // empty execution pipeline may enter an interrupt; no issued store is
-        // canceled or replayed, and a withdrawn level cannot cause a stale trap.
+        // Register the request before distributing the frontend hold. EX and
+        // CM retain ownership until their memory/MDU operations finish. At
+        // the empty boundary, recheck the live predicate before accepting an
+        // interrupt, then retain its cause until trap entry on the next edge.
+        // This cuts the pending-level path to fetch/predictor/CSR payloads;
+        // a level withdrawn before acceptance cannot cause a stale trap.
         csr_bus.machine_interrupts = machine_interrupts;
         interrupt_drain            = ENABLE_INTERRUPTS && csr_bus.interrupt_pending;
-        interrupt_event            = interrupt_drain && !ex_valid_q && !cm_valid_q && !redirect_pending_q;
+        interrupt_accept           = interrupt_drain_q && interrupt_drain && !ex_valid_q && !cm_valid_q
+            && !redirect_pending_q && !interrupt_claimed_q;
+        interrupt_event            = ENABLE_INTERRUPTS && interrupt_claimed_q;
         // Changes to the interrupt predicate serialize younger work. Their
         // CM write is followed by a redirect to fallthrough, so the new state
         // is evaluated before a successor can execute, just as after MRET.
@@ -1183,7 +1205,7 @@ module Core #(
         csr_bus.mret         = cm_mret_event;
         if interrupt_event {
             csr_bus.trap_pc    = interrupt_resume_pc_q;
-            csr_bus.trap_cause = {1'b1, 59'd0, csr_bus.interrupt_cause};
+            csr_bus.trap_cause = {1'b1, 59'd0, interrupt_cause_q};
             csr_bus.trap_value = 64'd0;
         }
 
@@ -1246,7 +1268,7 @@ module Core #(
             decode_execution_hazard = 1'b1;
         }
         execution_hazard = rx_execution_hazard_q;
-        frontend_hold    = execution_hazard || interrupt_drain;
+        frontend_hold    = execution_hazard || interrupt_drain_q || interrupt_claimed_q;
 
         predictor_wait = !predictor_ready || (fetch_q.valid && !predictor_response_valid);
         // A redirect/exception detected in this cycle may consume one younger
@@ -1361,6 +1383,25 @@ module Core #(
         halted    = 1'b0;
         debug_x31 = debug_x31_q;
 
+    }
+
+    // Hold the frontend through the accepted interrupt even if its external
+    // level changes. No EX/CM instruction can enter between acceptance and
+    // trap entry, so the saved architectural resume PC below remains stable.
+    // CSR writes/MRET already redirect and flush younger work: the registered
+    // request is visible before their successor can enter EX.
+    always_ff (clk, rst_n) {
+        if_reset {
+            interrupt_drain_q   = 1'b0;
+            interrupt_claimed_q = 1'b0;
+            interrupt_cause_q   = 4'd0;
+        } else if ENABLE_INTERRUPTS {
+            interrupt_drain_q   = interrupt_drain && !csr_bus.trap_enter;
+            interrupt_claimed_q = interrupt_accept;
+            if interrupt_accept {
+                interrupt_cause_q = csr_bus.interrupt_cause;
+            }
+        }
     }
 
     // Record the first instruction that has not retired. This remains valid

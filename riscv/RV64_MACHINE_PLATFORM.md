@@ -32,7 +32,7 @@ normal trap first. Older prediction repairs complete before interrupt entry.
 The next architectural PC is tracked at retirement, independently of fetch
 queues and cache availability. This preserves taken targets and 16-bit alignment
 in MEPC, with no replay of an already issued store or retired instruction.
-A withdrawn level is rechecked and cannot produce a stale interrupt.
+A level withdrawn before acceptance is rechecked and cannot produce a stale interrupt.
 
 Writes to `mstatus`, `mie` or `mip` serialize younger instructions through a
 fallthrough redirect. MRET already serializes through its return redirect.
@@ -131,8 +131,19 @@ not trap. The instruction-memory interface returns an inert line for an unmapped
 64-bit check before accepting the instruction. Data validation precedes the
 request token, and CM drains an older request before taking the exception.
 CM fault recovery discards speculative predictor entries and younger WB state.
+Data permissions and the first invalid byte are decoded from the base's current,
+preceding and following 4 KiB pages in parallel with the 12-bit offset sum.
+The separate 64-bit address adder retains signed-offset and XLEN wrap semantics.
 The memory backend still receives relocated physical BRAM addresses; its private
 ports and the stopped debug loader are not architectural CPU accesses.
+
+The current RTL also registers interrupt drain requests before distributing
+frontend hold. An empty EX/CM boundary rechecks the live enabled level and captures
+its cause; trap entry follows one edge later. The frontend stays held during this
+handoff even if the external level changes. CSR/MRET redirects keep successors
+from executing before the new interrupt predicate is checked. This adds bounded
+interrupt recognition latency without changing ordinary instruction scheduling.
+The qualified interrupt bitstream predates this timing refinement.
 
 Predictor tags/targets and physical memory ports remain 32 bits because permitted
 execution is in the physical regions above. Sv39 will require translation and a
