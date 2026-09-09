@@ -13,6 +13,7 @@ module HardwareCoreTestTop #(
     param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
+    param EARLY_DIVIDE     : bit = 0,
 ) (
     clk_cpu         : input  'cpu    clock              ,
     clk_mem         : input  'memory clock              ,
@@ -146,6 +147,7 @@ module HardwareCoreTestTop #(
         EARLY_TAKEN_FETCH      : EARLY_TAKEN_FETCH     ,
         ENABLE_M               : ENABLE_M              ,
         M_USE_DSP              : M_USE_DSP             ,
+        EARLY_DIVIDE           : EARLY_DIVIDE          ,
         COMMIT_PAYLOAD         : 1                     ,
         SYNC_DATA_MEMORY       : 1                     ,
         RELOCATE_LOW_DATA      : 1                     ,

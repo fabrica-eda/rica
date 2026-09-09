@@ -5,26 +5,31 @@ use celox::{NativeBackend, Simulator, SimulatorBuilder};
 struct Unit(Simulator<NativeBackend>);
 
 impl Unit {
-    fn with_dsp(use_dsp: bool) -> Self {
+    fn configured(use_dsp: bool, early_divide: bool) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let source = ["MulDivUnit.veryl", "DspMultiply64.veryl"]
             .map(|name| fs::read_to_string(root.join("src").join(name)).unwrap())
             .join("\n");
         let sim = SimulatorBuilder::new(&source, "MulDivUnit")
             .param("USE_DSP", u64::from(use_dsp))
+            .param("EARLY_DIVIDE", u64::from(early_divide))
             .build_native()
             .unwrap();
         Self::reset(sim)
     }
 
-    fn mapped(use_dsp: bool) -> Self {
+    fn mapped(use_dsp: bool, early_divide: bool) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let source = ["MulDivUnit.veryl", "DspMultiply64.veryl"]
             .map(|name| fs::read_to_string(root.join("src").join(name)).unwrap())
             .join("\n")
             .replace(
-                "param USE_DSP: bit = 0",
-                &format!("param USE_DSP: bit = {}", u8::from(use_dsp)),
+                "param USE_DSP     : bit = 0",
+                &format!("param USE_DSP     : bit = {}", u8::from(use_dsp)),
+            )
+            .replace(
+                "param EARLY_DIVIDE: bit = 0",
+                &format!("param EARLY_DIVIDE: bit = {}", u8::from(early_divide)),
             );
         let rtl =
             struo_frontend_veryl::analyze_and_lower(&source, "mapped_mdu", "MulDivUnit").unwrap();
@@ -244,16 +249,16 @@ fn mapped_dsp_pipeline_preserves_full_product_and_seven_cycle_latency() {
 
 #[test]
 fn all_rv64m_operations_match_independent_integer_arithmetic() {
-    check_arithmetic(false);
+    check_arithmetic(false, false);
 }
 
 #[test]
 fn dsp_rv64m_operations_match_independent_integer_arithmetic() {
-    check_arithmetic(true);
+    check_arithmetic(true, false);
 }
 
-fn check_arithmetic(use_dsp: bool) {
-    let mut unit = Unit::with_dsp(use_dsp);
+fn check_arithmetic(use_dsp: bool, early_divide: bool) {
+    let mut unit = Unit::configured(use_dsp, early_divide);
     let edges = [
         0,
         1,
@@ -316,16 +321,16 @@ fn check_arithmetic(use_dsp: bool) {
 
 #[test]
 fn cancellation_and_result_backpressure_do_not_leak_old_operations() {
-    check_cancellation(false);
+    check_cancellation(false, false);
 }
 
 #[test]
 fn dsp_cancellation_and_result_backpressure_do_not_leak_old_operations() {
-    check_cancellation(true);
+    check_cancellation(true, false);
 }
 
-fn check_cancellation(use_dsp: bool) {
-    let mut unit = Unit::with_dsp(use_dsp);
+fn check_cancellation(use_dsp: bool, early_divide: bool) {
+    let mut unit = Unit::configured(use_dsp, early_divide);
     for cancelled_op in [0, 1, 4] {
         for cycles in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 17, 33, 65, 68] {
             unit.start(cancelled_op, false, 0x8000_0000_0000_0001, 7);
@@ -363,9 +368,9 @@ fn mapped_mdu_preserves_native_results_and_completion_cycles() {
         (1 << 32) - 1,
         0x1234_5678_9abc_def0,
     ];
-    for use_dsp in [false, true] {
-        let mut native = Unit::with_dsp(use_dsp);
-        let mut mapped = Unit::mapped(use_dsp);
+    for (use_dsp, early_divide) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut native = Unit::configured(use_dsp, early_divide);
+        let mut mapped = Unit::mapped(use_dsp, early_divide);
         for word in [false, true] {
             for op in 0..8 {
                 if word && (1..4).contains(&op) {
@@ -385,6 +390,104 @@ fn mapped_mdu_preserves_native_results_and_completion_cycles() {
                         native.consume();
                         mapped.consume();
                     }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn early_division_preserves_all_m_arithmetic_and_cancellation() {
+    for use_dsp in [false, true] {
+        check_arithmetic(use_dsp, true);
+        check_cancellation(use_dsp, true);
+    }
+}
+
+#[test]
+fn early_division_handles_magnitude_boundaries_and_reduces_latency() {
+    let mut unit = Unit::configured(true, true);
+    for word in [false, true] {
+        let bits = if word { 32 } else { 64 };
+        for bit in 0..bits {
+            let pivot = 1_u64 << bit;
+            for magnitude_a in [pivot - 1, pivot, pivot.wrapping_add(1)] {
+                for magnitude_b in [1, 3, pivot - 1, pivot, pivot.wrapping_add(1)] {
+                    for negative_a in [false, true] {
+                        for negative_b in [false, true] {
+                            let mut a = if negative_a {
+                                magnitude_a.wrapping_neg()
+                            } else {
+                                magnitude_a
+                            };
+                            let mut b = if negative_b {
+                                magnitude_b.wrapping_neg()
+                            } else {
+                                magnitude_b
+                            };
+                            if word {
+                                // High input bits cannot change a W operation.
+                                a = (a & 0xffff_ffff) | 0x5a35_7777_0000_0000;
+                                b = (b & 0xffff_ffff) | 0xa3cf_e001_0000_0000;
+                            }
+                            for op in 4..=7 {
+                                unit.start(op, word, a, b);
+                                let (actual, cycles) = unit.finish();
+                                assert_eq!(
+                                    actual,
+                                    reference(op, word, a, b),
+                                    "op={op} word={word} a={a:x} b={b:x}"
+                                );
+                                assert!(cycles <= bits as usize + 3);
+                                unit.consume();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (a, b, bound) in [(7_u64, 13_u64, 4), (7, 0, 4), (0, 1, 4), (7, 3, 20)] {
+            for op in 4..=7 {
+                unit.start(op, word, a, b);
+                let (actual, cycles) = unit.finish();
+                assert_eq!(actual, reference(op, word, a, b));
+                assert!(cycles <= bound, "op={op} word={word} cycles={cycles}");
+                // DONE must retain even an early result until consumed.
+                for _ in 0..3 {
+                    unit.tick();
+                    assert_eq!((unit.get("done"), unit.get("result")), (1, actual));
+                }
+                unit.consume();
+            }
+        }
+    }
+    unit.start(5, false, u64::MAX, 1 << 32);
+    let (actual, cycles) = unit.finish();
+    assert_eq!(actual, u64::MAX / (1 << 32));
+    assert!(cycles <= 36);
+    unit.consume();
+}
+
+#[test]
+fn cancel_at_every_shortcut_phase_revokes_the_result_and_accepts_a_new_request() {
+    let mut unit = Unit::configured(true, true);
+    for word in [false, true] {
+        for (a, b) in [(7, 13), (7, 0), (7, 3), (u64::MAX, 1 << 32)] {
+            for op in 4..=7 {
+                for elapsed in 0..=68 {
+                    unit.start(op, word, a, b);
+                    for _ in 0..elapsed {
+                        unit.tick();
+                    }
+                    unit.set("cancel", 1);
+                    unit.set("consume", 1);
+                    unit.tick();
+                    unit.set("cancel", 0);
+                    unit.set("consume", 0);
+                    assert_eq!(unit.get("done"), 0);
+                    unit.start(5, false, 39, 13);
+                    assert_eq!(unit.finish().0, 3);
+                    unit.consume();
                 }
             }
         }

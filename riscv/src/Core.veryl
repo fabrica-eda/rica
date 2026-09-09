@@ -13,6 +13,7 @@ module Core #(
     param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
+    param EARLY_DIVIDE     : bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
     param RELOCATE_LOW_DATA: bit = 0,
     // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
@@ -416,7 +417,8 @@ module Core #(
     inst decode_bus: DecodeBus;
     if ENABLE_M :g_muldiv {
         inst unit: MulDivUnit #(
-            USE_DSP: M_USE_DSP,
+            USE_DSP     : M_USE_DSP   ,
+            EARLY_DIVIDE: EARLY_DIVIDE,
         ) (
             clk      : clk                                             ,
             rst_n    : rst_n                                           ,

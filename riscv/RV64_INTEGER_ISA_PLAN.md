@@ -9,11 +9,13 @@ setup・hold各200 ps予約、133種類のELF／181実機実行。
 整数ISAを **I/M/Zca → Zba → Zbb → Zbs** の順に拡充する。
 拡張ごとに機能・タイミング・実機を確定し、コンパイラが生成する命令列で比較する。
 **Zba／Zbb／Zbsは完了。RV64 B 1.0一式を124.8 MHzで実機認定した。**
-現行構成・性能・次の計画は本書の「第3段階: Zbs 実機認定」にまとめた。
+ISAの認定履歴は本書の各段階に、最新の構成・性能は [README](README.md) にまとめた。
 仕様は [RISC-V B v1.0](https://docs.riscv.org/reference/isa/unpriv/b-st-ext.html)。
 
 現在の圧縮命令は整数Zca。M-modeの限定したCSR／同期例外も実装している。
-A、特権／割り込み、F/D/Vは動かすソフトに合わせて別工程とする。
+2026-09-10の自作OS方針を受け、次はM-mode割り込み → A → U-mode/PMP → S-mode/Sv39を優先する。
+[自作OS向けのISA・プラットフォーム計画](RV64_OS_ISA_PLAN.md)に対応差分と合格条件をまとめた。
+F/D/Vは実際のOSの要求に合わせて後工程とする。
 LSU・MDUの追加高速化は、整数拡張後のコンパイラ生成コードで効果を判断する。
 
 ## 第1段階: Zbaの構成
@@ -431,3 +433,20 @@ STA、デバイスの遅延データ、クロック、200 ps予約は変更し�
 DSP乗算、124.8 MHz、setup／hold各200 ps予約を維持する。
 今回の全負slack探索は76分でも収束せず、局所配置から通常探索を再開した方が有効だった。
 Texoの候補範囲・探索上限・既存配線の再利用も整理対象とする。
+
+## 除算早期終了とOS起動用SYSTEM動作（2026-09-10）
+
+`HardwareCompactEarlyDivideTestTop` を124.8 MHzで実機認定した。
+setup・hold各200 ps予約後に0／+90 ps、17,305 checks各、既存4例外。
+除算の不要な反復を省き、最悪MDU latencyの64-bit 67／W命令35 cyclesを維持した。
+I-cacheの隣接lineアドレスを並列carryで計算し、サイクル数を変えずにタイミングを収束させた。
+
+234 ELF＋診断70反復＋既定runner 16実行の **320 PASS**。
+217 workspace試験、除算有効・無効各468モデル実行、35同時edge診断も合格した。
+同一ELFの3回中央値で、除算C smallは1.692053倍、wideは1.502221倍、既存m_divideは1.141618倍。
+他31診断は±1 cycle以内。[全IPC・クロック・時間](../toolchain/measurements/2026-09-10-rv64-early-divide/PERFORMANCE.md)。
+
+M-modeのWFIをNOPとして受け付け、固定WARLのmisaへの書込みを合法にした。
+OS起動試験はMSCRATCHでのstack交換、trap frame、ECALL→MRETも実機で確認する。
+割り込み、A、U/PMP、S/Sv39は [OS計画](RV64_OS_ISA_PLAN.md) の次工程である。
+[回路・配置試行・認定記録](../toolchain/measurements/2026-09-10-rv64-early-divide/README.md)。

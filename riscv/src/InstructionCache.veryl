@@ -96,30 +96,10 @@ module InstructionCache #(
         assign memory_request_sequence = request_sequence_q;
     }
 
+    inst addresses: InstructionCacheAddresses ( pc, pc_line, next_line, ahead_line );
+
     always_comb {
-        pc_line = {pc[31:3], 3'b000};
-        // Bound each carry chain; the successor tag feeds the fetch-valid
-        // handshake and must not wait for a 29-bit ripple increment.
-        next_line[2:0]   = 3'd0;
-        next_line[6:3]   = pc[6:3] + 4'd1;
-        next_line[10:7]  = pc[10:7] + ((pc[6:3] == 4'hf) as 4);
-        next_line[14:11] = pc[14:11] + ((pc[10:3] == 8'hff) as 4);
-        next_line[18:15] = pc[18:15] + ((pc[14:3] == 12'hfff) as 4);
-        next_line[22:19] = pc[22:19] + ((pc[18:3] == 16'hffff) as 4);
-        next_line[26:23] = pc[26:23] + ((pc[22:3] == 20'hfffff) as 4);
-        next_line[30:27] = pc[30:27] + ((pc[26:3] == 24'hffffff) as 4);
-        next_line[31]    = pc[31] ^ (pc[30:3] == 28'hfffffff);
-        // A returned successor can trigger the following line before PC
-        // advances and the synchronous tag banks settle on their next row.
-        ahead_line[3:0]   = pc_line[3:0];
-        ahead_line[7:4]   = pc[7:4] + 4'd1;
-        ahead_line[11:8]  = pc[11:8] + ((pc[7:4] == 4'hf) as 4);
-        ahead_line[15:12] = pc[15:12] + ((pc[11:4] == 8'hff) as 4);
-        ahead_line[19:16] = pc[19:16] + ((pc[15:4] == 12'hfff) as 4);
-        ahead_line[23:20] = pc[23:20] + ((pc[19:4] == 16'hffff) as 4);
-        ahead_line[27:24] = pc[27:24] + ((pc[23:4] == 20'hfffff) as 4);
-        ahead_line[31:28] = pc[31:28] + ((pc[27:4] == 24'hffffff) as 4);
-        read_address[0]   = pc_line;
+        read_address[0] = pc_line;
         // The odd current/successor bank always uses PC's row and tag.
         read_address[1] = {pc[31:4], 1'b1, 3'd0};
         if pc[3] {
@@ -319,5 +299,77 @@ module InstructionCache #(
                 }
             }
         }
+    }
+}
+
+/// Adjacent 8-byte instruction lines, without ripple carry between bits.
+/// Each bit toggles exactly when every less significant line bit is one.
+module InstructionCacheAddresses (
+    pc        : input  logic<32>,
+    pc_line   : output logic<32>,
+    next_line : output logic<32>,
+    ahead_line: output logic<32>,
+) {
+    always_comb {
+        pc_line         = {pc[31:3], 3'b000};
+        next_line[2:0]  = 3'd0;
+        next_line[3]    = !pc[3];
+        next_line[4]    = pc[4] ^ (&pc[3:3]);
+        next_line[5]    = pc[5] ^ (&pc[4:3]);
+        next_line[6]    = pc[6] ^ (&pc[5:3]);
+        next_line[7]    = pc[7] ^ (&pc[6:3]);
+        next_line[8]    = pc[8] ^ (&pc[7:3]);
+        next_line[9]    = pc[9] ^ (&pc[8:3]);
+        next_line[10]   = pc[10] ^ (&pc[9:3]);
+        next_line[11]   = pc[11] ^ (&pc[10:3]);
+        next_line[12]   = pc[12] ^ (&pc[11:3]);
+        next_line[13]   = pc[13] ^ (&pc[12:3]);
+        next_line[14]   = pc[14] ^ (&pc[13:3]);
+        next_line[15]   = pc[15] ^ (&pc[14:3]);
+        next_line[16]   = pc[16] ^ (&pc[15:3]);
+        next_line[17]   = pc[17] ^ (&pc[16:3]);
+        next_line[18]   = pc[18] ^ (&pc[17:3]);
+        next_line[19]   = pc[19] ^ (&pc[18:3]);
+        next_line[20]   = pc[20] ^ (&pc[19:3]);
+        next_line[21]   = pc[21] ^ (&pc[20:3]);
+        next_line[22]   = pc[22] ^ (&pc[21:3]);
+        next_line[23]   = pc[23] ^ (&pc[22:3]);
+        next_line[24]   = pc[24] ^ (&pc[23:3]);
+        next_line[25]   = pc[25] ^ (&pc[24:3]);
+        next_line[26]   = pc[26] ^ (&pc[25:3]);
+        next_line[27]   = pc[27] ^ (&pc[26:3]);
+        next_line[28]   = pc[28] ^ (&pc[27:3]);
+        next_line[29]   = pc[29] ^ (&pc[28:3]);
+        next_line[30]   = pc[30] ^ (&pc[29:3]);
+        next_line[31]   = pc[31] ^ (&pc[30:3]);
+        ahead_line[3:0] = {pc[3], 3'd0};
+        ahead_line[4]   = !pc[4];
+        ahead_line[5]   = pc[5] ^ (&pc[4:4]);
+        ahead_line[6]   = pc[6] ^ (&pc[5:4]);
+        ahead_line[7]   = pc[7] ^ (&pc[6:4]);
+        ahead_line[8]   = pc[8] ^ (&pc[7:4]);
+        ahead_line[9]   = pc[9] ^ (&pc[8:4]);
+        ahead_line[10]  = pc[10] ^ (&pc[9:4]);
+        ahead_line[11]  = pc[11] ^ (&pc[10:4]);
+        ahead_line[12]  = pc[12] ^ (&pc[11:4]);
+        ahead_line[13]  = pc[13] ^ (&pc[12:4]);
+        ahead_line[14]  = pc[14] ^ (&pc[13:4]);
+        ahead_line[15]  = pc[15] ^ (&pc[14:4]);
+        ahead_line[16]  = pc[16] ^ (&pc[15:4]);
+        ahead_line[17]  = pc[17] ^ (&pc[16:4]);
+        ahead_line[18]  = pc[18] ^ (&pc[17:4]);
+        ahead_line[19]  = pc[19] ^ (&pc[18:4]);
+        ahead_line[20]  = pc[20] ^ (&pc[19:4]);
+        ahead_line[21]  = pc[21] ^ (&pc[20:4]);
+        ahead_line[22]  = pc[22] ^ (&pc[21:4]);
+        ahead_line[23]  = pc[23] ^ (&pc[22:4]);
+        ahead_line[24]  = pc[24] ^ (&pc[23:4]);
+        ahead_line[25]  = pc[25] ^ (&pc[24:4]);
+        ahead_line[26]  = pc[26] ^ (&pc[25:4]);
+        ahead_line[27]  = pc[27] ^ (&pc[26:4]);
+        ahead_line[28]  = pc[28] ^ (&pc[27:4]);
+        ahead_line[29]  = pc[29] ^ (&pc[28:4]);
+        ahead_line[30]  = pc[30] ^ (&pc[29:4]);
+        ahead_line[31]  = pc[31] ^ (&pc[30:4]);
     }
 }

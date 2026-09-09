@@ -102,35 +102,38 @@ module Decoder #(
         // comparator in the EX critical path. Zero denotes an unknown CSR.
         // Each address has one index. Encode its bits in parallel instead
         // of cascading the mutually exclusive address matches.
-        decode.csr_index[0]  = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
+        decode.csr_index[0] = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
             || (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf12)
             || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
             || (decode.instr[31:20] == 12'h7c1);
-        decode.csr_index[1]  = (decode.instr[31:20] == 12'h301) || (decode.instr[31:20] == 12'h305)
+        decode.csr_index[1] = (decode.instr[31:20] == 12'h301) || (decode.instr[31:20] == 12'h305)
             || (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf13)
             || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
-        decode.csr_index[2]  = (decode.instr[31:20] == 12'h340) || (decode.instr[31:20] == 12'h341)
+        decode.csr_index[2] = (decode.instr[31:20] == 12'h340) || (decode.instr[31:20] == 12'h341)
             || (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hb00)
             || (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
             || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
-        decode.csr_index[3]  = (decode.instr[31:20] == 12'hf11) || (decode.instr[31:20] == 12'hf12)
+        decode.csr_index[3] = (decode.instr[31:20] == 12'hf11) || (decode.instr[31:20] == 12'hf12)
             || (decode.instr[31:20] == 12'hf13) || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb00)
             || (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
             || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
-        csr_known_group0     = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h301)
+        csr_known_group0    = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h301)
             || (decode.instr[31:20] == 12'h305) || (decode.instr[31:20] == 12'h340);
-        csr_known_group1     = (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h342)
+        csr_known_group1    = (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h342)
             || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf11);
-        csr_known_group2     = (decode.instr[31:20] == 12'hf12) || (decode.instr[31:20] == 12'hf13)
+        csr_known_group2    = (decode.instr[31:20] == 12'hf12) || (decode.instr[31:20] == 12'hf13)
             || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb00);
-        csr_known_group3     = (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02)
+        csr_known_group3    = (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02)
             || (decode.instr[31:20] == 12'hc02) || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
-        csr_address_known    = (csr_known_group0 || csr_known_group1) || (csr_known_group2 || csr_known_group3);
-        csr_writable_group0  = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
+        csr_address_known   = (csr_known_group0 || csr_known_group1) || (csr_known_group2 || csr_known_group3);
+        csr_writable_group0 = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
             || (decode.instr[31:20] == 12'h340) || (decode.instr[31:20] == 12'h341);
-        csr_writable_group1  = (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343)
+        csr_writable_group1 = (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343)
             || (decode.instr[31:20] == 12'hb00) || (decode.instr[31:20] == 12'hb02);
-        csr_writable_group2  = (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
+        // MISA has a fixed WARL value. Writes are legal and ignored by the
+        // CSR bank; unlike the 0xcxx/0xfxx CSRs, its address is not read-only.
+        csr_writable_group2  = (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1)
+            || (decode.instr[31:20] == 12'h301);
         csr_address_writable = (csr_writable_group0 || csr_writable_group1) || csr_writable_group2;
         csr_write_requested  = (funct3[1:0] == 2'b01) || ((funct3[1:0] != 2'b00) && (decode.rs1 != 5'd0));
         decode.is_ecall      = 1'b0;
@@ -235,6 +238,11 @@ module Decoder #(
                             }
                             32'h3020_0073: {
                                 decode.is_mret = 1'b1;
+                                decode.illegal = 1'b0;
+                            }
+                            32'h1050_0073: {
+                                // Privileged ISA permits WFI to execute as a
+                                // NOP. This M-only core does not gate clocks.
                                 decode.illegal = 1'b0;
                             }
                             default: {}
@@ -560,11 +568,11 @@ module Decoder #(
         // Generate legality once, independently of the control payload case.
         // This maps as parallel opcode/funct matching rather than a chain of
         // priority updates to one `illegal` bit.
-        legal_u_jump   = (opcode == 7'b0110111) || (opcode == 7'b0010111) || (opcode == 7'b1101111);
-        legal_control  = ((opcode == 7'b1100111) && (funct3 == 3'b000))
+        legal_u_jump  = (opcode == 7'b0110111) || (opcode == 7'b0010111) || (opcode == 7'b1101111);
+        legal_control = ((opcode == 7'b1100111) && (funct3 == 3'b000))
             || ((opcode == 7'b1100011) && (funct3[2] || !funct3[1]));
-        legal_memory   = ((opcode == 7'b0000011) && (funct3 != 3'b111)) || ((opcode == 7'b0100011) && !funct3[2]);
-        legal_integer  = ((opcode == 7'b0010011)
+        legal_memory  = ((opcode == 7'b0000011) && (funct3 != 3'b111)) || ((opcode == 7'b0100011) && !funct3[2]);
+        legal_integer = ((opcode == 7'b0010011)
                 && (((funct3 != 3'b001) && (funct3 != 3'b101))
                     || ((funct3 == 3'b001) && (decode.instr[31:26] == 6'b000000))
                     || ((funct3 == 3'b101)
@@ -577,13 +585,13 @@ module Decoder #(
             || ((opcode == 7'b0111011)
                 && (((funct7 == 7'b0000000) && ((funct3 == 3'b000) || (funct3 == 3'b001) || (funct3 == 3'b101)))
                     || ((funct7 == 7'b0100000) && ((funct3 == 3'b000) || (funct3 == 3'b101)))));
+        // Exact privileged encodings already prove opcode and funct3.
+        // Keep their recognition parallel to the CSR access checks.
         legal_system   = ((opcode == 7'b0001111) && ((funct3 == 3'b000) || (funct3 == 3'b001)))
-            || ((opcode == 7'b1110011)
-                && (((funct3 == 3'b000)
-                        && ((decode.instr == 32'h0000_0073) || (decode.instr == 32'h0010_0073)
-                            || (decode.instr == 32'h3020_0073)))
-                    || ((funct3[1:0] != 2'b00) && csr_address_known
-                        && (!csr_write_requested || csr_address_writable))));
+            || (decode.instr == 32'h0000_0073) || (decode.instr == 32'h0010_0073) || (decode.instr == 32'h3020_0073)
+            || (decode.instr == 32'h1050_0073)
+            || ((opcode == 7'b1110011) && (funct3[1:0] != 2'b00) && csr_address_known
+                && (!csr_write_requested || csr_address_writable));
         encoding_legal = ((legal_u_jump || legal_control) || (legal_memory || legal_integer)) || legal_system;
         decode.illegal = !encoding_legal;
         // Generate register/control flags independently from the ALU payload

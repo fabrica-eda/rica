@@ -97,7 +97,7 @@ fn every_implemented_csr_has_exact_write_legality_for_all_six_forms() {
     let mut simulator = decoder();
     const IMPLEMENTED: [(u16, u8, bool); 17] = [
         (0x300, 1, true),   // mstatus
-        (0x301, 2, false),  // misa
+        (0x301, 2, true),   // misa: fixed WARL, writes are ignored
         (0x305, 3, true),   // mtvec
         (0x340, 4, true),   // mscratch
         (0x341, 5, true),   // mepc
@@ -166,5 +166,22 @@ fn unknown_csrs_are_illegal_for_reads_and_writes_without_aliasing_an_index() {
                 assert!(illegal, "unsupported address was accepted for {context}");
             }
         }
+    }
+}
+
+#[test]
+fn wfi_is_a_legal_m_mode_nop_without_accepting_unimplemented_privileged_encodings() {
+    let mut sim = decoder();
+    let (_, write, illegal) = decode(&mut sim, 0x1050_0073);
+    assert!(!write && !illegal);
+    for instr in [
+        0x1020_0073,
+        0x1200_0073,
+        0x1040_0073,
+        0x1060_0073,
+        0x1050_00f3,
+        0x1050_8073,
+    ] {
+        assert!(decode(&mut sim, instr).2, "instruction={instr:08x}");
     }
 }

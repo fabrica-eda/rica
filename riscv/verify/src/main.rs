@@ -929,6 +929,7 @@ struct HardwareModelConfig {
     enable_zbs: bool,
     early_bitmanip: bool,
     early_taken_fetch: bool,
+    early_divide: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -948,6 +949,7 @@ fn verify_hardware_memory_rtl(
         enable_zbs,
         early_bitmanip,
         early_taken_fetch,
+        early_divide,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -969,6 +971,7 @@ fn verify_hardware_memory_rtl(
         .param("ENABLE_ZBS", u64::from(enable_zbs))
         .param("EARLY_BITMANIP", u64::from(early_bitmanip))
         .param("EARLY_TAKEN_FETCH", u64::from(early_taken_fetch))
+        .param("EARLY_DIVIDE", u64::from(early_divide))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1477,15 +1480,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     let enable_zbs = arguments.iter().any(|arg| arg == "--zbs-extension");
     let early_bitmanip = arguments.iter().any(|arg| arg == "--early-bitmanip");
     let early_taken_fetch = arguments.iter().any(|arg| arg == "--early-taken-fetch");
+    let early_divide = arguments.iter().any(|arg| arg == "--early-divide");
     let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
+    if early_divide && !enable_m {
+        return Err("--early-divide requires --m-extension or --dsp-multiplier".into());
+    }
     if (enable_m
         || enable_zba
         || enable_zbb
         || enable_zbs
         || early_bitmanip
         || early_taken_fetch
+        || early_divide
         || timed_clocks)
         && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl")
     {
@@ -1589,6 +1597,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--timed-clocks"
                     && argument.as_str() != "--early-bitmanip"
                     && argument.as_str() != "--early-taken-fetch"
+                    && argument.as_str() != "--early-divide"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
@@ -1622,6 +1631,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         use_dsp,
                         early_bitmanip,
                         early_taken_fetch,
+                        early_divide,
                         trace: timed_trace,
                     },
                     max_cycles,
@@ -1643,6 +1653,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_zbs,
                 early_bitmanip,
                 early_taken_fetch,
+                early_divide,
             },
             max_cycles,
         );

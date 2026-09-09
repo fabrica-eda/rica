@@ -51,6 +51,7 @@ pub struct ExecutionConfig<'a> {
     pub use_dsp: bool,
     pub early_bitmanip: bool,
     pub early_taken_fetch: bool,
+    pub early_divide: bool,
     pub trace: Option<TraceConfig<'a>>,
 }
 
@@ -148,6 +149,7 @@ pub fn run(
         .param("M_USE_DSP", u64::from(execution.use_dsp))
         .param("EARLY_BITMANIP", u64::from(execution.early_bitmanip))
         .param("EARLY_TAKEN_FETCH", u64::from(execution.early_taken_fetch))
+        .param("EARLY_DIVIDE", u64::from(execution.early_divide))
         .build()?;
     let reset = sim.signal("rst_n");
     let run = sim.signal("run");

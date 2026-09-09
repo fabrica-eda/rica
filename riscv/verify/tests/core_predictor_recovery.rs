@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 use celox::{BigUint, NativeBackend, NativeProgramImage, OptLevel, Simulator, SimulatorBuilder};
 
 const NOP: u32 = 0x0000_0013;
+const EARLY_DIVIDE_CONFIG: u64 = 32_648;
 const KIND_CONDITIONAL: u64 = 1;
 const KIND_DIRECT: u64 = 2;
 const KIND_CALL: u64 = 4;
@@ -21,6 +22,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static BIMODAL: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_EARLY_DIVIDE: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_TAKEN_FETCH: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT32: OnceLock<NativeProgramImage> = OnceLock::new();
     static TAGE_M: OnceLock<NativeProgramImage> = OnceLock::new();
@@ -42,6 +44,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static EARLY_2056: OnceLock<NativeProgramImage> = OnceLock::new();
     static EARLY_3976: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
+        EARLY_DIVIDE_CONFIG => &COMPACT_EARLY_DIVIDE,
         8200 => &COMPACT_TAKEN_FETCH,
         8072 => &EARLY_3976,
         6152 => &EARLY_2056,
@@ -79,6 +82,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
             .param("EARLY_TAKEN_FETCH", u64::from(config & 8192 != 0))
             .param("ENABLE_M", u64::from(config & 128 != 0))
             .param("M_USE_DSP", u64::from(config & 256 != 0))
+            .param("EARLY_DIVIDE", u64::from(config & 16_384 != 0))
             .param("BRANCH_PREDICTOR_CONFIG", config & 127)
             .opt_level(OptLevel::O0)
             .compile_native()
@@ -1341,7 +1345,7 @@ fn encode_muldiv(rd: u32, rs1: u32, rs2: u32, operation: u32) -> u32 {
 
 #[test]
 fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
-    for config in [128, 130, 132, 136, 392] {
+    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 123)),
@@ -1372,7 +1376,15 @@ fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
                 entry.1 = cycle.commit_data;
             }
         }
-        assert!(held >= if config & 256 != 0 { 75 } else { 90 });
+        assert!(
+            held >= if config & 16_384 != 0 {
+                20
+            } else if config & 256 != 0 {
+                75
+            } else {
+                90
+            }
+        );
         assert_eq!(commits[&8], (1, 861));
         assert_eq!(commits[&12], (1, 123));
         assert_eq!(commits[&16].0, 1);
@@ -1383,7 +1395,7 @@ fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
 #[test]
 fn older_branch_squashes_muldiv_and_younger_csr_store() {
     let mut exercised_speculative_start_and_cancel = false;
-    for config in [128, 130, 132, 136, 392] {
+    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 7)),
@@ -1421,7 +1433,7 @@ fn older_branch_squashes_muldiv_and_younger_csr_store() {
 
 #[test]
 fn muldiv_defers_a_younger_exception_until_its_result_retires() {
-    for config in [128, 130, 132, 136, 392] {
+    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 7)),
@@ -1460,7 +1472,12 @@ fn muldiv_defers_a_younger_exception_until_its_result_retires() {
 
 #[test]
 fn stale_prediction_on_muldiv_preserves_its_pending_result() {
-    let mut driver = direct_trained_driver(136);
+    check_stale_prediction_on_divide(136);
+    check_stale_prediction_on_divide(EARLY_DIVIDE_CONFIG);
+}
+
+fn check_stale_prediction_on_divide(config: u64) {
+    let mut driver = direct_trained_driver(config);
     driver.program.insert(0, encode_muldiv(31, 0, 0, 5)); // DIVU by zero.
     let mut repaired = false;
     for _ in 0..240 {
@@ -1586,7 +1603,7 @@ fn zba_wrong_path_does_not_commit_and_disabled_zba_traps_precisely() {
 
 #[test]
 fn system_trap_flushes_a_younger_muldiv_before_it_can_start() {
-    for config in [128, 130, 132, 136, 392] {
+    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
         for trap in [0x0000_0073, 0x0010_0073] {
             let mut driver = CoreDriver::with_config(
                 (0..8).map(|i| (i * 4, NOP)).chain([
