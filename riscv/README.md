@@ -3,49 +3,55 @@
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study, measured results, and implementation plan.
 The current board build is **scalar RV64 with full M and B (Zba/Zbb/Zbs)
-integer extensions**, a compact 64-entry BTB with 2-bit direction prediction,
-an eight-entry RAS and a 4 KiB synchronous instruction cache:
-`HardwareCompactZbsDspM4KTestTop` (`FAST_LSU=5`, `ENABLE_M=1`, `M_USE_DSP=1`,
-`ENABLE_ZBA=1`, `ENABLE_ZBB=1`, `ENABLE_ZBS=1`). Sixteen DSP partial products
-and a seven-stage external pipeline implement multiplication; division remains
-iterative. Zbb rotates and counts are split across EX/CM. Zbs carries its operands
-through EX and completes single-bit updates/extraction in CM. Dependent consumers
-receive bit-manipulation results from the existing WB register. `misa.B` is set
-only when all three B subsets are enabled; the compressed subset remains integer Zca.
+integer extensions**, integer compressed instructions (Zca), Zicsr and Zifencei.
+`HardwareCompactTakenFetchTestTop` uses a compact 64-entry BTB, 2-bit direction
+prediction, an eight-entry RAS and a 4 KiB synchronous instruction cache.
+It enables `FAST_LSU=6`, `EARLY_BITMANIP=1`, and `EARLY_TAKEN_FETCH=1` with DSP
+multiplication. Division remains iterative. Simple bit operations use EX/CM
+forwarding; rotates, counts, min/max and bit extraction complete through CM/WB.
 
-CPU **124.8 MHz / memory 62.4 MHz** is retained. STA gives **+200 ps nominal
-setup / +290 ps hold**; after reserving 200 ps independently for each, the guarded
-slacks are **0 ps setup / +90 ps hold**. All 17,232 setup and hold checks pass,
-including 515 JTCK paths at 6 MHz, with the same four reviewed external/CDC
-exceptions. The design uses 29,296 cells, 16 DSPs and 150 EBRs, adding 676 cells
-compared with the qualified Zbb image.
+A held taken prediction now prepares the instruction-cache target during a
+memory or dependency wait. Registered preview state keeps the late prediction
+handshake off the cache-address mux. The semantic fetch cursor and prediction
+tokens still advance through their existing acceptance and recovery protocol.
+
+CPU **124.8 MHz / memory 62.4 MHz** is retained. After reserving **200 ps each
+for setup and hold**, STA gives **+2 ps setup / +90 ps hold** (nominal +202/+290 ps).
+All **17,329 setup and hold checks** pass, including 515 JTCK paths at 6 MHz,
+with the same four reviewed external/CDC exceptions. The design uses **28,928
+cells, 16 DSPs and 150 EBRs**, adding 158 cells to the preceding early-forwarding image.
 
 The exact bitstream passed **230 distinct physical ELFs, 64 diagnostic repetitions,
-and 16 executions through the updated default runner: 310 PASS** using Windows D2XX.
-At the same 124.8 MHz, paired C workloads run **1.178 times faster for single-bit
-updates, 1.098 times for extraction, and 1.195 times for immediate operations**
-with Zbs enabled. All 26 same-ELF baseline diagnostics differ by at most one cycle.
-Multiplication takes 10,147 cycles for 2,580 retired instructions:
-**IPC 0.254262 / 31.731940 MIPS**. Measurements include startup and checks.
-ISA changes alter instruction counts, so elapsed time for the same work is the
-primary comparison alongside IPC and clock.
+and 16 executions through the updated default runner: 310 PASS** using Windows D2XX/XVC.
+The following are medians of three runs of identical ELFs, including startup and checks:
 
-The CPU/memory model passes 230 ELFs in both serialized clock orders. Seven
-coincident-edge diagnostics match physical retired counts and differ by at most
-one cycle; memory-wait counts agree. Fresh synthesis and checked route import
-reproduce the exact checkpoint and bitstream bytes. Placement search needed a
-broader set of violating cones and equally predicted candidates. The final
-implementation passed the unchanged production tool, timing data and constraints;
-the experimental proposal patches and build records are retained in the evidence.
+| Diagnostic | Previous → current cycles | Current IPC | IPC × 124.8 MHz (MIPS) | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| pointer_chase | 12,659 → 10,615 | 0.387471 | 48.356326 | **1.192558×** |
+| array_copy | 19,918 → 17,879 | 0.417473 | 52.100632 | **1.114044×** |
 
-The no-flag Core/model remains an M/Zba/Zbb/Zbs-disabled comparison. Select the
-current model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
---fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension`.
-The hardware runner selects the qualified B/DSP image.
+The other 30 diagnostics differ by at most one cycle. Retired instruction counts
+are identical for all 32 comparisons; their geometric-mean speedup is 1.008927×.
+The registered preview benefits the two waiting loops in this set.
+
+With preview enabled and disabled, the CPU/memory model passes 230 ELFs in both
+serialized clock orders (**920 PASS**). All 32 coincident-edge diagnostics match
+physical retired counts and differ by zero or one cycle. The workspace passes
+212 tests with one existing ignored mapped-board test. Normal production synthesis,
+checked route import, STA and bitgen reproduce the checkpoint and bitstream bytes.
+The timing data, clock constraints and reserved margins are unchanged.
+
+Select the current model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
+--fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension
+--early-bitmanip --early-taken-fetch`. Add `--timed-clocks` for coincident CPU/memory
+edges. The no-flag Core/model retains the legacy comparison configuration.
+The default hardware image is `build/riscv-hardware-compact-taken-fetch-124p8-20260909.bit`.
 
 See the [integer ISA implementation and next steps](RV64_INTEGER_ISA_PLAN.md),
-[current Zbs measurement evidence](../toolchain/measurements/2026-09-09-rv64-zbs/README.md),
-[all current IPC/clock measurements](../toolchain/measurements/2026-09-09-rv64-zbs/PERFORMANCE.md),
+[current target-preview evidence](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md),
+[all current IPC/clock measurements](../toolchain/measurements/2026-09-09-rv64-load-dependency/PERFORMANCE.md),
+[previous early-forwarding measurements](../toolchain/measurements/2026-09-09-rv64-early-bitmanip/README.md),
+[previous Zbs measurements](../toolchain/measurements/2026-09-09-rv64-zbs/README.md),
 [previous Zbb measurements](../toolchain/measurements/2026-09-09-rv64-zbb/README.md),
 [previous Zba measurements](../toolchain/measurements/2026-09-08-rv64-zba/README.md),
 [previous hold repair and timing record](RV64_HOLD_MARGIN_PLAN.md),
@@ -68,7 +74,8 @@ The predictor configurations are available without editing RTL:
 | **Compact predictor + DSP M multiplier** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier` (hardware-memory RTL) | `HardwareCompactDspM4KTestTop` |
 | **Compact predictor + DSP M + Zba** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension` (hardware-memory RTL) | `HardwareCompactZbaDspM4KTestTop` |
 | **Compact predictor + DSP M + Zba + Zbb** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension` (hardware-memory RTL) | `HardwareCompactZbbDspM4KTestTop` |
-| **Current: compact predictor + DSP M + B** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension` (hardware-memory RTL) | `HardwareCompactZbsDspM4KTestTop` |
+| Compact predictor + DSP M + B | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 5 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension` (hardware-memory RTL) | `HardwareCompactZbsDspM4KTestTop` |
+| **Current: compact predictor + DSP M + B + early forwarding/target preview** | 8 (9 on board) | 4 | `--compact-predictor --icache-kib 4 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension --early-bitmanip --early-taken-fetch` (hardware-memory RTL) | `HardwareCompactTakenFetchTestTop` |
 | Compact 32-entry BTB + RAS | 24 (25 on board) | 12 | `--compact-predictor-32` | `HardwareCompact32Cached4KTestTop` |
 | Compact 64-entry BTB, no RAS | 40 (41 on board) | 20 | `--compact-predictor-no-ras` | `HardwareCompactNoRas4KTestTop` |
 | Compact 64-entry BTB + RAS, no direction prediction | 72 (73 on board) | 36 | `--compact-predictor-no-direction` | generic `HardwareTestTop` parameter |
@@ -448,9 +455,9 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-compact-dsp-m-4k-124p8-20260908-hold.bit`,
+verified `riscv/build/riscv-hardware-compact-taken-fetch-124p8-20260909.bit`,
 with eight-byte masked writes. Its build command, hash and checked bitgen flow
-are in the [hold margin report](RV64_HOLD_MARGIN_PLAN.md). Program it and run the eight
+are in the [current image report](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -495,11 +502,11 @@ networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
 The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
-`riscv-hardware-compact-dsp-m-4k-124p8-20260908-hold.bit`.
+`riscv-hardware-compact-taken-fetch-124p8-20260909.bit`.
 `--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
-CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](RV64_HOLD_MARGIN_PLAN.md)
+CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md)
 and [historical failure reproducer](../toolchain/mre/rv64-jtag-write64/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;

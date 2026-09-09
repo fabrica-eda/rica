@@ -366,9 +366,8 @@ FF・clockを含まない[独立MRE](../toolchain/mre/celox-parameter-repeat/REA
 
 ### 次の改良計画
 
-1. **残るload依存とfrontend待ちを測る。** pointer_chaseが改善しなかった理由を
-   カウンタと2:1 clockの波形で切り分ける。LSU6に残る旧出力レジスタの削減は
-   別候補として資源・setup余裕を比較する。
+1. **完了: load依存とfrontend待ちの切り分け。** 下記の先読みを実機認定した。
+   LSU6に残る旧出力レジスタの削減は、別候補として資源・setup余裕を比較する。
 2. **除算の早期終了を評価する。** 符号・ゼロ除算・overflow・word幅を検証し、
    コンパイラ生成Cの同じ処理時間で採否を決める。DSP乗算は維持する。
 3. **Texo探索のコストを制限する。** 初期未達が多い場合の全cone探索は高コストだった。
@@ -376,3 +375,59 @@ FF・clockを含まない[独立MRE](../toolchain/mre/celox-parameter-repeat/REA
 
 いずれも124.8 MHzとsetup／hold各200 ps予約、同じELFの実機比較を採用条件とする。
 A、特権／割り込み、F/D/Vの追加は対象ソフトの要件に応じた別工程とする。
+
+## 採用: 保持されたtaken予測の先読み（2026-09-09）
+
+Veryl修正のupstream取り込みは待たず、既存のCelox／VerylローカルパッチでCPU評価を続ける。
+pointer_chaseの同時edge traceで、LSU5/6とも定常4命令／12 cyclesと確認した。
+LSU6の早い応答だけでは、2:1 memory clockの位相と分岐先のI-cache待ちを短縮できなかった。
+
+`EARLY_TAKEN_FETCH`は、まだ受付されていないtaken予測をメモリ／依存待ち中に保持し、
+I-cacheへ分岐先を早く提示する。prediction token、semantic cursor、retirementの受付条件は維持する。
+初稿の組合せアドレス選択は配線後のsetup不足が大きく、33 bitのpreviewレジスタを使う案を採用した。
+`HardwareCompactTakenFetchTestTop`を既定の実機imageにした。ISA、DSP乗算、LSU6は同じ。
+
+レジスタ版はCore 46試験、workspace 212件（既存除外1件）、有効・無効各230 ELF×2順序を通過した。
+同じ32 ELFの同時edgeモデルでは、pointer_chaseが12,659→10,615 cycles、
+array_copyが19,919→17,879 cycles、他30本は同じcycle数。全てretiredが一致した。
+モデルの値は実機測定と分けて保存した。実機は230 ELF、32診断の追加2周、
+既定起動8 ELFの2周が全て合格し、**310 PASS**。
+
+| 項目 | 採用値 |
+| --- | --- |
+| CPU / memory / JTCK | **124.8 / 62.4 / 6 MHz** |
+| setup: nominal / 200 ps予約後 | **+202 / +2 ps** |
+| hold: nominal / 200 ps予約後 | **+290 / +90 ps** |
+| setup / hold検査、JTCK照合 | 各**17,329**、JTCK各**515**、既存の明示例外4件 |
+| セル / DSP / EBR / PIPs | **28,928 / 16 / 150 / 368,428**。基準から158セル増 |
+
+通常Texoの初回配置ではsetup −175 psで未達だった。終了アドレス比較の2 LUTを寄せ、
+関連10 netを解放して通常の配置配線を再開した`10`で合格した。最終的には60セルが移動した。
+`12`は同じRTLを再合成し、配線検査・STA・bitgenを再実行してcheckpointとbitのbyte一致を確認した。
+STA、デバイスの遅延データ、クロック、200 ps予約は変更していない。
+
+同じELFを各bitで3回実行した中央値。起動・検算を含み、全32本でretiredが一致する。
+
+| 診断 | cycle: 基準 → 採用 | retired | IPC: 基準 → 採用 | 採用MIPS | 時間µs: 基準 → 採用 | 高速化 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pointer_chase | 12,659 → 10,615 | 4,113 | 0.324907 → **0.387471** | **48.356326** | 101.434 → 85.056 | **1.192558倍** |
+| array_copy | 19,918 → 17,879 | 7,464 | 0.374736 → **0.417473** | **52.100632** | 159.599 → 143.261 | **1.114044倍** |
+
+他30本の差は±1 cycle以内。全32診断の速度比幾何平均は1.008927、固定4診断は1.000078。
+改善は今回のメモリ／依存待ちがあるループに限られ、全プログラムで19%速いという結果ではない。
+同時edgeモデルと実機のretiredは一致し、cycle差は−1〜0だった。
+
+- 既定image: `build/riscv-hardware-compact-taken-fetch-124p8-20260909.bit`
+- bit SHA-256: `07265a64025998aca1a632801e64455f3e2edd0f929c64ea55f661e1f4ccb34f`
+- checkpoint SHA-256: `0e1ad88dffa5e78ab5c543de9790aa0707338adb42d3d96fdbccad9b81c85ef3`
+
+- [設計理由・切り分け・試行記録](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md)
+- [レジスタ版の同時edgeモデル32診断](../toolchain/measurements/2026-09-09-rv64-load-dependency/registered-model-comparison-01.md)
+- [全32診断の実機IPC・clock・時間](../toolchain/measurements/2026-09-09-rv64-load-dependency/PERFORMANCE.md)
+- [機能・STA・再生成・実機の最終照合](../toolchain/measurements/2026-09-09-rv64-load-dependency/validation.json)
+
+次工程は除算の早期終了。まず商が0になる入力や有効bit数の小さい入力で不要な反復を減らす案を、
+符号・ゼロ除算・overflow・word幅の検証と同じC workloadで比較する。
+DSP乗算、124.8 MHz、setup／hold各200 ps予約を維持する。
+今回の全負slack探索は76分でも収束せず、局所配置から通常探索を再開した方が有効だった。
+Texoの候補範囲・探索上限・既存配線の再利用も整理対象とする。
