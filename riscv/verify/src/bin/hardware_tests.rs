@@ -1034,10 +1034,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
-    // CPU/memory stay at 124.8/62.4 MHz. This DSP multiplier image passed
-    // STA with 200 ps setup/hold reserves and RV64_HOLD_MARGIN_PLAN.md qualification.
-    let mut bitstream =
-        project.join("build/riscv-hardware-compact-prefetch-return-124p8-20260909.bit");
+    // CPU/memory stay at 124.8/62.4 MHz. This taken-target preview image passed
+    // STA with 200 ps setup/hold reserves and RV64_INTEGER_ISA_PLAN.md qualification.
+    let mut bitstream = project.join("build/riscv-hardware-compact-taken-fetch-124p8-20260909.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

@@ -12,6 +12,7 @@ module HardwareTestTop #(
     param ENABLE_ZBB       : bit = 0,
     param ENABLE_ZBS       : bit = 0,
     param EARLY_BITMANIP   : bit = 0,
+    param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
 ) (
@@ -208,6 +209,7 @@ module HardwareTestTop #(
         ENABLE_ZBB             : ENABLE_ZBB            ,
         ENABLE_ZBS             : ENABLE_ZBS            ,
         EARLY_BITMANIP         : EARLY_BITMANIP        ,
+        EARLY_TAKEN_FETCH      : EARLY_TAKEN_FETCH     ,
         ENABLE_M               : ENABLE_M              ,
         M_USE_DSP              : M_USE_DSP             ,
         COMMIT_PAYLOAD         : 0                     ,

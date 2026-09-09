@@ -10,6 +10,7 @@ module Core #(
     param ENABLE_ZBB       : bit = 0,
     param ENABLE_ZBS       : bit = 0,
     param EARLY_BITMANIP   : bit = 0,
+    param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
@@ -81,6 +82,8 @@ module Core #(
     var fetch_line_q             : logic       <29>;
     var fetch_parcel_q           : logic       <2> ;
     var fetch_address            : logic       <32>;
+    var taken_fetch_valid_q      : logic           ;
+    var taken_fetch_pc_q         : logic       <32>;
     var fetch_line_plus_one      : logic       <29>;
     var fetch_next_parcel        : logic       <2> ;
     var fetch_cross_line         : logic           ;
@@ -1183,6 +1186,12 @@ module Core #(
         debug_counter_data          = csr_bus.debug_counter_data;
 
         pc = fetch_address;
+        // A registered held prediction prepares the synchronous lookup while
+        // its queue entry waits for the backend. Its accept edge clears the
+        // preview as the semantic cursor switches to the same target.
+        if EARLY_TAKEN_FETCH && taken_fetch_valid_q {
+            pc = taken_fetch_pc_q;
+        }
         // The optional board-memory relocation is registered together with
         // the architectural LSU address. It therefore does not put an
         // address-space mux between a pipeline register and every BRAM bank.
@@ -1289,6 +1298,21 @@ module Core #(
                 }
                 fetch_parcel_q = fetch_next_parcel;
             }
+        }
+    }
+
+    // Do not extend recovery/token availability through the instruction-cache
+    // address mux. A prediction is held only when the frontend cannot accept
+    // another candidate. Acceptance or recovery clears the preview on the
+    // same edge that advances or flushes the corresponding queue entry.
+    always_ff (clk, rst_n) {
+        if_reset {
+            taken_fetch_valid_q = 1'b0;
+            taken_fetch_pc_q    = 32'd0;
+        } else {
+            taken_fetch_valid_q = EARLY_TAKEN_FETCH && fetch_q.valid && predictor_response_valid
+                && predictor_response_taken && !predictor_response_accept;
+            taken_fetch_pc_q    = predictor_response_next_pc;
         }
     }
 

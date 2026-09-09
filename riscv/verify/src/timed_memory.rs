@@ -4,6 +4,7 @@
 //! their updates. The manual `Simulator::tick` API cannot express this grouping.
 use std::error::Error;
 use std::fs;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use celox::Simulation;
@@ -38,11 +39,69 @@ fn edge(sim: &mut Simulation, clocks: &[&str]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TraceConfig<'a> {
+    pub path: &'a Path,
+    pub start_cycle: usize,
+    pub end_cycle: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ExecutionConfig {
+pub struct ExecutionConfig<'a> {
     pub use_dsp: bool,
     pub early_bitmanip: bool,
+    pub early_taken_fetch: bool,
+    pub trace: Option<TraceConfig<'a>>,
 }
+
+// Sample settled state immediately before the named CPU edge. Even-numbered
+// cycles also contain a memory edge; both domains still read pre-edge values.
+const TRACE_SIGNALS: &[&str] = &[
+    "pc",
+    "instruction_valid",
+    "core.fetch_valid_q",
+    "core.fetch_lookahead_valid_q",
+    "core.fetch_tail_valid_q",
+    "core.predictor_wait",
+    "core.predictor_request_valid",
+    "core.predictor_request_ready",
+    "core.predictor_response_valid",
+    "core.predictor_response_accept",
+    "core.predictor_response_taken",
+    "core.predictor_frontend_redirect",
+    "core.fetch_queue_advance",
+    "core.rx_valid_q",
+    "core.rx_pc_q",
+    "core.rx_execution_hazard_q",
+    "core.ex_valid_q",
+    "core.ex_pc_q",
+    "core.ex_is_load_q",
+    "core.cm_valid_q",
+    "core.cm_pc_q",
+    "core.cm_is_load_q",
+    "core.cm_retire_event",
+    "core.wb_valid_q",
+    "core.execution_hazard",
+    "core.memory_wait",
+    "core.muldiv_wait",
+    "core.backend_wait",
+    "core.redirect_pending_q",
+    "core.branch_redirect_valid",
+    "data_addr",
+    "data_we",
+    "data_request_sequence",
+    "data_response_sequence",
+    "core_data_response_sequence",
+    "data_rdata",
+    "core_data_rdata",
+    "hardware_memory.data_request_sequence_q",
+    "hardware_memory.data_request_handled_q",
+    "hardware_memory.data_response_sequence_q",
+    "hardware_memory.data_address_q",
+    "hardware_memory.data_read_mux",
+    "core.csr_file.mcycle_value",
+    "core.csr_file.minstret_value",
+];
 
 /// This explicit diagnostic compiles a timed model per ELF. Ordinary catalog
 /// verification retains its cached native images and both serialized orders.
@@ -52,9 +111,20 @@ pub fn run(
     predictor_config: u64,
     memory: (u64, u64),
     isa: IsaExtensions,
-    execution: ExecutionConfig,
+    execution: ExecutionConfig<'_>,
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
+    let mut diagnostic = execution
+        .trace
+        .map(|trace| -> Result<_, Box<dyn Error>> {
+            if trace.start_cycle == 0 || trace.end_cycle < trace.start_cycle {
+                return Err("trace requires 1 <= start cycle <= end cycle".into());
+            }
+            let mut output = BufWriter::new(fs::File::create_new(trace.path)?);
+            writeln!(output, "cycle,time,mem_rising,{}", TRACE_SIGNALS.join(","))?;
+            Ok((trace, output))
+        })
+        .transpose()?;
     let image = ElfImage::load(elf)?;
     let mut source = crate::core_source(project)?;
     for name in [
@@ -77,6 +147,7 @@ pub fn run(
         .param("ENABLE_ZBS", u64::from(isa.zbs))
         .param("M_USE_DSP", u64::from(execution.use_dsp))
         .param("EARLY_BITMANIP", u64::from(execution.early_bitmanip))
+        .param("EARLY_TAKEN_FETCH", u64::from(execution.early_taken_fetch))
         .build()?;
     let reset = sim.signal("rst_n");
     let run = sim.signal("run");
@@ -112,6 +183,20 @@ pub fn run(
     let mut mailbox_low = 0;
     let mut trace = std::collections::VecDeque::new();
     for cycle in 1..=max_cycles {
+        if let Some((config, output)) = &mut diagnostic
+            && (config.start_cycle..=config.end_cycle).contains(&cycle)
+        {
+            write!(
+                output,
+                "{cycle},{},{}",
+                sim.time(),
+                u8::from(cycle % 2 == 0)
+            )?;
+            for signal in TRACE_SIGNALS {
+                write!(output, ",{:x}", value(&mut sim, signal))?;
+            }
+            writeln!(output)?;
+        }
         memory_wait += usize::from(value(&mut sim, "core.memory_wait") != 0);
         muldiv_wait += usize::from(value(&mut sim, "core.muldiv_wait") != 0);
         let store = value(&mut sim, "data_we") != 0
@@ -149,6 +234,9 @@ pub fn run(
             }
         }
         if let Some(result) = mailbox.filter(|value| *value != 0) {
+            if let Some((_, output)) = &mut diagnostic {
+                output.flush()?;
+            }
             if result != 1 {
                 return Err(format!(
                     "timed model {}: tohost={result}, trace={trace:x?}",
@@ -167,6 +255,9 @@ pub fn run(
             println!("TIMED_METRIC {report}");
             return Ok(());
         }
+    }
+    if let Some((_, output)) = &mut diagnostic {
+        output.flush()?;
     }
     Err(format!(
         "timed model {} timed out after {commits} commits: {trace:x?}",

@@ -928,6 +928,7 @@ struct HardwareModelConfig {
     enable_zbb: bool,
     enable_zbs: bool,
     early_bitmanip: bool,
+    early_taken_fetch: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -946,6 +947,7 @@ fn verify_hardware_memory_rtl(
         enable_zbb,
         enable_zbs,
         early_bitmanip,
+        early_taken_fetch,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -966,6 +968,7 @@ fn verify_hardware_memory_rtl(
         .param("ENABLE_ZBB", u64::from(enable_zbb))
         .param("ENABLE_ZBS", u64::from(enable_zbs))
         .param("EARLY_BITMANIP", u64::from(early_bitmanip))
+        .param("EARLY_TAKEN_FETCH", u64::from(early_taken_fetch))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1473,15 +1476,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     let enable_zbb = arguments.iter().any(|arg| arg == "--zbb-extension");
     let enable_zbs = arguments.iter().any(|arg| arg == "--zbs-extension");
     let early_bitmanip = arguments.iter().any(|arg| arg == "--early-bitmanip");
+    let early_taken_fetch = arguments.iter().any(|arg| arg == "--early-taken-fetch");
     let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
-    if (enable_m || enable_zba || enable_zbb || enable_zbs || early_bitmanip || timed_clocks)
+    if (enable_m
+        || enable_zba
+        || enable_zbb
+        || enable_zbs
+        || early_bitmanip
+        || early_taken_fetch
+        || timed_clocks)
         && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl")
     {
         return Err(
-            "--m-extension, --zba-extension, --zbb-extension, --zbs-extension, --early-bitmanip and --timed-clocks require --hardware-memory-rtl"
-                .into(),
+            "ISA/execution options and --timed-clocks require --hardware-memory-rtl".into(),
         );
     }
     let cycle_option = arguments.iter().position(|arg| arg == "--max-cycles");
@@ -1500,6 +1509,38 @@ fn main() -> Result<(), Box<dyn Error>> {
     if cycle_option.is_some() && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl") {
         return Err("--max-cycles requires --hardware-memory-rtl".into());
     }
+    let trace_option = arguments.iter().position(|arg| arg == "--timed-trace");
+    let trace_start_option = arguments.iter().position(|arg| arg == "--trace-start");
+    let trace_end_option = arguments.iter().position(|arg| arg == "--trace-end");
+    if (trace_start_option.is_some() || trace_end_option.is_some()) && trace_option.is_none() {
+        return Err("--trace-start and --trace-end require --timed-trace".into());
+    }
+    let timed_trace = if let Some(index) = trace_option {
+        if !timed_clocks {
+            return Err("--timed-trace requires --timed-clocks".into());
+        }
+        let path = Path::new(
+            arguments
+                .get(index + 1)
+                .ok_or("--timed-trace requires a path")?,
+        );
+        let parse_cycle = |option: Option<usize>, default| -> Result<usize, Box<dyn Error>> {
+            Ok(match option {
+                Some(index) => arguments
+                    .get(index + 1)
+                    .ok_or("trace range requires a cycle")?
+                    .parse()?,
+                None => default,
+            })
+        };
+        Some(verify_riscv::timed_memory::TraceConfig {
+            path,
+            start_cycle: parse_cycle(trace_start_option, 1)?,
+            end_cycle: parse_cycle(trace_end_option, max_cycles)?,
+        })
+    } else {
+        None
+    };
     let lsu_option = arguments.iter().position(|arg| arg == "--fast-lsu");
     let fast_lsu = if let Some(index) = lsu_option {
         match arguments.get(index + 1).map(String::as_str) {
@@ -1547,15 +1588,23 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--zbs-extension"
                     && argument.as_str() != "--timed-clocks"
                     && argument.as_str() != "--early-bitmanip"
+                    && argument.as_str() != "--early-taken-fetch"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
+                    && ![trace_option, trace_start_option, trace_end_option]
+                        .into_iter()
+                        .flatten()
+                        .any(|option| *index == option || *index == option + 1)
             })
             .map(|(_, argument)| PathBuf::from(argument))
             .collect::<Vec<_>>();
         if timed_clocks {
             if requested_elfs.is_empty() {
                 return Err("--timed-clocks requires explicit ELF paths".into());
+            }
+            if timed_trace.is_some() && requested_elfs.len() != 1 {
+                return Err("--timed-trace requires exactly one ELF".into());
             }
             for elf in &requested_elfs {
                 verify_riscv::timed_memory::run(
@@ -1572,6 +1621,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     verify_riscv::timed_memory::ExecutionConfig {
                         use_dsp,
                         early_bitmanip,
+                        early_taken_fetch,
+                        trace: timed_trace,
                     },
                     max_cycles,
                 )?;
@@ -1591,6 +1642,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 enable_zbb,
                 enable_zbs,
                 early_bitmanip,
+                early_taken_fetch,
             },
             max_cycles,
         );

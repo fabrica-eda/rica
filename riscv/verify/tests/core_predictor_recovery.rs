@@ -21,6 +21,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static BIMODAL: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT: OnceLock<NativeProgramImage> = OnceLock::new();
+    static COMPACT_TAKEN_FETCH: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT32: OnceLock<NativeProgramImage> = OnceLock::new();
     static TAGE_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static BIMODAL_M: OnceLock<NativeProgramImage> = OnceLock::new();
@@ -41,6 +42,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static EARLY_2056: OnceLock<NativeProgramImage> = OnceLock::new();
     static EARLY_3976: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
+        8200 => &COMPACT_TAKEN_FETCH,
         8072 => &EARLY_3976,
         6152 => &EARLY_2056,
         6024 => &EARLY_1928,
@@ -74,6 +76,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
             .param("ENABLE_ZBB", u64::from(config & 1024 != 0))
             .param("ENABLE_ZBS", u64::from(config & 2048 != 0))
             .param("EARLY_BITMANIP", u64::from(config & 4096 != 0))
+            .param("EARLY_TAKEN_FETCH", u64::from(config & 8192 != 0))
             .param("ENABLE_M", u64::from(config & 128 != 0))
             .param("M_USE_DSP", u64::from(config & 256 != 0))
             .param("BRANCH_PREDICTOR_CONFIG", config & 127)
@@ -145,6 +148,7 @@ fn encode_slli(rd: u32, rs1: u32, amount: u32) -> u32 {
 #[derive(Clone, Copy, Debug)]
 struct Cycle {
     fetch_pc: u32,
+    fetch_cursor: u32,
     ex_valid: bool,
     ex_pc: u32,
     rx_valid: bool,
@@ -312,6 +316,7 @@ impl CoreDriver {
 
         let observed = Cycle {
             fetch_pc,
+            fetch_cursor: self.value("fetch_address") as u32,
             ex_valid: self.value("ex_valid_q") != 0,
             ex_pc: self.value("ex_pc_q") as u32,
             rx_valid: self.value("rx_valid_q") != 0,
@@ -571,6 +576,82 @@ fn learned_taken_cancel_holds_redirect_target_and_skips_fallthrough() {
         "the redirect target was never requested"
     );
     panic!("the redirect target never executed after cancellation");
+}
+
+#[test]
+fn taken_target_preview_preserves_load_dependencies_and_mispredicted_loop_exit() {
+    for config in [8, 8200] {
+        let mut driver = CoreDriver::with_config(
+            [
+                (0, encode_addi(1, 0, 8)),
+                (4, encode_addi(3, 0, 0)),
+                (8, encode_ld(2, 0, 0)),
+                (12, 0x0021_81b3), // add x3, x3, x2
+                (16, encode_addi(1, 1, -1)),
+                (20, encode_branch(1, 0, 1, -12)),
+                (24, encode_addi(31, 3, 0)),
+                (28, encode_jal(0, 0)),
+                (32, encode_addi(31, 0, 2047)),
+            ],
+            config,
+        );
+        driver.set_data_rdata(7);
+        let expected = [0, 4]
+            .into_iter()
+            .chain((0..8).flat_map(|_| [8, 12, 16, 20]))
+            .chain([24])
+            .collect::<Vec<_>>();
+        let mut retired = Vec::new();
+        let mut waited = 0;
+        let mut held_previews = 0;
+        let mut complete = false;
+        for _ in 0..1500 {
+            let cycle = driver.step();
+            if cycle.fetch_pc != cycle.fetch_cursor {
+                assert_eq!(config, 8200);
+                assert!(
+                    !cycle.predictor_request_accept,
+                    "preview data acquired the old cursor's token"
+                );
+                if cycle.memory_wait {
+                    held_previews += 1;
+                }
+            }
+            if cycle.memory_wait {
+                waited += 1;
+                if waited >= 5 {
+                    driver.acknowledge_data_request();
+                }
+            } else {
+                waited = 0;
+            }
+            if cycle.retire && retired.len() < expected.len() {
+                assert_eq!(
+                    cycle.cm_pc,
+                    expected[retired.len()],
+                    "retirement order changed for config {config}"
+                );
+                retired.push(cycle.cm_pc);
+            }
+            if cycle.commit_valid && cycle.commit_pc == 24 {
+                assert_eq!(retired, expected);
+                assert_eq!(cycle.commit_rd, 31);
+                assert_eq!(
+                    cycle.commit_data, 56,
+                    "a load result or the final not-taken exit was lost"
+                );
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "loop did not finish for config {config}");
+        if config == 8200 {
+            assert!(
+                held_previews > 0,
+                "the delayed load never overlapped target preview"
+            );
+        }
+    }
 }
 
 #[test]
