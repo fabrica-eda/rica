@@ -6,14 +6,15 @@ use celox::{NativeBackend, Simulator, SimulatorBuilder};
 const TEST_TOP: &str = r#"
 module CsrDecoderTestTop #(
     param ENABLE_M: bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
 ) (
     instr    : input  logic<32>,
-    csr_index: output logic<4> ,
+    csr_index: output logic<5> ,
     csr_write: output logic    ,
     illegal  : output logic    ,
 ) {
     inst decode_bus: DecodeBus;
-    inst decoder: Decoder #(ENABLE_M: ENABLE_M) (
+    inst decoder: Decoder #(ENABLE_M: ENABLE_M, ENABLE_INTERRUPTS: ENABLE_INTERRUPTS) (
         decode: decode_bus,
     );
 
@@ -48,6 +49,10 @@ fn decoder() -> Simulator<NativeBackend> {
 }
 
 fn decoder_with_m(enable_m: bool) -> Simulator<NativeBackend> {
+    decoder_with_options(enable_m, false)
+}
+
+fn decoder_with_options(enable_m: bool, interrupts: bool) -> Simulator<NativeBackend> {
     let riscv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -60,6 +65,7 @@ fn decoder_with_m(enable_m: bool) -> Simulator<NativeBackend> {
     .join("\n");
     SimulatorBuilder::new(&source, "CsrDecoderTestTop")
         .param("ENABLE_M", u64::from(enable_m))
+        .param("ENABLE_INTERRUPTS", u64::from(interrupts))
         .build_native()
         .unwrap()
 }
@@ -183,5 +189,25 @@ fn wfi_is_a_legal_m_mode_nop_without_accepting_unimplemented_privileged_encoding
         0x1050_8073,
     ] {
         assert!(decode(&mut sim, instr).2, "instruction={instr:08x}");
+    }
+}
+
+#[test]
+fn machine_interrupt_csrs_decode_all_forms_only_when_enabled() {
+    for enabled in [false, true] {
+        let mut simulator = decoder_with_options(false, enabled);
+        for (address, expected_index) in [(0x304, 16), (0x344, 17)] {
+            for funct3 in [1, 2, 3, 5, 6, 7] {
+                for source in [0, 31] {
+                    let (index, write, illegal) =
+                        decode(&mut simulator, csr_instruction(address, funct3, source, 1));
+                    assert_eq!(index, if enabled { expected_index } else { 0 });
+                    assert_eq!(illegal, !enabled);
+                    // MIP pending bits are read-only, but its CSR address is
+                    // writable: all six instructions are legal when enabled.
+                    assert_eq!(write, matches!(funct3, 1 | 5) || source != 0);
+                }
+            }
+        }
     }
 }

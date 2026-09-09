@@ -14,6 +14,7 @@ module HardwareCoreTestTop #(
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
 ) (
     clk_cpu         : input  'cpu    clock              ,
     clk_mem         : input  'memory clock              ,
@@ -93,12 +94,18 @@ module HardwareCoreTestTop #(
         );
     }
 
+    var memory_machine_interrupts: 'memory logic<3>;
+    var core_machine_interrupts  : 'cpu    logic<3>;
     unsafe (cdc) {
         inst hardware_memory: HardwareMemory #(
-            FAST_LSU: FAST_LSU,
+            ENABLE_TIMER: ENABLE_INTERRUPTS,
+            FAST_LSU    : FAST_LSU         ,
         ) (
             clk                        : clk_mem                       ,
             rst_n                      : rst_n                         ,
+            timer_rst_n                : cpu_rst_n                     ,
+            timer_freeze               : 1'b0                          ,
+            machine_interrupts         : memory_machine_interrupts     ,
             cpu_instr_address          : memory_instr_address          ,
             cpu_instr_request_sequence : memory_instr_request_sequence ,
             cpu_instr_response_sequence: memory_instr_response_sequence,
@@ -116,6 +123,16 @@ module HardwareCoreTestTop #(
             debug_address              : debug_address                 ,
             debug_data                 : debug_data                    ,
         );
+    }
+
+    unsafe (cdc) {
+        always_ff (clk_cpu, cpu_rst_n) {
+            if_reset {
+                core_machine_interrupts = 3'd0;
+            } else {
+                core_machine_interrupts = memory_machine_interrupts;
+            }
+        }
     }
 
     var core_data_rdata            : 'cpu logic<64>;
@@ -140,6 +157,7 @@ module HardwareCoreTestTop #(
     }
 
     inst core: Core #(
+        ENABLE_INTERRUPTS      : ENABLE_INTERRUPTS     ,
         ENABLE_ZBA             : ENABLE_ZBA            ,
         ENABLE_ZBB             : ENABLE_ZBB            ,
         ENABLE_ZBS             : ENABLE_ZBS            ,
@@ -160,6 +178,7 @@ module HardwareCoreTestTop #(
         instr_valid           : instruction_valid          ,
         data_rdata            : core_data_rdata            ,
         data_response_sequence: core_data_response_sequence,
+        machine_interrupts    : core_machine_interrupts    ,
         counter_freeze        : 1'b0                       ,
         debug_counter_index   : 4'd0                       ,
         debug_counter_data    : unused_debug_counter       ,

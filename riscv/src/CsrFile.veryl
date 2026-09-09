@@ -1,29 +1,35 @@
-/// Minimal machine-mode CSR bank for precise synchronous traps.
+/// Machine-mode CSR bank for precise traps and optional machine interrupts.
 ///
-/// Rica currently has one hart, no lower privilege modes, and no interrupts.
+/// Rica currently has one hart and no lower privilege modes.
 /// The implemented state is nevertheless architectural: trap entry records
 /// MEPC/MCAUSE/MTVAL and updates MSTATUS, while MRET restores the interrupt
 /// enable stack and returns to the aligned MEPC value.
 module CsrFile #(
-    param ENABLE_M: bit = 0,
-    param ENABLE_B: bit = 0,
+    param ENABLE_M         : bit = 0,
+    param ENABLE_B         : bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
 ) (
     clk  : input   clock       ,
     rst_n: input   reset       ,
     csr  : modport CsrBus::file,
 ) {
-    // This core has a 32-bit physical address space and no interrupt sources.
+    // This core has a 32-bit physical address space.
     // Keep only implemented WARL/WLRL fields in flops; CSR reads expand them
     // to XLEN. This avoids routing 64-bit write muxes to mostly constant state.
     // {MPP[1:0], MPIE, MIE}
-    var mstatus_q     : logic<4> ;
-    var mtvec_q       : logic<30>;
-    var mscratch_q    : logic<64>;
-    var mepc_q        : logic<31>;
-    var mcause_q      : logic<4> ;
-    var mtval_q       : logic<32>;
-    var mcycle_value  : logic<64>;
-    var minstret_value: logic<64>;
+    var mstatus_q         : logic<4> ;
+    var mtvec_q           : logic<30>;
+    var mscratch_q        : logic<64>;
+    var mepc_q            : logic<31>;
+    var mcause_q          : logic<4> ;
+    var mcause_interrupt_q: logic    ;
+    var mie_q             : logic<3> ;
+    var interrupt_enabled : logic<3> ;
+    var mie_read          : logic<64>;
+    var mip_read          : logic<64>;
+    var mtval_q           : logic<32>;
+    var mcycle_value      : logic<64>;
+    var minstret_value    : logic<64>;
 
     // The two custom machine CSRs at 0x7c0/0x7c1 select and access one of nine
     // implementation-defined event counters without consuming nine entries
@@ -261,7 +267,7 @@ module CsrFile #(
                 csr_mux_level0[1][1] = 1'b1;
             }
             csr_mux_level0[2] = mscratch_q;
-            csr_mux_level0[3] = {60'd0, mcause_q};
+            csr_mux_level0[3] = {mcause_interrupt_q, 59'd0, mcause_q};
             // Standard read-only machine identity CSRs for hart zero.
             csr_mux_level0[4] = 64'd0;
             csr_mux_level0[5] = 64'd0;
@@ -292,7 +298,36 @@ module CsrFile #(
             csr.read_data = csr_mux_level2[0];
         }
 
-        // Only direct-mode synchronous traps exist today. C makes IALIGN 16
+        mie_read          = 64'd0;
+        mip_read          = 64'd0;
+        interrupt_enabled = 3'd0;
+        if ENABLE_INTERRUPTS {
+            mie_read[11]      = mie_q[2];
+            mie_read[7]       = mie_q[1];
+            mie_read[3]       = mie_q[0];
+            mip_read[11]      = csr.machine_interrupts[2];
+            mip_read[7]       = csr.machine_interrupts[1];
+            mip_read[3]       = csr.machine_interrupts[0];
+            interrupt_enabled = mie_q & csr.machine_interrupts;
+        }
+        if csr.index[4] {
+            csr.read_data = 64'd0;
+            if csr.index == 5'd16 {
+                csr.read_data = mie_read;
+            } else if csr.index == 5'd17 {
+                csr.read_data = mip_read;
+            }
+        }
+        csr.interrupt_pending = mstatus_q[0] && (interrupt_enabled != 3'd0);
+        // The architectural priority is external > software > timer.
+        csr.interrupt_cause = 4'd7;
+        if interrupt_enabled[2] {
+            csr.interrupt_cause = 4'd11;
+        } else if interrupt_enabled[0] {
+            csr.interrupt_cause = 4'd3;
+        }
+
+        // MTVEC implements direct mode only. C makes IALIGN 16
         // bits, while mtvec retains its independently required 4-byte base
         // alignment in direct mode.
         csr.trap_vector = {mtvec_q, 2'b00};
@@ -391,6 +426,37 @@ module CsrFile #(
                 mstatus_q = mstatus_q | {2'b00, csr.write_source[7], csr.write_source[3]};
             } else {
                 mstatus_q = mstatus_q & ~{2'b00, csr.write_source[7], csr.write_source[3]};
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mie_q = 3'd0;
+        } else if ENABLE_INTERRUPTS && csr.write_enable && (csr.write_index == 5'd16) && (csr.write_op != 2'd3) {
+            if csr.write_op == 2'd0 {
+                mie_q = {csr.write_source[11], csr.write_source[7], csr.write_source[3]};
+            } else if csr.write_op == 2'd1 {
+                mie_q = mie_q | {csr.write_source[11], csr.write_source[7], csr.write_source[3]};
+            } else {
+                mie_q = mie_q & ~{csr.write_source[11], csr.write_source[7], csr.write_source[3]};
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            mcause_interrupt_q = 1'b0;
+        } else if ENABLE_INTERRUPTS
+            && (csr.trap_enter || (csr.write_enable && (csr.write_index == 5'd6) && (csr.write_op != 2'd3))) {
+            if csr.trap_enter {
+                mcause_interrupt_q = csr.trap_cause[63];
+            } else if csr.write_op == 2'd0 {
+                mcause_interrupt_q = csr.write_source[63];
+            } else if csr.write_op == 2'd1 {
+                mcause_interrupt_q = mcause_interrupt_q | csr.write_source[63];
+            } else {
+                mcause_interrupt_q = mcause_interrupt_q & ~csr.write_source[63];
             }
         }
     }

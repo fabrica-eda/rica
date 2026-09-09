@@ -15,8 +15,8 @@ CPU 124.8 MHz、メモリ62.4 MHz、setup・hold各200 ps予約、実機320実�
 | --- | --- | --- |
 | 整数ISA | RV64 I/M/B、整数圧縮Zca、Zicsr、Zifencei | A（Zaamo＋Zalrsc）。F/D/Vは後工程 |
 | 特権 | M-modeのみ。ECALL/EBREAK/不正命令、MRET | M/S/Uの実行権限、CSRアクセス権、例外委譲 |
-| CSR | mstatus/mtvec/mscratch/mepc/mcause/mtval、識別、cycle/instret等 | mie/mip、割り込みcause上位bit、時刻、後にS-mode CSR |
-| 割り込み | 入力・タイマ・mie/mipとも未実装 | timer/software/external、正確な割り込み境界 |
+| CSR | 従来のM-mode CSRに加え、割り込み構成ではmie/mipとmcause[63] | S-mode CSR、権限と委譲、time alias |
+| 割り込み | 追加構成でMSI/MTI/MEI受付、MMIO timer/MSIP。ボードのMEIは未接続 | 外部デバイス/controller、実機認定 |
 | アドレス | PC・分岐先・EPC・mtvalは内部32 bit。メモリ要求も32 bit | 仮想アドレスを切り捨てず保持し、変換後に実装物理幅を検査 |
 | メモリ | 256 KiB BRAM中252 KiB RAM＋4 KiB reset領域。範囲外は別名になる | RAM/MMIOの厳密なdecode、access fault、PMP、ページfault |
 | 保護・仮想記憶 | PMP/MMU/TLBなし | U-mode隔離、S-mode、Sv39、SFENCE.VMA |
@@ -38,6 +38,12 @@ BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 実機のOS起動試験で、これらに加えてMSCRATCH stack交換、trap frame、ECALL→MRETを確認した。
 
 ### 1. M-modeでプリエンプションできる最小基盤
+
+`ENABLE_INTERRUPTS=1` と `HardwareCompactInterruptTestTop` に割り込み・タイマー基盤を実装。
+[CSR、受付境界、MMIO、resetの仕様](RV64_MACHINE_PLATFORM.md)。
+2タスクの全整数contextを16回切り替える試験は両方のシミュレーションclock順序で合格。
+[STA・実機の認定状態](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md)は別に記録する。
+この工程の残りは厳密なメモリdecode/access faultと外部I/O。S/U/PMP/Sv39は後工程のまま。
 
 - `mie/mip` のMSI/MTI/MEI、`mcause[63]`、MIE/MPIEの正しい更新。
   pendingはsourceに従うlevel入力とし、CSRで読める状態と割り込み判定を一致させる。
@@ -90,7 +96,7 @@ V、H、SMP、PLIC/AIA互換性、Linux/OpenSBI互換性は今の自作OS対応�
 ## 全段階で維持する検証
 
 - 独立整数oracle、Veryl/Celoxとmapped回帰、命令単位とCPU統合の両方を確認する。
-- ACT/Sailと実OS試験を追加する。既存230 ELFの同一byte回帰を維持する。
+- ACT/Sailと実OS試験を追加する。既存234 ELFの同一byte回帰を維持する。
 - CPU 124.8 MHz／メモリ62.4 MHz、setup・hold各200 ps予約、JTCK照合を維持する。
 - 機能モデル合格、配線後STA合格、checked bitgen、exact hash実機の順で認定する。
   新imageの既定化はその後。IPC×clockと同じ仕事の実行時間を記録する。

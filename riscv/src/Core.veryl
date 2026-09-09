@@ -14,6 +14,7 @@ module Core #(
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
     param RELOCATE_LOW_DATA: bit = 0,
     // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
@@ -27,6 +28,7 @@ module Core #(
     instr_valid           : input  logic    ,
     data_rdata            : input  logic<64>,
     data_response_sequence: input  logic    ,
+    machine_interrupts    : input  logic<3> ,
     pc                    : output logic<64>,
     data_addr             : output logic<64>,
     data_memory_addr      : output logic<64>,
@@ -134,7 +136,7 @@ module Core #(
     var rx_csr_op_q           : logic<2> ;
     var rx_csr_use_imm_q      : logic    ;
     var rx_csr_write_q        : logic    ;
-    var rx_csr_index_q        : logic<4> ;
+    var rx_csr_index_q        : logic<5> ;
     var rx_is_ecall_q         : logic    ;
     var rx_is_ebreak_q        : logic    ;
     var rx_is_mret_q          : logic    ;
@@ -172,7 +174,7 @@ module Core #(
     var ex_csr_use_imm_q        : logic    ;
     var ex_csr_immediate_q      : logic<5> ;
     var ex_csr_write_q          : logic    ;
-    var ex_csr_index_q          : logic<4> ;
+    var ex_csr_index_q          : logic<5> ;
     var ex_is_ecall_q           : logic    ;
     var ex_is_ebreak_q          : logic    ;
     var ex_is_mret_q            : logic    ;
@@ -242,7 +244,7 @@ module Core #(
     var cm_is_csr_q             : logic    ;
     var cm_csr_op_q             : logic<2> ;
     var cm_csr_write_q          : logic    ;
-    var cm_csr_index_q          : logic<4> ;
+    var cm_csr_index_q          : logic<5> ;
     var cm_csr_source_q         : logic<64>;
     var cm_exception_q          : logic    ;
     var cm_exception_cause_q    : logic<64>;
@@ -335,6 +337,13 @@ module Core #(
     var cm_trap_event           : logic    ;
     var cm_mret_event           : logic    ;
     var cm_system_redirect      : logic    ;
+    var ex_irq_fence            : logic    ;
+    var ex_system_barrier       : logic    ;
+    var cm_irq_fence_event      : logic    ;
+    var interrupt_drain         : logic    ;
+    var interrupt_event         : logic    ;
+    var interrupt_resume_pc_q   : logic<32>;
+    var frontend_hold           : logic    ;
     var cm_fence_i_event        : logic    ;
     var cm_retire_event         : logic    ;
     var decompressed_instruction: logic<32>;
@@ -438,10 +447,11 @@ module Core #(
     }
 
     inst decoder: Decoder #(
-        ENABLE_ZBB: ENABLE_ZBB,
-        ENABLE_ZBS: ENABLE_ZBS,
-        ENABLE_ZBA: ENABLE_ZBA,
-        ENABLE_M  : ENABLE_M  ,
+        ENABLE_INTERRUPTS: ENABLE_INTERRUPTS,
+        ENABLE_ZBB       : ENABLE_ZBB       ,
+        ENABLE_ZBS       : ENABLE_ZBS       ,
+        ENABLE_ZBA       : ENABLE_ZBA       ,
+        ENABLE_M         : ENABLE_M         ,
     ) (
         decode: decode_bus,
     );
@@ -454,8 +464,9 @@ module Core #(
 
     inst csr_bus : CsrBus;
     inst csr_file: CsrFile #(
-        ENABLE_M: ENABLE_M                              ,
-        ENABLE_B: ENABLE_ZBA && ENABLE_ZBB && ENABLE_ZBS,
+        ENABLE_INTERRUPTS: ENABLE_INTERRUPTS                     ,
+        ENABLE_M         : ENABLE_M                              ,
+        ENABLE_B         : ENABLE_ZBA && ENABLE_ZBB && ENABLE_ZBS,
     ) (
         clk  : clk    ,
         rst_n: rst_n  ,
@@ -1005,11 +1016,28 @@ module Core #(
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
         // younger instruction without a compare-result-to-CSR timing path.
+        // Stop issuing while a currently enabled level is pending. EX and CM
+        // retain ownership until their memory/MDU operations finish. Only an
+        // empty execution pipeline may enter an interrupt; no issued store is
+        // canceled or replayed, and a withdrawn level cannot cause a stale trap.
+        csr_bus.machine_interrupts = machine_interrupts;
+        interrupt_drain            = ENABLE_INTERRUPTS && csr_bus.interrupt_pending;
+        interrupt_event            = interrupt_drain && !ex_valid_q && !cm_valid_q && !redirect_pending_q;
+        // Changes to the interrupt predicate serialize younger work. Their
+        // CM write is followed by a redirect to fallthrough, so the new state
+        // is evaluated before a successor can execute, just as after MRET.
+        ex_irq_fence       = ENABLE_INTERRUPTS && ex_valid_q && ex_is_csr_q && ex_csr_write_q
+            && ((ex_csr_index_q == 5'd1) || (ex_csr_index_q == 5'd16) || (ex_csr_index_q == 5'd17));
+        ex_system_barrier  = (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) || ex_irq_fence;
+        cm_irq_fence_event = ENABLE_INTERRUPTS && cm_valid_q && cm_is_csr_q && cm_csr_write_q
+            && ((cm_csr_index_q == 5'd1) || (cm_csr_index_q == 5'd16) || (cm_csr_index_q == 5'd17)) && !cm_exception_q
+            && !backend_wait && !redirect_pending_q;
         cm_trap_event      = cm_valid_q && cm_exception_q && !backend_wait && !redirect_pending_q;
         cm_mret_event      = cm_valid_q && cm_is_mret_q && !backend_wait && !redirect_pending_q;
         cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_wait && !redirect_pending_q;
         instruction_flush  = cm_fence_i_event;
-        cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event;
+        cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event || cm_irq_fence_event
+            || interrupt_event;
         // The registered redirect cancels a wrong-path M request in PREPARE,
         // before it can produce a result. Keep the late CM branch comparison
         // off the MDU state input; architectural ownership remains in CM.
@@ -1035,11 +1063,16 @@ module Core #(
         }
         csr_bus.write_op     = 2'd0;
         csr_bus.write_source = csr_write_value;
-        csr_bus.trap_enter   = cm_trap_event;
+        csr_bus.trap_enter   = cm_trap_event || interrupt_event;
         csr_bus.trap_pc      = cm_pc_q;
         csr_bus.trap_cause   = cm_exception_cause_q;
         csr_bus.trap_value   = cm_exception_value_q;
         csr_bus.mret         = cm_mret_event;
+        if interrupt_event {
+            csr_bus.trap_pc    = interrupt_resume_pc_q;
+            csr_bus.trap_cause = {1'b1, 59'd0, csr_bus.interrupt_cause};
+            csr_bus.trap_value = 64'd0;
+        }
 
         redirect_valid = !backend_wait && !redirect_pending_q
             && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
@@ -1052,7 +1085,7 @@ module Core #(
         redirect_preserve_cm = !branch_redirect_valid && !cm_system_redirect;
         if branch_redirect_valid {
             redirect_target = cm_actual_next_pc;
-        } else if cm_trap_event {
+        } else if cm_trap_event || interrupt_event {
             redirect_target = csr_bus.trap_vector;
         } else if cm_mret_event {
             redirect_target = csr_bus.return_pc;
@@ -1100,6 +1133,7 @@ module Core #(
             decode_execution_hazard = 1'b1;
         }
         execution_hazard = rx_execution_hazard_q;
+        frontend_hold    = execution_hazard || interrupt_drain;
 
         predictor_wait = !predictor_ready || (fetch_q.valid && !predictor_response_valid);
         // A redirect/exception detected in this cycle may consume one younger
@@ -1109,21 +1143,20 @@ module Core #(
         // EX redirect out of this handshake avoids extending forwarding and
         // redirect arithmetic into every predictor state/control endpoint.
         predictor_response_accept   = predictor_response_valid && fetch_q.valid && !backend_wait && !redirect_pending_q
-            && !ex_exception && !(ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) && !execution_hazard;
+            && !ex_exception && !ex_system_barrier && !frontend_hold;
         predictor_frontend_redirect = predictor_response_accept && predictor_response_taken;
         // Keep the current InstructionBuffer tag hit out of the wide fetch
         // payload mux.  An invalid candidate may refresh masked payload, but
         // only the semantic predictor handshake advances the fetch cursor.
-        fetch_candidate_offer   = !backend_wait && !redirect_pending_q && !ex_exception
-            && !(ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) && !execution_hazard
+        fetch_candidate_offer   = !backend_wait && !redirect_pending_q && !ex_exception && !ex_system_barrier
+            && !frontend_hold
             && (!fetch_q.valid || !fetch_lookahead_q.valid || !fetch_tail_valid_q || predictor_response_accept)
             && !predictor_frontend_redirect;
         fetch_payload_capture   = fetch_candidate_offer && predictor_request_ready;
         fetch_queue_push_valid  = fetch_payload_capture && fetch_packet.valid;
         predictor_request_valid = fetch_packet.valid && fetch_candidate_offer;
-        fetch_queue_advance     = !backend_wait && !redirect_pending_q && !ex_exception
-            && !(ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) && !predictor_wait && !execution_hazard
-            && !predictor_frontend_redirect;
+        fetch_queue_advance     = !backend_wait && !redirect_pending_q && !ex_exception && !ex_system_barrier
+            && !predictor_wait && !frontend_hold && !predictor_frontend_redirect;
 
         // Keep packet data selection independent from the write enables.  A
         // payload is non-architectural whenever its corresponding valid bit is
@@ -1155,8 +1188,9 @@ module Core #(
             predictor_recover_taken       = predictor_recover_q.taken;
             predictor_recover_fallthrough = predictor_recover_q.fallthrough;
         }
-        predictor_discard_all = !backend_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
-            && (ex_exception || (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)));
+        predictor_discard_all = interrupt_event
+            || (!backend_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
+                && (ex_exception || ex_system_barrier));
 
         // Present the four raw cycle predicates independently. CsrFile samples
         // all four at this edge, then applies the controller's memory,
@@ -1211,6 +1245,29 @@ module Core #(
         halted    = 1'b0;
         debug_x31 = debug_x31_q;
 
+    }
+
+    // Record the first instruction that has not retired. This remains valid
+    // during cache misses, taken branches, and an empty frontend. Interrupts
+    // use it only after EX/CM drain, while any older WB write still completes.
+    always_ff (clk, rst_n) {
+        if_reset {
+            interrupt_resume_pc_q = 32'd0;
+        } else if ENABLE_INTERRUPTS {
+            if cm_trap_event {
+                interrupt_resume_pc_q = csr_bus.trap_vector;
+            } else if cm_retire_event {
+                if cm_mret_event {
+                    interrupt_resume_pc_q = csr_bus.return_pc;
+                } else if cm_is_branch_q {
+                    interrupt_resume_pc_q = cm_actual_next_pc;
+                } else if cm_control_kind_q != 3'd0 {
+                    interrupt_resume_pc_q = cm_redirect_target_q;
+                } else {
+                    interrupt_resume_pc_q = cm_fallthrough_pc_q;
+                }
+            }
+        }
     }
 
     // The valid/source bits are reset while both payload banks refresh from
@@ -1367,7 +1424,7 @@ module Core #(
             fetch_lookahead_valid_q = 1'b0;
             fetch_tail_valid_q      = 1'b0;
         } else if !backend_wait {
-            if redirect_pending_q || ex_exception || (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) {
+            if redirect_pending_q || ex_exception || ex_system_barrier {
                 fetch_valid_q           = 1'b0;
                 fetch_lookahead_valid_q = 1'b0;
                 fetch_tail_valid_q      = 1'b0;
@@ -1379,7 +1436,7 @@ module Core #(
                         fetch_tail_valid_q = 1'b1;
                     }
                 }
-            } else if execution_hazard {
+            } else if frontend_hold {
                 // Hold all three occupied slots.
             } else if predictor_frontend_redirect {
                 fetch_valid_q           = 1'b0;
@@ -1462,7 +1519,7 @@ module Core #(
             rx_csr_op_q            = 2'b00;
             rx_csr_use_imm_q       = 1'b0;
             rx_csr_write_q         = 1'b0;
-            rx_csr_index_q         = 4'd0;
+            rx_csr_index_q         = 5'd0;
             rx_is_ecall_q          = 1'b0;
             rx_is_ebreak_q         = 1'b0;
             rx_is_mret_q           = 1'b0;
@@ -1499,7 +1556,7 @@ module Core #(
             ex_csr_use_imm_q         = 1'b0;
             ex_csr_immediate_q       = 5'd0;
             ex_csr_write_q           = 1'b0;
-            ex_csr_index_q           = 4'd0;
+            ex_csr_index_q           = 5'd0;
             ex_is_ecall_q            = 1'b0;
             ex_is_ebreak_q           = 1'b0;
             ex_is_mret_q             = 1'b0;
@@ -1562,7 +1619,7 @@ module Core #(
             cm_is_csr_q              = 1'b0;
             cm_csr_op_q              = 2'd0;
             cm_csr_write_q           = 1'b0;
-            cm_csr_index_q           = 4'd0;
+            cm_csr_index_q           = 5'd0;
             cm_csr_source_q          = 64'd0;
             cm_exception_q           = 1'b0;
             cm_exception_cause_q     = 64'd0;
@@ -1756,7 +1813,7 @@ module Core #(
                 cm_shift_word_q         = ex_word_op_q;
                 cm_lsu_address_q        = lsu_address;
                 cm_lsu_memory_address_q = lsu_address;
-                if RELOCATE_LOW_DATA && !lsu_address[31] {
+                if RELOCATE_LOW_DATA && !lsu_address[31] && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
                     cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
                 }
                 cm_lsu_wdata_q         = execute_store_data;
@@ -1864,7 +1921,7 @@ module Core #(
                         wb_valid_q = 1'b0;
                     }
                     rx_stalled_q = 1'b0;
-                } else if ex_exception || (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) {
+                } else if ex_exception || ex_system_barrier {
                     // Trap state/target is committed from CM on the next
                     // cycle. Kill younger work here so that delaying the CSR
                     // side effect does not let an instruction past the
@@ -1880,7 +1937,7 @@ module Core #(
                     // no instruction is executed twice.
                     ex_valid_q   = 1'b0;
                     rx_stalled_q = rx_valid_q;
-                } else if execution_hazard {
+                } else if frontend_hold {
                     ex_valid_q   = 1'b0;
                     rx_stalled_q = 1'b1;
                 } else {

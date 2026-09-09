@@ -1,9 +1,10 @@
 /// RV64 integer decoder with optional M, Zba, Zbb and Zbs extensions.
 module Decoder #(
-    param ENABLE_M  : bit = 0,
-    param ENABLE_ZBA: bit = 0,
-    param ENABLE_ZBB: bit = 0,
-    param ENABLE_ZBS: bit = 0,
+    param ENABLE_M         : bit = 0,
+    param ENABLE_ZBA       : bit = 0,
+    param ENABLE_ZBB       : bit = 0,
+    param ENABLE_ZBS       : bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
 ) (
     decode: modport DecodeBus::decoder,
 ) {
@@ -105,7 +106,7 @@ module Decoder #(
         decode.csr_index[0] = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
             || (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf12)
             || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
-            || (decode.instr[31:20] == 12'h7c1);
+            || (decode.instr[31:20] == 12'h7c1) || (ENABLE_INTERRUPTS && (decode.instr[31:20] == 12'h344));
         decode.csr_index[1] = (decode.instr[31:20] == 12'h301) || (decode.instr[31:20] == 12'h305)
             || (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343) || (decode.instr[31:20] == 12'hf13)
             || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
@@ -117,6 +118,8 @@ module Decoder #(
             || (decode.instr[31:20] == 12'hf13) || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb00)
             || (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02) || (decode.instr[31:20] == 12'hc02)
             || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
+        decode.csr_index[4] = ENABLE_INTERRUPTS
+            && ((decode.instr[31:20] == 12'h304) || (decode.instr[31:20] == 12'h344));
         csr_known_group0    = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h301)
             || (decode.instr[31:20] == 12'h305) || (decode.instr[31:20] == 12'h340);
         csr_known_group1    = (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h342)
@@ -125,16 +128,20 @@ module Decoder #(
             || (decode.instr[31:20] == 12'hf14) || (decode.instr[31:20] == 12'hb00);
         csr_known_group3    = (decode.instr[31:20] == 12'hc00) || (decode.instr[31:20] == 12'hb02)
             || (decode.instr[31:20] == 12'hc02) || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
-        csr_address_known   = (csr_known_group0 || csr_known_group1) || (csr_known_group2 || csr_known_group3);
+        csr_address_known   = (csr_known_group0 || csr_known_group1) || (csr_known_group2 || csr_known_group3)
+            || decode.csr_index[4];
         csr_writable_group0 = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h305)
             || (decode.instr[31:20] == 12'h340) || (decode.instr[31:20] == 12'h341);
         csr_writable_group1 = (decode.instr[31:20] == 12'h342) || (decode.instr[31:20] == 12'h343)
             || (decode.instr[31:20] == 12'hb00) || (decode.instr[31:20] == 12'hb02);
         // MISA has a fixed WARL value. Writes are legal and ignored by the
         // CSR bank; unlike the 0xcxx/0xfxx CSRs, its address is not read-only.
-        csr_writable_group2  = (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1)
+        csr_writable_group2 = (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1)
             || (decode.instr[31:20] == 12'h301);
-        csr_address_writable = (csr_writable_group0 || csr_writable_group1) || csr_writable_group2;
+        // MIP has a writable CSR address, but its implemented pending bits
+        // are read-only levels owned by the platform. Writes are legal NOPs.
+        csr_address_writable = (csr_writable_group0 || csr_writable_group1) || csr_writable_group2
+            || decode.csr_index[4];
         csr_write_requested  = (funct3[1:0] == 2'b01) || ((funct3[1:0] != 2'b00) && (decode.rs1 != 5'd0));
         decode.is_ecall      = 1'b0;
         decode.is_ebreak     = 1'b0;

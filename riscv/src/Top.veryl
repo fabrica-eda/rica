@@ -42,6 +42,7 @@ module Top (
         instr_valid           : 1'b1                        ,
         data_rdata            : 64'h0000_0000_0000_0000     ,
         data_response_sequence: 1'b0                        ,
+        machine_interrupts    : 3'd0                        ,
         counter_freeze        : 1'b0                        ,
         debug_counter_index   : 4'd0                        ,
         debug_counter_data    : unused_debug_counter        ,

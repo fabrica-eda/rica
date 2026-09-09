@@ -450,3 +450,13 @@ M-modeのWFIをNOPとして受け付け、固定WARLのmisaへの書込みを合
 OS起動試験はMSCRATCHでのstack交換、trap frame、ECALL→MRETも実機で確認する。
 割り込み、A、U/PMP、S/Sv39は [OS計画](RV64_OS_ISA_PLAN.md) の次工程である。
 [回路・配置試行・認定記録](../toolchain/measurements/2026-09-10-rv64-early-divide/README.md)。
+
+## M-mode割り込み・タイマー基盤（2026-09-10）
+
+`ENABLE_INTERRUPTS=1` / `HardwareCompactInterruptTestTop` にmie/mip、割り込みmcause、
+正確な受付・MRET再評価、MMIO timer/MSIPを追加した。
+[プラットフォーム仕様](RV64_MACHINE_PLATFORM.md)、
+[検証と認定状態](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md)。
+2タスクの全整数contextをtimerで切り替える試験を追加し、
+既存35性能診断は同時clockモデルで命令数・cycleとも不変。
+次は範囲外アクセスの例外化と外部I/Oを整え、A、U/PMP、S/Sv39へ進む。

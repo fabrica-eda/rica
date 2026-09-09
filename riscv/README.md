@@ -59,7 +59,12 @@ configuration. The default hardware image is
 
 The next ISA target is a custom OS with **M/S/U modes and Sv39**. The
 [OS ISA/platform plan](RV64_OS_ISA_PLAN.md) sequences machine interrupts and strict
-memory decode, A, U-mode/PMP and supervisor virtual memory; these remain future milestones.
+memory decode, A, U-mode/PMP and supervisor virtual memory.
+The additional `HardwareCompactInterruptTestTop` / `--machine-interrupts`
+configuration now implements machine interrupt entry and MMIO timer/MSIP; see the
+[platform contract](RV64_MACHINE_PLATFORM.md) and its
+[separate qualification record](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md).
+Strict access faults, A, lower privilege modes and Sv39 remain subsequent steps.
 
 See the [integer ISA implementation and next steps](RV64_INTEGER_ISA_PLAN.md),
 [current implementation and qualification record](../toolchain/measurements/2026-09-10-rv64-early-divide/README.md),

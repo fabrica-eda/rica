@@ -26,7 +26,7 @@ interface DecodeBus {
     var csr_op       : logic<2> ;
     var csr_use_imm  : logic    ;
     var csr_write    : logic    ;
-    var csr_index    : logic<4> ;
+    var csr_index    : logic<5> ;
     var is_ecall     : logic    ;
     var is_ebreak    : logic    ;
     var is_mret      : logic    ;
@@ -47,11 +47,12 @@ interface DecodeBus {
 /// Machine-mode CSR storage and the precise trap/return control surface.
 ///
 /// CSR instructions read combinationally in EX. Writes, trap entry, and MRET
-/// update architectural state only when Core proves that the EX instruction is
-/// not younger than an already-taken redirect.
+/// update architectural state at the completion boundary, after older redirects.
+/// Machine interrupt levels are synchronous to the core clock. Bit order is
+/// {external, timer, software}; the platform owns acknowledgment of each level.
 interface CsrBus {
-    var index                         : logic<4> ;
-    var write_index                   : logic<4> ;
+    var index                         : logic<5> ;
+    var write_index                   : logic<5> ;
     var read_data                     : logic<64>;
     var write_enable                  : logic    ;
     var write_op                      : logic<2> ;
@@ -76,6 +77,9 @@ interface CsrBus {
     var mret                          : logic    ;
     var trap_vector                   : logic<32>;
     var return_pc                     : logic<32>;
+    var machine_interrupts            : logic<3> ;
+    var interrupt_pending             : logic    ;
+    var interrupt_cause               : logic<4> ;
 
     modport core {
         index                         : output,
@@ -100,10 +104,13 @@ interface CsrBus {
         trap_cause                    : output,
         trap_value                    : output,
         mret                          : output,
+        machine_interrupts            : output,
         read_data                     : input ,
         debug_counter_data            : input ,
         trap_vector                   : input ,
         return_pc                     : input ,
+        interrupt_pending             : input ,
+        interrupt_cause               : input ,
     }
 
     modport file {
@@ -129,10 +136,13 @@ interface CsrBus {
         trap_cause                    : input ,
         trap_value                    : input ,
         mret                          : input ,
+        machine_interrupts            : input ,
         read_data                     : output,
         debug_counter_data            : output,
         trap_vector                   : output,
         return_pc                     : output,
+        interrupt_pending             : output,
+        interrupt_cause               : output,
     }
 }
 

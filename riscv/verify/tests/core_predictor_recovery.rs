@@ -6,6 +6,7 @@ use celox::{BigUint, NativeBackend, NativeProgramImage, OptLevel, Simulator, Sim
 
 const NOP: u32 = 0x0000_0013;
 const EARLY_DIVIDE_CONFIG: u64 = 32_648;
+const INTERRUPTS_CONFIG: u64 = EARLY_DIVIDE_CONFIG | 32_768;
 const KIND_CONDITIONAL: u64 = 1;
 const KIND_DIRECT: u64 = 2;
 const KIND_CALL: u64 = 4;
@@ -18,6 +19,9 @@ fn project_path() -> PathBuf {
 }
 
 fn native_image(config: u64) -> &'static NativeProgramImage {
+    static INTERRUPTS: OnceLock<NativeProgramImage> = OnceLock::new();
+    static INTERRUPTS_TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
+    static INTERRUPTS_STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
     static BIMODAL: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
@@ -44,6 +48,9 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static EARLY_2056: OnceLock<NativeProgramImage> = OnceLock::new();
     static EARLY_3976: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
+        INTERRUPTS_CONFIG => &INTERRUPTS,
+        32_896 => &INTERRUPTS_TAGE,
+        32_900 => &INTERRUPTS_STATIC,
         EARLY_DIVIDE_CONFIG => &COMPACT_EARLY_DIVIDE,
         8200 => &COMPACT_TAKEN_FETCH,
         8072 => &EARLY_3976,
@@ -75,6 +82,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         let source = verify_riscv::core_source(&project_path()).unwrap();
         SimulatorBuilder::new(&source, "Core")
             .param("SYNC_DATA_MEMORY", 1)
+            .param("ENABLE_INTERRUPTS", u64::from(config & 32_768 != 0))
             .param("ENABLE_ZBA", u64::from(config & 512 != 0))
             .param("ENABLE_ZBB", u64::from(config & 1024 != 0))
             .param("ENABLE_ZBS", u64::from(config & 2048 != 0))
@@ -228,6 +236,7 @@ impl CoreDriver {
         let instr_valid = driver.simulator.signal("instr_valid");
         let data_rdata = driver.simulator.signal("data_rdata");
         let data_response_sequence = driver.simulator.signal("data_response_sequence");
+        let machine_interrupts = driver.simulator.signal("machine_interrupts");
         let counter_freeze = driver.simulator.signal("counter_freeze");
         let debug_counter_index = driver.simulator.signal("debug_counter_index");
         driver
@@ -240,6 +249,7 @@ impl CoreDriver {
                 io.set(data_rdata, 0_u64);
                 io.set(data_response_sequence, 0_u8);
                 io.set(counter_freeze, 0_u8);
+                io.set(machine_interrupts, 0_u8);
                 io.set(debug_counter_index, 0_u8);
             })
             .unwrap();
@@ -280,6 +290,11 @@ impl CoreDriver {
         let selector = self.simulator.signal("debug_counter_index");
         self.simulator.modify(|io| io.set(selector, index)).unwrap();
         self.value("debug_counter_data")
+    }
+
+    fn set_interrupts(&mut self, levels: u8) {
+        let signal = self.simulator.signal("machine_interrupts");
+        self.simulator.modify(|io| io.set(signal, levels)).unwrap();
     }
 
     fn set_data_response_sequence(&mut self, sequence: u8) {
@@ -2049,5 +2064,307 @@ fn misa_b_is_set_only_when_zba_zbb_zbs_are_all_enabled() {
             | if config & 128 != 0 { 1 << 12 } else { 0 }
             | if config & 3584 == 3584 { 2 } else { 0 };
         assert_eq!(result, Some(expected), "config={config}");
+    }
+}
+
+fn encode_csr(rd: u32, csr: u32, source: u32, funct3: u32) -> u32 {
+    csr << 20 | source << 15 | funct3 << 12 | rd << 7 | 0x73
+}
+
+fn interrupt_program(body: impl IntoIterator<Item = (u32, u32)>) -> BTreeMap<u32, u32> {
+    [
+        (0, encode_addi(1, 0, 0x400)),
+        (4, encode_csr(0, 0x305, 1, 1)),      // mtvec, direct mode
+        (8, encode_addi(1, 0, -1912)),        // low bits = 0x888
+        (12, encode_csr(0, 0x304, 1, 1)),     // mie: MEIE/MTIE/MSIE
+        (16, encode_csr(0, 0x300, 8, 6)),     // csrsi mstatus, 8
+        (0x400, encode_csr(20, 0x342, 0, 2)), // mcause
+        (0x404, encode_csr(21, 0x341, 0, 2)), // mepc
+        (0x408, encode_csr(22, 0x343, 0, 2)), // mtval
+        (0x40c, encode_csr(23, 0x300, 0, 2)), // mstatus
+        (0x410, encode_addi(24, 24, 1)),
+        (0x414, 0x3020_0073), // mret
+    ]
+    .into_iter()
+    .chain(body)
+    .collect()
+}
+
+#[test]
+fn interrupts_precede_enable_successor_and_each_mret_rechecks_all_levels() {
+    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+        let mut driver = CoreDriver::with_config(
+            interrupt_program([
+                (20, encode_sd(1, 0, 0x300)),
+                (24, encode_addi(31, 0, 77)),
+                (28, encode_jal(0, 0)),
+            ]),
+            config,
+        );
+        driver.set_interrupts(7);
+        let mut causes = Vec::new();
+        let mut entries = 0;
+        let mut stores = 0;
+        let mut old_request = 0;
+        let mut done = false;
+        for _ in 0..1200 {
+            let entering = driver.value("interrupt_event") != 0;
+            if entering {
+                assert_eq!(driver.value("interrupt_resume_pc_q"), 20);
+                assert_eq!(driver.value("muldiv_start"), 0);
+                assert_eq!(driver.value("data_we"), 0);
+                entries += 1;
+            }
+            let cycle = driver.step();
+            if entering {
+                driver.set_interrupts(match entries {
+                    1 => 3, // External acknowledged; software outranks timer.
+                    2 => 2,
+                    3 => 0,
+                    _ => panic!("interrupt repeated after its level was cleared"),
+                });
+            }
+            let request = driver.value("data_request_sequence");
+            if request != old_request {
+                assert_eq!(
+                    entries, 3,
+                    "the successor store escaped an enable/MRET boundary"
+                );
+                old_request = request;
+                stores += 1;
+            }
+            driver.acknowledge_data_request();
+            if cycle.commit_valid {
+                match cycle.commit_pc {
+                    0x400 => causes.push(cycle.commit_data),
+                    0x404 => assert_eq!(cycle.commit_data, 20),
+                    0x408 => assert_eq!(cycle.commit_data, 0),
+                    0x40c => assert_eq!(cycle.commit_data, 0x1880),
+                    24 => {
+                        assert_eq!(cycle.commit_data, 77);
+                        done = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(done, "config {config}: no return from interrupts");
+        assert_eq!(entries, 3);
+        assert_eq!(stores, 1);
+        assert_eq!(causes, [11, 3, 7].map(|cause| (1 << 63) | cause));
+    }
+}
+
+#[test]
+fn interrupt_arrival_sweep_preserves_load_divide_store_and_taken_compressed_trace() {
+    // Every injected arrival must preserve this independent architectural
+    // trace, including the taken-branch target at IALIGN=16. Delayed memory
+    // responses keep both loads and stores owned by CM during interruption.
+    let expected_pcs = [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 50];
+    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+        for arrival in (0..180).step_by(3) {
+            let mut driver = CoreDriver::with_config(
+                interrupt_program([
+                    (20, encode_addi(2, 0, 100)),
+                    (24, encode_addi(3, 0, 3)),
+                    (28, encode_ld(4, 0, 0x300)),
+                    (32, encode_muldiv(5, 2, 3, 5)), // divu: 100 / 3
+                    (36, encode_sd(5, 0, 0x308)),
+                    (40, encode_branch(0, 0, 0, 8)),
+                    (44, encode_sd(0, 0, 0x310)), // wrong path
+                    (48, 0x0f85),                 // c.addi x31, 1
+                    (50, encode_addi(6, 31, 6)),
+                    (54, encode_jal(0, 0)),
+                ]),
+                config,
+            );
+            driver.set_data_rdata(84);
+            let mut retired = 0;
+            let mut commits = Vec::new();
+            let mut expected_epc = None;
+            let mut entries = 0;
+            let mut returns = 0;
+            let mut requests = Vec::new();
+            let mut handled = 0;
+            let mut response_at = 0;
+            let mut done = false;
+            for time in 0..1200 {
+                if time == arrival {
+                    driver.set_interrupts(4);
+                }
+                // Also exercise a frontend that cannot currently provide the
+                // next instruction: MEPC cannot be taken from a fetch cursor.
+                driver.set_instr_valid(!(58..68).contains(&time));
+                let request = driver.value("data_request_sequence");
+                if request != handled {
+                    handled = request;
+                    response_at = time + 10;
+                    let address = driver.value("data_addr");
+                    let write = driver.value("data_we") != 0;
+                    if write {
+                        assert_eq!(driver.value("data_wdata"), 33);
+                    }
+                    requests.push((address, write));
+                }
+                if time >= response_at {
+                    driver.acknowledge_data_request();
+                }
+                let entering = driver.value("interrupt_event") != 0;
+                if entering {
+                    entries += 1;
+                    let next_pc = expected_pcs.get(retired).copied().unwrap_or(54);
+                    assert_eq!(driver.value("interrupt_resume_pc_q"), u64::from(next_pc));
+                    expected_epc = Some(u64::from(next_pc));
+                }
+                let cycle = driver.step();
+                if entering {
+                    driver.set_interrupts(0);
+                }
+                if cycle.retire && cycle.cm_pc < 54 {
+                    assert_eq!(
+                        Some(&cycle.cm_pc),
+                        expected_pcs.get(retired),
+                        "config={config}, arrival={arrival}"
+                    );
+                    retired += 1;
+                }
+                if cycle.commit_valid {
+                    if cycle.commit_pc < 54 {
+                        commits.push(cycle.commit_pc);
+                        match cycle.commit_pc {
+                            28 => assert_eq!(cycle.commit_data, 84),
+                            32 => assert_eq!(cycle.commit_data, 33),
+                            48 => assert_eq!(cycle.commit_data, 1),
+                            50 => assert_eq!(cycle.commit_data, 7),
+                            _ => {}
+                        }
+                    }
+                    match cycle.commit_pc {
+                        0x400 => assert_eq!(cycle.commit_data, (1 << 63) | 11),
+                        0x404 => assert_eq!(Some(cycle.commit_data), expected_epc),
+                        0x408 => assert_eq!(cycle.commit_data, 0),
+                        0x414 => returns += 1,
+                        54 if returns == 1 && time > arrival => {
+                            done = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            assert!(done, "config={config}, arrival={arrival}: no completion");
+            assert_eq!(entries, 1);
+            assert_eq!(commits, expected_pcs);
+            assert_eq!(requests, [(0x300, false), (0x308, true)]);
+        }
+    }
+}
+
+#[test]
+fn withdrawn_interrupt_during_memory_wait_resumes_held_operands_without_a_trap() {
+    let mut driver = CoreDriver::with_config(
+        interrupt_program([
+            (20, encode_addi(2, 0, 39)),
+            (24, encode_ld(3, 0, 0x300)),
+            (28, encode_addi(31, 2, 3)),
+            (32, encode_jal(0, 0)),
+        ]),
+        INTERRUPTS_CONFIG,
+    );
+    driver.set_data_rdata(10);
+    let mut waits = 0;
+    let mut done = false;
+    for _ in 0..500 {
+        assert_eq!(driver.value("interrupt_event"), 0);
+        let cycle = driver.step();
+        if cycle.memory_wait {
+            waits += 1;
+            driver.set_interrupts(if (2..8).contains(&waits) { 2 } else { 0 });
+            if waits == 12 {
+                driver.acknowledge_data_request();
+            }
+        }
+        assert!(!(cycle.commit_valid && cycle.commit_pc >= 0x400));
+        if cycle.commit_valid && cycle.commit_pc == 28 {
+            assert_eq!(cycle.commit_data, 42);
+            done = true;
+            break;
+        }
+    }
+    assert!(done);
+    assert!(waits >= 12);
+}
+
+#[test]
+fn older_synchronous_exception_owns_trap_while_interrupt_drain_is_pending() {
+    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+        let mut program = interrupt_program([
+            (20, 0x0000_0073), // ecall
+            (24, encode_sd(1, 0, 0x300)),
+        ]);
+        program.insert(0x414, encode_jal(0, 0)); // inspect the synchronous handler
+        let mut driver = CoreDriver::with_config(program, config);
+        let mut injected = false;
+        let mut handler = false;
+        for _ in 0..400 {
+            if driver.value("ex_valid_q") != 0 && driver.value("ex_pc_q") == 20 {
+                driver.set_interrupts(7);
+                injected = true;
+            }
+            assert_eq!(driver.value("interrupt_event"), 0);
+            let cycle = driver.step();
+            assert!(!cycle.data_we);
+            if cycle.commit_valid && cycle.commit_pc == 0x400 {
+                assert_eq!(cycle.commit_data, 11);
+                handler = true;
+            }
+            if cycle.commit_valid && cycle.commit_pc == 0x404 {
+                assert_eq!(cycle.commit_data, 20);
+            }
+        }
+        assert!(injected && handler);
+        assert_eq!(driver.csr_value("mcause_interrupt_q"), 0);
+        assert_eq!(driver.csr_value("mstatus_q") & 3, 2);
+    }
+}
+
+#[test]
+fn interrupt_predicate_is_rechecked_after_an_inflight_disabling_csr_write() {
+    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+        for csr in [0x300, 0x304] {
+            for (form, source) in [(1, 0), (3, 1), (5, 0), (7, 8)] {
+                let mut driver = CoreDriver::with_config(
+                    interrupt_program([
+                        (20, encode_csr(0, csr, source, form)),
+                        (24, encode_addi(31, 0, 42)),
+                        (28, encode_jal(0, 0)),
+                    ]),
+                    config,
+                );
+                let mut injected = false;
+                let mut done = false;
+                for _ in 0..400 {
+                    if driver.value("ex_valid_q") != 0 && driver.value("ex_pc_q") == 20 {
+                        driver.set_interrupts(1);
+                        assert_eq!(driver.value("interrupt_drain"), 1);
+                        injected = true;
+                    }
+                    assert_eq!(driver.value("interrupt_event"), 0);
+                    let cycle = driver.step();
+                    assert!(!(cycle.commit_valid && cycle.commit_pc >= 0x400));
+                    if cycle.commit_valid && cycle.commit_pc == 24 {
+                        assert_eq!(cycle.commit_data, 42);
+                        done = true;
+                        break;
+                    }
+                }
+                assert!(
+                    injected && done,
+                    "config={config}, CSR={csr:x}, form={form}"
+                );
+                assert_eq!(driver.value("interrupt_drain"), 0);
+            }
+        }
     }
 }

@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 
 const TEST_TOP: &str = r#"
-module CsrFileTestTop (
+module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0) (
     clk                 : input  clock    ,
     rst_n               : input  reset    ,
-    index               : input  logic<4> ,
-    write_index         : input  logic<4> ,
+    index               : input  logic<5> ,
+    write_index         : input  logic<5> ,
     write_enable        : input  logic    ,
     write_op            : input  logic<2> ,
     write_source        : input  logic<64>,
@@ -29,13 +29,16 @@ module CsrFileTestTop (
     trap_cause          : input  logic<64>,
     trap_value          : input  logic<64>,
     mret                : input  logic    ,
+    machine_interrupts  : input  logic<3> ,
+    interrupt_pending   : output logic,
+    interrupt_cause     : output logic<4>,
     read_data           : output logic<64>,
     trap_vector         : output logic<32>,
     return_pc           : output logic<32>,
     debug_counter_data  : output logic<64>,
 ) {
     inst csr_bus : CsrBus;
-    inst csr_file: CsrFile (
+    inst csr_file: CsrFile #(ENABLE_INTERRUPTS: ENABLE_INTERRUPTS) (
         clk  : clk    ,
         rst_n: rst_n  ,
         csr  : csr_bus,
@@ -64,6 +67,9 @@ module CsrFileTestTop (
         csr_bus.trap_cause            = trap_cause;
         csr_bus.trap_value            = trap_value;
         csr_bus.mret                  = mret;
+        csr_bus.machine_interrupts = machine_interrupts;
+        interrupt_pending = csr_bus.interrupt_pending;
+        interrupt_cause = csr_bus.interrupt_cause;
         read_data                     = csr_bus.read_data;
         trap_vector                   = csr_bus.trap_vector;
         return_pc                     = csr_bus.return_pc;
@@ -95,6 +101,14 @@ struct CsrFileDriver {
 
 impl CsrFileDriver {
     fn new() -> Self {
+        Self::with_interrupts(false)
+    }
+
+    fn with_interrupts(enabled: bool) -> Self {
+        Self::with_backend(enabled, false)
+    }
+
+    fn with_backend(enabled: bool, mapped: bool) -> Self {
         let riscv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -107,9 +121,35 @@ impl CsrFileDriver {
             TEST_TOP.to_owned(),
         ]
         .join("\n");
-        let simulator = SimulatorBuilder::new(&source, "CsrFileTestTop")
-            .build_native()
+        let simulator = if mapped {
+            let source = source.replace(
+                "module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0)",
+                &format!(
+                    "module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = {})",
+                    u8::from(enabled)
+                ),
+            );
+            let rtl =
+                struo_frontend_veryl::analyze_and_lower(&source, "csr_test", "CsrFileTestTop")
+                    .unwrap();
+            let netlist = struo_target_ecp5::map_to_ecp5_with_options(
+                &struo_synth::synthesize(&rtl).unwrap().netlist,
+                struo_target_ecp5::MappingOptions {
+                    timing_goal_mhz: 175,
+                    ..Default::default()
+                },
+            )
             .unwrap();
+            struo_celox::ecp5_simulator(&netlist)
+                .unwrap()
+                .build_native()
+                .unwrap()
+        } else {
+            SimulatorBuilder::new(&source, "CsrFileTestTop")
+                .param("ENABLE_INTERRUPTS", u64::from(enabled))
+                .build_native()
+                .unwrap()
+        };
         let mut driver = Self { simulator };
 
         for name in [
@@ -127,6 +167,7 @@ impl CsrFileDriver {
             "debug_counter_index",
             "trap_enter",
             "mret",
+            "machine_interrupts",
         ]
         .into_iter()
         .chain(PREDICTOR_EVENTS)
@@ -816,5 +857,181 @@ fn predictor_counter_freeze_includes_pending_events_and_drops_frozen_pulses() {
             0x301 + u64::from(predictor_index),
             "first post-freeze predictor event {predictor_index} was not counted"
         );
+    }
+}
+
+impl CsrFileDriver {
+    fn write(&mut self, index: u8, operation: u8, source: u64) {
+        self.set_u8("write_index", index);
+        self.set_u8("write_op", operation);
+        self.set_u64("write_source", source);
+        self.set_u8("write_enable", 1);
+        self.tick();
+        self.set_u8("write_enable", 0);
+    }
+
+    fn read(&mut self, index: u8) -> u64 {
+        self.set_u8("index", index);
+        self.get("read_data")
+    }
+}
+
+fn interrupt_bits(levels: u8) -> u64 {
+    u64::from(levels & 1) << 3
+        | u64::from((levels >> 1) & 1) << 7
+        | u64::from((levels >> 2) & 1) << 11
+}
+
+#[test]
+fn machine_interrupt_masks_levels_and_priority_share_architectural_state() {
+    for enabled in [false, true] {
+        let mut driver = CsrFileDriver::with_interrupts(enabled);
+        for global in [false, true] {
+            driver.write(1, 0, if global { 8 } else { 0 });
+            for mask in 0..8 {
+                driver.write(16, 0, interrupt_bits(mask) | !0x888);
+                assert_eq!(
+                    driver.read(16),
+                    if enabled { interrupt_bits(mask) } else { 0 }
+                );
+                for levels in 0..8 {
+                    driver.set_u8("machine_interrupts", levels);
+                    assert_eq!(
+                        driver.read(17),
+                        if enabled { interrupt_bits(levels) } else { 0 }
+                    );
+                    let active = mask & levels;
+                    assert_eq!(
+                        driver.get("interrupt_pending") != 0,
+                        enabled && global && active != 0
+                    );
+                    if enabled && active != 0 {
+                        let cause = if active & 4 != 0 {
+                            11
+                        } else if active & 1 != 0 {
+                            3
+                        } else {
+                            7
+                        };
+                        assert_eq!(driver.get("interrupt_cause"), cause);
+                    }
+                    for op in 0..4 {
+                        driver.write(17, op, u64::MAX);
+                        assert_eq!(
+                            driver.read(17),
+                            if enabled { interrupt_bits(levels) } else { 0 }
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn machine_interrupt_warl_updates_do_not_alias_status_or_counters() {
+    let mut driver = CsrFileDriver::with_interrupts(true);
+    driver.write(1, 0, 0x88);
+    driver.write(16, 0, 0);
+    driver.write(16, 1, 0x808);
+    assert_eq!(driver.read(16), 0x808);
+    driver.write(16, 2, 0x800);
+    assert_eq!(driver.read(16), 8);
+    driver.write(16, 3, u64::MAX);
+    assert_eq!(driver.read(16), 8);
+    assert_eq!(driver.read(1), 0x1888);
+    for index in 18..32 {
+        driver.write(index, 0, u64::MAX);
+        assert_eq!(driver.read(index), 0);
+    }
+    assert_eq!(driver.read(1), 0x1888);
+    assert_eq!(driver.read(16), 8);
+    assert_eq!(driver.read(13), 0);
+}
+
+#[test]
+fn interrupt_traps_preserve_xlen_cause_and_mret_rechecks_pending_level() {
+    let mut driver = CsrFileDriver::with_interrupts(true);
+    driver.write(1, 0, 8);
+    driver.write(16, 0, 0x888);
+    driver.set_u8("machine_interrupts", 2);
+    assert_eq!(driver.get("interrupt_pending"), 1);
+    driver.set_u32("trap_pc", 0x8000_0122);
+    driver.set_u64("trap_cause", (1 << 63) | 7);
+    driver.set_u64("trap_value", 0);
+    driver.set_u8("trap_enter", 1);
+    driver.tick();
+    driver.set_u8("trap_enter", 0);
+    assert_eq!(driver.read(6), (1 << 63) | 7);
+    assert_eq!(driver.read(5), 0x8000_0122);
+    assert_eq!(driver.read(7), 0);
+    assert_eq!(driver.read(1), 0x1880);
+    assert_eq!(driver.get("interrupt_pending"), 0);
+    driver.set_u8("mret", 1);
+    driver.tick();
+    driver.set_u8("mret", 0);
+    assert_eq!(driver.read(1), 0x1888);
+    assert_eq!(driver.get("interrupt_pending"), 1);
+    driver.set_u8("machine_interrupts", 0);
+    assert_eq!(driver.get("interrupt_pending"), 0);
+
+    driver.set_u8("trap_enter", 1);
+    driver.set_u64("trap_cause", 2);
+    driver.set_u64("trap_value", 0xdead_beef);
+    driver.tick();
+    driver.set_u8("trap_enter", 0);
+    assert_eq!(
+        driver.read(6),
+        2,
+        "a synchronous trap must clear mcause.Interrupt"
+    );
+    driver.write(6, 1, 1 << 63);
+    assert_eq!(driver.read(6), (1 << 63) | 2);
+    driver.write(6, 2, 1 << 63);
+    assert_eq!(driver.read(6), 2);
+}
+
+#[test]
+fn mapped_interrupt_bank_preserves_masks_priority_trap_state_and_return() {
+    let mut driver = CsrFileDriver::with_backend(true, true);
+    for mask in 1..8 {
+        driver.write(16, 0, interrupt_bits(mask));
+        for levels in 1..8 {
+            driver.write(1, 0, 8);
+            driver.set_u8("machine_interrupts", levels);
+            assert_eq!(driver.read(16), interrupt_bits(mask));
+            assert_eq!(driver.read(17), interrupt_bits(levels));
+            let active = mask & levels;
+            assert_eq!(driver.get("interrupt_pending") != 0, active != 0);
+            if active == 0 {
+                continue;
+            }
+            let cause = if active & 4 != 0 {
+                11
+            } else if active & 1 != 0 {
+                3
+            } else {
+                7
+            };
+            assert_eq!(driver.get("interrupt_cause"), cause);
+            driver.set_u32("trap_pc", 0x8000_0002);
+            driver.set_u64("trap_cause", (1 << 63) | cause);
+            driver.set_u64("trap_value", 0);
+            driver.set_u8("trap_enter", 1);
+            driver.tick();
+            driver.set_u8("trap_enter", 0);
+            assert_eq!(driver.read(1), 0x1880);
+            assert_eq!(driver.read(5), 0x8000_0002);
+            assert_eq!(driver.read(6), (1 << 63) | cause);
+            assert_eq!(driver.read(7), 0);
+            assert_eq!(driver.get("interrupt_pending"), 0);
+            driver.write(17, 0, 0);
+            assert_eq!(driver.read(17), interrupt_bits(levels));
+            driver.set_u8("mret", 1);
+            driver.tick();
+            driver.set_u8("mret", 0);
+            assert_eq!(driver.read(1), 0x1888);
+            assert_eq!(driver.get("interrupt_pending"), 1);
+        }
     }
 }

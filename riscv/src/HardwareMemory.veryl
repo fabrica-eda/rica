@@ -19,10 +19,14 @@
 /// Stores retain the registered request bundle and physical-write response edge.
 module HardwareMemory #(
     // 0: original; 1: early store/forwarding; 2: early stores; 3/4: direct load return; 5: read port prefetch.
-    param FAST_LSU: u32 = 0,
+    param FAST_LSU    : u32 = 0,
+    param ENABLE_TIMER: bit = 0,
 ) (
     clk                        : input  'memory clock              ,
     rst_n                      : input  'memory reset_async_low    ,
+    timer_rst_n                : input  'memory reset_async_low    ,
+    timer_freeze               : input  'memory logic              ,
+    machine_interrupts         : output 'memory logic          <3> ,
     cpu_instr_address          : input  'memory logic          <32>,
     cpu_instr_line             : output 'memory logic          <64>,
     cpu_instr_request_sequence : input  'memory logic              ,
@@ -87,6 +91,54 @@ module HardwareMemory #(
     var recent_store_address_q    : 'memory logic<18>             ;
     var recent_store_data_q       : 'memory logic<64>             ;
     var recent_store_hit          : 'memory logic                 ;
+
+    var timer_software_irq    : 'memory logic    ;
+    var timer_pending_irq     : 'memory logic    ;
+    var timer_read            : 'memory logic<64>;
+    var timer_response_q      : 'memory logic<64>;
+    var timer_response_valid_q: 'memory logic    ;
+    var timer_request         : 'memory logic    ;
+    var timer_live_address    : 'memory logic    ;
+    var ram_store_request     : 'memory logic    ;
+    assign machine_interrupts = {1'b0, timer_pending_irq, timer_software_irq};
+    assign timer_request      = ENABLE_TIMER && (data_address_q[31:16] == 16'h0200);
+    assign timer_live_address = ENABLE_TIMER && (cpu_data_address[31:16] == 16'h0200);
+    assign ram_store_request  = data_request_new && data_we_q && !timer_request;
+    if ENABLE_TIMER :g_timer {
+        inst timer: MachineTimer (
+            clk               : clk                                           ,
+            rst_n             : timer_rst_n                                   ,
+            freeze            : timer_freeze                                  ,
+            address           : data_address_q[15:0]                          ,
+            write_enable      : data_request_new && data_we_q && timer_request,
+            write_data        : data_write_q                                  ,
+            write_mask        : data_mask_q                                   ,
+            read_data         : timer_read                                    ,
+            software_interrupt: timer_software_irq                            ,
+            timer_interrupt   : timer_pending_irq                             ,
+        );
+        always_ff (clk, rst_n) {
+            if_reset {
+                timer_response_q       = 64'd0;
+                timer_response_valid_q = 1'b0;
+            } else {
+                if data_request_new {
+                    timer_response_q       = timer_read;
+                    timer_response_valid_q = timer_request;
+                }
+                if (FAST_LSU == 6) && !cpu_data_we && !timer_live_address
+                    && (cpu_data_request_sequence != data_request_handled_q) {
+                    timer_response_valid_q = 1'b0;
+                }
+            }
+        }
+    } else {
+        assign timer_read             = 64'd0;
+        assign timer_response_q       = 64'd0;
+        assign timer_response_valid_q = 1'b0;
+        assign timer_software_irq     = 1'b0;
+        assign timer_pending_irq      = 1'b0;
+    }
 
     always_comb {
         instr_physical = instr_request_address_q[17:0];
@@ -194,7 +246,7 @@ module HardwareMemory #(
         // One full-width, physically completed store. Partial or intervening
         // stores invalidate the entry; other/overlapping loads use the RAM.
         // Compare the actual BRAM address, including its 256 KiB aliasing.
-        recent_store_hit = (FAST_LSU == 1) && recent_store_valid_q && !data_we_q
+        recent_store_hit = (FAST_LSU == 1) && recent_store_valid_q && !data_we_q && !timer_request
             && (data_physical == recent_store_address_q);
 
         for bank in 0..BANK_COUNT {
@@ -253,6 +305,9 @@ module HardwareMemory #(
             // The related CPU clock captures this bundle after the RAM edge.
             cpu_data_read = data_read_mux;
         }
+        if timer_response_valid_q {
+            cpu_data_read = timer_response_q;
+        }
         cpu_data_response_sequence = data_response_sequence_q;
     }
 
@@ -296,14 +351,14 @@ module HardwareMemory #(
             }
         }
         always_ff (clk) {
-            if data_request_new && data_we_q && store_bank_mask[bank] && !data_port_high[bank] {
+            if ram_store_request && store_bank_mask[bank] && !data_port_high[bank] {
                 mem_low[data_port_row[bank]] = store_bank_data[bank];
             } else {
                 data_read_low = mem_low[data_port_row[bank]];
             }
         }
         always_ff (clk) {
-            if data_request_new && data_we_q && store_bank_mask[bank] && data_port_high[bank] {
+            if ram_store_request && store_bank_mask[bank] && data_port_high[bank] {
                 mem_high[data_port_row[bank]] = store_bank_data[bank];
             } else {
                 data_read_high = mem_high[data_port_row[bank]];
@@ -372,7 +427,8 @@ module HardwareMemory #(
             // Port B and its byte/high selectors sample this same held address
             // on this edge. The wrapper registers their post-edge result and
             // this token together before Core can observe a completed load.
-            if (FAST_LSU == 6) && !cpu_data_we && (cpu_data_request_sequence != data_request_handled_q) {
+            if (FAST_LSU == 6) && !cpu_data_we && !timer_live_address
+                && (cpu_data_request_sequence != data_request_handled_q) {
                 data_request_handled_q   = cpu_data_request_sequence;
                 data_response_sequence_q = cpu_data_request_sequence;
             }
@@ -390,7 +446,7 @@ module HardwareMemory #(
                 recent_store_data_q    = 64'd0;
             } else {
                 if data_request_new && data_we_q {
-                    recent_store_valid_q   = data_mask_q == 8'hff;
+                    recent_store_valid_q   = (data_mask_q == 8'hff) && !timer_request;
                     recent_store_address_q = data_physical;
                     recent_store_data_q    = data_write_q;
                 }
@@ -415,6 +471,117 @@ module HardwareMemory #(
         }
         for bank in 0..BANK_COUNT {
             data_response_high_q[bank] = data_read_row[bank][14];
+        }
+    }
+}
+
+/// Single-hart machine timer in the memory clock domain (62.4 MHz on board).
+/// The platform maps this 64 KiB window at 0x0200_0000. Each register exposes
+/// little-endian byte lanes; a transfer crossing an 8-byte register boundary
+/// reads zero / ignores writes beyond that register. Reserved addresses are
+/// side-effect free and never select BRAM. Reset stops time at zero, clears
+/// MSIP, and sets MTIMECMP to all ones. An mtime write wins over increment.
+module MachineTimer (
+    clk               : input  clock    ,
+    rst_n             : input  reset    ,
+    freeze            : input  logic    ,
+    address           : input  logic<16>,
+    write_enable      : input  logic    ,
+    write_data        : input  logic<64>,
+    write_mask        : input  logic<8> ,
+    read_data         : output logic<64>,
+    software_interrupt: output logic    ,
+    timer_interrupt   : output logic    ,
+) {
+    var time_low_q      : logic<32>;
+    var time_high_q     : logic<32>;
+    var compare_q       : logic<64>;
+    var software_q      : logic    ;
+    var timer_q         : logic    ;
+    var time_value      : logic<64>;
+    var low_plus_one    : logic<33>;
+    var high_plus_one   : logic<32>;
+    var register_read   : logic<64>;
+    var shifted_data    : logic<64>;
+    var shifted_mask    : logic<8> ;
+    var time_write_value: logic<64>;
+    var time_write      : logic    ;
+    var compare_write   : logic    ;
+    var software_write  : logic    ;
+
+    always_comb {
+        time_value       = {time_high_q, time_low_q};
+        low_plus_one     = {1'b0, time_low_q} + 33'd1;
+        high_plus_one    = time_high_q + 32'd1;
+        shifted_data     = write_data << {address[2:0], 3'b000};
+        shifted_mask     = write_mask << address[2:0];
+        time_write       = write_enable && (address[15:3] == 13'h17ff) && (shifted_mask != 8'd0);
+        compare_write    = write_enable && (address[15:3] == 13'h0800);
+        software_write   = write_enable && (address[15:3] == 13'h0000) && shifted_mask[0];
+        time_write_value = time_value;
+        for byte in 0..8 {
+            if shifted_mask[byte] {
+                time_write_value[byte step 8] = shifted_data[byte step 8];
+            }
+        }
+        register_read = 64'd0;
+        case address[15:3] {
+            13'h0000: register_read = {63'd0, software_q};
+            13'h0800: register_read = compare_q;
+            13'h17fe: register_read = 64'd62_400_000; // Platform timebase Hz, read-only.
+            13'h17ff: register_read = time_value;
+            default : register_read = 64'd0;
+        }
+        read_data          = register_read >> {address[2:0], 3'b000};
+        software_interrupt = software_q;
+        timer_interrupt    = timer_q;
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            time_low_q = 32'd0;
+        } else if time_write || !freeze {
+            if time_write {
+                time_low_q = time_write_value[31:0];
+            } else {
+                time_low_q = low_plus_one[31:0];
+            }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            time_high_q = 32'd0;
+        } else if time_write || (!freeze && low_plus_one[32]) {
+            if time_write {
+                time_high_q = time_write_value[63:32];
+            } else {
+                time_high_q = high_plus_one;
+            }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            compare_q = 64'hffff_ffff_ffff_ffff;
+        } else if compare_write {
+            for byte in 0..8 {
+                if shifted_mask[byte] {
+                    compare_q[byte step 8] = shifted_data[byte step 8];
+                }
+            }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            software_q = 1'b0;
+            timer_q    = 1'b0;
+        } else {
+            if software_write {
+                software_q = shifted_data[0];
+            }
+            // A registered comparison deliberately allows the specification's
+            // eventual MTIP update. Clearing MTIMECMP can leave a short tail;
+            // handlers must tolerate a repeated timer interrupt after MRET.
+            timer_q = time_value >= compare_q;
         }
     }
 }

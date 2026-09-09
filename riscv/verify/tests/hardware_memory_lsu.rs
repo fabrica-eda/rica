@@ -3,13 +3,14 @@ use std::{fs, path::Path, sync::OnceLock};
 
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 
-fn image(fast: u64) -> &'static NativeProgramImage {
-    static IMAGES: [OnceLock<NativeProgramImage>; 7] = [const { OnceLock::new() }; 7];
-    IMAGES[fast as usize].get_or_init(|| {
+fn image(fast: u64, timer: bool) -> &'static NativeProgramImage {
+    static IMAGES: [OnceLock<NativeProgramImage>; 14] = [const { OnceLock::new() }; 14];
+    IMAGES[fast as usize + if timer { 7 } else { 0 }].get_or_init(|| {
         let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let source = fs::read_to_string(project.join("src/HardwareMemory.veryl")).unwrap();
         SimulatorBuilder::new(&source, "HardwareMemory")
             .param("FAST_LSU", fast)
+            .param("ENABLE_TIMER", u64::from(timer))
             .compile_native()
             .unwrap()
             .into_program_image()
@@ -23,12 +24,18 @@ struct Memory {
 
 impl Memory {
     fn new(fast: u64) -> Self {
+        Self::with_timer(fast, false)
+    }
+
+    fn with_timer(fast: u64, timer: bool) -> Self {
         let sim = SimulatorBuilder::new("", "HardwareMemory")
-            .build_native_from_image(image(fast).clone())
+            .build_native_from_image(image(fast, timer).clone())
             .unwrap();
         let mut mem = Self { sim, sequence: 0 };
         for name in [
             "rst_n",
+            "timer_rst_n",
+            "timer_freeze",
             "cpu_instr_address",
             "cpu_instr_request_sequence",
             "cpu_data_address",
@@ -44,6 +51,8 @@ impl Memory {
         }
         mem.tick();
         mem.set("rst_n", 1);
+        mem.set("timer_rst_n", 1);
+        mem.set("timer_freeze", 1);
         mem
     }
 
@@ -254,5 +263,60 @@ fn token_holds_do_not_repeat_writes_and_debug_loading_invalidates_forwarding() {
                 0x0123456755abcdef
             )
         );
+    }
+}
+
+#[test]
+fn machine_timer_mmio_shares_request_tokens_without_aliasing_or_repeating_bram_writes() {
+    for fast in 0..=6 {
+        let mut mem = Memory::with_timer(fast, true);
+        let pattern = 0x1234_5678_9abc_def0;
+        for address in [0, 0x4000, 0xbff0, 0xbff8, 0x1230] {
+            mem.request(address, Some((pattern, 255)));
+        }
+        assert_eq!(mem.request(0x0200_bff8, None).1, 0);
+        assert_eq!(mem.request(0x0200_4000, None).1, u64::MAX);
+        assert_eq!(mem.request(0x0200_bff0, None).1, 62_400_000);
+        mem.request(0x0200_bff0, Some((u64::MAX, 255)));
+        assert_eq!(mem.request(0x0200_bff0, None).1, 62_400_000);
+        mem.request(0x0200_1230, Some((u64::MAX, 255)));
+        assert_eq!(mem.request(0x0200_1230, None).1, 0);
+        mem.request(0x0200_0000, Some((u64::MAX, 255)));
+        assert_eq!(mem.request(0x0200_0000, None).1, 1);
+        assert_eq!(mem.get("machine_interrupts"), 1);
+        mem.request(0x0200_0001, Some((0, 255)));
+        assert_eq!(mem.get("machine_interrupts"), 1);
+        mem.request(0x0200_0000, Some((0, 1)));
+        assert_eq!(mem.get("machine_interrupts"), 0);
+        mem.request(0x0200_4000, Some((5, 255)));
+        mem.request(0x0200_bff8, Some((10, 255)));
+        mem.tick();
+        assert_eq!(mem.get("machine_interrupts"), 2);
+        mem.request(0x0200_4000, Some((u64::MAX, 255)));
+        mem.tick();
+        assert_eq!(mem.get("machine_interrupts"), 0);
+        for address in [0, 0x4000, 0xbff0, 0xbff8, 0x1230] {
+            assert_eq!(
+                mem.request(address, None).1,
+                pattern,
+                "fast={fast}, address={address:x}"
+            );
+        }
+        mem.request(0x0200_bff8, Some((100, 255)));
+        mem.set("timer_freeze", 0);
+        // The held request and store indication must not write mtime again.
+        mem.set("cpu_data_write", 0);
+        for _ in 0..8 {
+            mem.tick();
+        }
+        mem.set("timer_freeze", 1);
+        assert_eq!(mem.request(0x0200_bff8, None).1, 108);
+        // Stopping/restarting the CPU resets the peripheral without clearing RAM.
+        mem.set("timer_rst_n", 0);
+        mem.tick();
+        mem.set("timer_rst_n", 1);
+        assert_eq!(mem.request(0x0200_bff8, None).1, 0);
+        assert_eq!(mem.request(0x0200_4000, None).1, u64::MAX);
+        assert_eq!(mem.request(0x4000, None).1, pattern);
     }
 }

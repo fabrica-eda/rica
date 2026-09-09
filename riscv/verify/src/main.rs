@@ -930,6 +930,7 @@ struct HardwareModelConfig {
     early_bitmanip: bool,
     early_taken_fetch: bool,
     early_divide: bool,
+    machine_interrupts: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -950,6 +951,7 @@ fn verify_hardware_memory_rtl(
         early_bitmanip,
         early_taken_fetch,
         early_divide,
+        machine_interrupts,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -972,6 +974,7 @@ fn verify_hardware_memory_rtl(
         .param("EARLY_BITMANIP", u64::from(early_bitmanip))
         .param("EARLY_TAKEN_FETCH", u64::from(early_taken_fetch))
         .param("EARLY_DIVIDE", u64::from(early_divide))
+        .param("ENABLE_INTERRUPTS", u64::from(machine_interrupts))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1481,6 +1484,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let early_bitmanip = arguments.iter().any(|arg| arg == "--early-bitmanip");
     let early_taken_fetch = arguments.iter().any(|arg| arg == "--early-taken-fetch");
     let early_divide = arguments.iter().any(|arg| arg == "--early-divide");
+    let machine_interrupts = arguments.iter().any(|arg| arg == "--machine-interrupts");
     let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
@@ -1494,6 +1498,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         || early_bitmanip
         || early_taken_fetch
         || early_divide
+        || machine_interrupts
         || timed_clocks)
         && !arguments.iter().any(|arg| arg == "--hardware-memory-rtl")
     {
@@ -1598,6 +1603,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--early-bitmanip"
                     && argument.as_str() != "--early-taken-fetch"
                     && argument.as_str() != "--early-divide"
+                    && argument.as_str() != "--machine-interrupts"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
@@ -1632,6 +1638,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         early_bitmanip,
                         early_taken_fetch,
                         early_divide,
+                        machine_interrupts,
                         trace: timed_trace,
                     },
                     max_cycles,
@@ -1654,6 +1661,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 early_bitmanip,
                 early_taken_fetch,
                 early_divide,
+                machine_interrupts,
             },
             max_cycles,
         );
