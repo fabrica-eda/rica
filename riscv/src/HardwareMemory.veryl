@@ -19,8 +19,9 @@
 /// Stores retain the registered request bundle and physical-write response edge.
 module HardwareMemory #(
     // 0: original; 1: early store/forwarding; 2: early stores; 3/4: direct load return; 5: read port prefetch.
-    param FAST_LSU    : u32 = 0,
-    param ENABLE_TIMER: bit = 0,
+    param FAST_LSU     : u32 = 0,
+    param ENABLE_TIMER : bit = 0,
+    param STRICT_MEMORY: bit = 0,
 ) (
     clk                        : input  'memory clock              ,
     rst_n                      : input  'memory reset_async_low    ,
@@ -292,10 +293,18 @@ module HardwareMemory #(
             };
         }
 
-        cpu_instr_line              = {
+        cpu_instr_line = {
             instr_read[7], instr_read[6], instr_read[5], instr_read[4], instr_read[3], instr_read[2], instr_read[1],
             instr_read[0]
         };
+        // Speculative fills outside instruction RAM return inert data. Core
+        // attaches a precise fault to the demanded PC, including a straddling
+        // instruction's second parcel; a discarded prefetch never traps.
+        if STRICT_MEMORY
+            && !((instr_response_address_q[31:12] == 20'd0)
+                || ((instr_response_address_q[31:18] == 14'h2000) && (instr_response_address_q[17:12] != 6'h3f))) {
+            cpu_instr_line = 64'd0;
+        }
         cpu_instr_response_address  = instr_response_address_q;
         cpu_instr_response_valid    = instr_response_valid_q;
         cpu_instr_response_sequence = instr_response_sequence_q;

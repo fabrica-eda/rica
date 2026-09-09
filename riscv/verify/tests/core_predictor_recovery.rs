@@ -7,6 +7,7 @@ use celox::{BigUint, NativeBackend, NativeProgramImage, OptLevel, Simulator, Sim
 const NOP: u32 = 0x0000_0013;
 const EARLY_DIVIDE_CONFIG: u64 = 32_648;
 const INTERRUPTS_CONFIG: u64 = EARLY_DIVIDE_CONFIG | 32_768;
+const ACCESS_CONFIG: u64 = INTERRUPTS_CONFIG | 65_536;
 const KIND_CONDITIONAL: u64 = 1;
 const KIND_DIRECT: u64 = 2;
 const KIND_CALL: u64 = 4;
@@ -19,6 +20,9 @@ fn project_path() -> PathBuf {
 }
 
 fn native_image(config: u64) -> &'static NativeProgramImage {
+    static ACCESS: OnceLock<NativeProgramImage> = OnceLock::new();
+    static ACCESS_TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
+    static ACCESS_STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static INTERRUPTS: OnceLock<NativeProgramImage> = OnceLock::new();
     static INTERRUPTS_TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
     static INTERRUPTS_STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
@@ -48,6 +52,9 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static EARLY_2056: OnceLock<NativeProgramImage> = OnceLock::new();
     static EARLY_3976: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
+        ACCESS_CONFIG => &ACCESS,
+        98_432 => &ACCESS_TAGE,
+        98_436 => &ACCESS_STATIC,
         INTERRUPTS_CONFIG => &INTERRUPTS,
         32_896 => &INTERRUPTS_TAGE,
         32_900 => &INTERRUPTS_STATIC,
@@ -83,6 +90,7 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         SimulatorBuilder::new(&source, "Core")
             .param("SYNC_DATA_MEMORY", 1)
             .param("ENABLE_INTERRUPTS", u64::from(config & 32_768 != 0))
+            .param("STRICT_MEMORY", u64::from(config & 65_536 != 0))
             .param("ENABLE_ZBA", u64::from(config & 512 != 0))
             .param("ENABLE_ZBB", u64::from(config & 1024 != 0))
             .param("ENABLE_ZBS", u64::from(config & 2048 != 0))
@@ -687,12 +695,13 @@ fn invalid_fetch_refreshes_masked_payload_without_issuing_or_advancing() {
         assert!(!cycle.predictor_request_accept);
         assert_eq!(driver.value("pc"), 0, "invalid fetch advanced the cursor");
         assert_eq!(
-            driver.value("fetch_q") & 1,
+            driver.value("fetch_valid_q"),
             0,
             "invalid payload became visible"
         );
         assert_eq!(
-            (driver.value("fetch_q") >> 2) as u32,
+            // Packed tail: compressed, valid, access_fault, fault_boundary.
+            (driver.value("fetch_q") >> 4) as u32,
             instruction,
             "masked payload did not refresh independently of instr_valid",
         );
@@ -715,8 +724,8 @@ fn invalid_fetch_refreshes_masked_payload_without_issuing_or_advancing() {
         4,
         "valid retry did not advance exactly once"
     );
-    assert_eq!(driver.value("fetch_q") & 1, 1);
-    assert_eq!((driver.value("fetch_q") >> 2) as u32, instruction);
+    assert_eq!(driver.value("fetch_valid_q"), 1);
+    assert_eq!((driver.value("fetch_q") >> 4) as u32, instruction);
 }
 
 #[test]
@@ -2069,6 +2078,320 @@ fn misa_b_is_set_only_when_zba_zbb_zbs_are_all_enabled() {
 
 fn encode_csr(rd: u32, csr: u32, source: u32, funct3: u32) -> u32 {
     csr << 20 | source << 15 | funct3 << 12 | rd << 7 | 0x73
+}
+
+fn access_program() -> BTreeMap<u32, u32> {
+    [
+        (0, encode_addi(1, 0, 0x400)),
+        (4, encode_csr(0, 0x305, 1, 1)),
+        (0x400, encode_csr(20, 0x342, 0, 2)),
+        (0x404, encode_csr(21, 0x341, 0, 2)),
+        (0x408, encode_csr(22, 0x343, 0, 2)),
+        (0x40c, encode_jal(0, 0)),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn append_constant(program: &mut BTreeMap<u32, u32>, pc: &mut u32, rd: u32, value: u64) {
+    program.insert(*pc, encode_addi(rd, 0, 0));
+    *pc += 4;
+    for byte in value.to_be_bytes() {
+        program.insert(*pc, encode_slli(rd, rd, 8));
+        program.insert(*pc + 4, encode_addi(rd, rd, i32::from(byte)));
+        *pc += 8;
+    }
+}
+
+#[test]
+fn access_faulting_loads_and_stores_never_issue_or_commit() {
+    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+        for (address, fault_address, sizes) in [
+            (0x1000, 0x1000, 0..4),
+            (0x8003_f000, 0x8003_f000, 0..4),
+            (0x0000_0001_0000_0300, 0x0000_0001_0000_0300, 0..4),
+            (0xffff_ffff_8000_0300, 0xffff_ffff_8000_0300, 0..4),
+            (0xfff, 0x1000, 1..4),
+            (0x8003_efff, 0x8003_f000, 1..4),
+            (0x0200_4001, 0x0200_4001, 1..4),
+        ] {
+            for size in sizes {
+                for store in [false, true] {
+                    let mut program = access_program();
+                    let mut pc = 8;
+                    append_constant(&mut program, &mut pc, 2, address);
+                    program.insert(pc, encode_addi(31, 0, 77));
+                    let fault_pc = pc + 4;
+                    let instruction = if store {
+                        (encode_sd(31, 2, 0) & !(7 << 12)) | size << 12
+                    } else {
+                        (encode_ld(31, 2, 0) & !(7 << 12)) | size << 12
+                    };
+                    program.insert(fault_pc, instruction);
+                    // Both are younger than the exception, including the store
+                    // immediately following a fault first detected in EX.
+                    program.insert(fault_pc + 4, encode_sd(31, 0, 0x300));
+                    program.insert(fault_pc + 8, encode_addi(31, 0, 99));
+                    let mut driver = CoreDriver::with_config(program, config);
+                    let mut done = false;
+                    let mut trace = Vec::new();
+                    for _ in 0..300 {
+                        if trace.len() < 32 && driver.value("ex_pc_q") >= u64::from(fault_pc) {
+                            trace.push([
+                                driver.value("pc"),
+                                driver.value("ex_pc_q"),
+                                driver.value("lsu_address"),
+                                driver.value("lsu_access_fault"),
+                                driver.value("cm_pc_q"),
+                                driver.value("cm_exception_q"),
+                                driver.value("cm_trap_event"),
+                                driver.value("redirect_pending_q"),
+                            ]);
+                        }
+                        assert_eq!(
+                            driver.value("data_request_sequence"),
+                            0,
+                            "fault issued memory request: {address:x}, size {size}, store {store}"
+                        );
+                        let cycle = driver.step();
+                        assert!(!cycle.data_we && !cycle.commit_mem_we);
+                        if cycle.commit_valid {
+                            assert!(!(fault_pc..fault_pc + 12).contains(&cycle.commit_pc));
+                            if cycle.commit_pc == 0x408 {
+                                done = true;
+                                break;
+                            }
+                        }
+                    }
+                    assert!(
+                        done,
+                        "no trap: config {config}, {address:x}, size {size}, store {store}; {trace:x?}"
+                    );
+                    assert_eq!(driver.csr_value("mcause_q"), if store { 7 } else { 5 });
+                    assert_eq!(driver.csr_value("mepc_q") << 1, u64::from(fault_pc));
+                    assert_eq!(driver.csr_value("mtval_q"), fault_address);
+                    assert_eq!(driver.value("debug_x31"), 77);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn access_fault_on_invalid_control_target_preserves_full_pc_and_jalr_link() {
+    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+        for target in [
+            0x1000,
+            0x8003_f000,
+            0x0000_0001_0000_0200,
+            0xffff_ffff_8000_0200,
+        ] {
+            for mret in [false, true] {
+                let mut program = access_program();
+                let mut pc = 8;
+                // JALR must clear bit zero, even on an inaccessible target.
+                append_constant(&mut program, &mut pc, 2, target | 1);
+                if mret {
+                    program.insert(pc, encode_csr(0, 0x341, 2, 1));
+                    pc += 4;
+                    program.insert(pc, 0x3020_0073);
+                } else {
+                    program.insert(pc, 2 << 15 | 31 << 7 | 0x67);
+                }
+                let control_pc = pc;
+                let mut driver = CoreDriver::with_config(program, config);
+                let mut control_retired = false;
+                let mut done = false;
+                for _ in 0..300 {
+                    let cycle = driver.step();
+                    assert!(!cycle.data_we);
+                    if cycle.commit_valid && cycle.commit_pc == control_pc {
+                        control_retired = true;
+                        if !mret {
+                            assert_eq!(cycle.commit_data, u64::from(control_pc + 4));
+                        }
+                    }
+                    if cycle.commit_valid && cycle.commit_pc == 0x408 {
+                        done = true;
+                        break;
+                    }
+                }
+                assert!(
+                    done && control_retired,
+                    "target {target:016x} mret {mret} config {config}"
+                );
+                assert_eq!(driver.csr_value("mcause_q"), 1);
+                assert_eq!(driver.csr_value("mepc_q") << 1, target);
+                assert_eq!(driver.csr_value("mtval_q"), target);
+            }
+        }
+    }
+}
+
+#[test]
+fn access_instruction_boundary_reports_first_inaccessible_parcel() {
+    for target in [0xffe, 0x8003_effe] {
+        for compressed in [false, true] {
+            let mut program = access_program();
+            let mut pc = 8;
+            append_constant(&mut program, &mut pc, 2, target);
+            program.insert(pc, 2 << 15 | 0x67);
+            program.insert(target as u32, if compressed { 0x0001 } else { NOP });
+            let mut driver = CoreDriver::with_config(program, ACCESS_CONFIG);
+            let mut boundary_retired = false;
+            let mut done = false;
+            for _ in 0..300 {
+                let cycle = driver.step();
+                boundary_retired |= cycle.commit_valid && u64::from(cycle.commit_pc) == target;
+                if cycle.commit_valid && cycle.commit_pc == 0x408 {
+                    done = true;
+                    break;
+                }
+            }
+            assert!(done);
+            assert_eq!(boundary_retired, compressed);
+            assert_eq!(driver.csr_value("mcause_q"), 1);
+            assert_eq!(
+                driver.csr_value("mepc_q") << 1,
+                target + if compressed { 2 } else { 0 }
+            );
+            assert_eq!(driver.csr_value("mtval_q"), target + 2);
+        }
+    }
+}
+
+#[test]
+fn access_fault_waits_for_older_store_and_precedes_pending_interrupt() {
+    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+        let mut program = interrupt_program([]);
+        let mut pc = 20;
+        append_constant(&mut program, &mut pc, 2, 0x0000_0001_0000_0300);
+        let store_pc = pc;
+        let fault_pc = pc + 4;
+        program.insert(store_pc, encode_sd(1, 0, 0x300));
+        program.insert(fault_pc, encode_ld(31, 2, 0));
+        program.insert(fault_pc + 4, encode_sd(1, 0, 0x308));
+        program.insert(0x40c, encode_jal(0, 0));
+        let mut driver = CoreDriver::with_config(program, config);
+        let mut waiting = 0;
+        let mut stores_retired = 0;
+        let mut request_edges = 0;
+        let mut previous_request = 0;
+        let mut done = false;
+        for _ in 0..400 {
+            if driver.value("cm_valid_q") != 0 && driver.value("cm_pc_q") == u64::from(store_pc) {
+                waiting += 1;
+                driver.set_interrupts(7);
+                if waiting == 8 {
+                    driver.acknowledge_data_request();
+                }
+            }
+            assert_eq!(
+                driver.value("interrupt_event"),
+                0,
+                "interrupt overtook synchronous fault"
+            );
+            let request = driver.value("data_request_sequence");
+            request_edges += u32::from(request != previous_request);
+            previous_request = request;
+            let cycle = driver.step();
+            if cycle.commit_valid {
+                assert_ne!(cycle.commit_pc, fault_pc);
+                assert_ne!(cycle.commit_pc, fault_pc + 4);
+                stores_retired += u32::from(cycle.commit_mem_we);
+                if cycle.commit_pc == 0x408 {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        assert!(done && waiting >= 8);
+        assert_eq!(request_edges, 1);
+        assert_eq!(stores_retired, 1);
+        assert_eq!(driver.csr_value("mcause_interrupt_q"), 0);
+        assert_eq!(driver.csr_value("mcause_q"), 5);
+        assert_eq!(driver.csr_value("mepc_q") << 1, u64::from(fault_pc));
+        assert_eq!(driver.csr_value("mtval_q"), 0x0000_0001_0000_0300);
+    }
+}
+
+#[test]
+fn access_pc_relative_jump_and_jalr_carry_keep_full_rv64_target() {
+    for indirect in [false, true] {
+        let mut program = access_program();
+        let mut pc = 8;
+        let target = if indirect {
+            append_constant(&mut program, &mut pc, 2, 0xffff_fff8);
+            program.insert(pc, 16 << 20 | 2 << 15 | 31 << 7 | 0x67);
+            0x0000_0001_0000_0008
+        } else {
+            program.insert(pc, encode_jal(31, -16));
+            0xffff_ffff_ffff_fff8
+        };
+        let mut driver = CoreDriver::with_config(program, ACCESS_CONFIG);
+        let mut linked = false;
+        let mut done = false;
+        for _ in 0..300 {
+            let cycle = driver.step();
+            if cycle.commit_valid && cycle.commit_pc == pc {
+                linked = true;
+                assert_eq!(cycle.commit_data, u64::from(pc + 4));
+            }
+            if cycle.commit_valid && cycle.commit_pc == 0x408 {
+                done = true;
+                break;
+            }
+        }
+        assert!(linked && done);
+        assert_eq!(driver.csr_value("mepc_q") << 1, target);
+        assert_eq!(driver.csr_value("mtval_q"), target);
+        assert_eq!(driver.csr_value("mcause_q"), 1);
+    }
+}
+
+#[test]
+fn access_wrong_path_faults_and_boundary_prefetch_have_no_architectural_effect() {
+    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+        for store in [false, true] {
+            let mut program = access_program();
+            let mut pc = 8;
+            append_constant(&mut program, &mut pc, 2, 0x1_0000_0300);
+            program.insert(pc, encode_branch(0, 0, 0, 8));
+            program.insert(
+                pc + 4,
+                if store {
+                    encode_sd(2, 2, 0)
+                } else {
+                    encode_ld(31, 2, 0)
+                },
+            );
+            let mut cursor = pc + 8;
+            append_constant(&mut program, &mut cursor, 3, 0xffc);
+            program.insert(cursor, 3 << 15 | 0x67);
+            // Repeatedly fetch the last legal word. Sequential lookahead at
+            // 0x1000 must be discarded when this back edge repairs prediction.
+            program.insert(0xffc, encode_jal(0, pc as i32 - 0xffc));
+            let mut driver = CoreDriver::with_config(program, config);
+            let mut loops = 0;
+            for _ in 0..500 {
+                let cycle = driver.step();
+                assert_eq!(driver.value("data_request_sequence"), 0);
+                if cycle.commit_valid {
+                    assert_ne!(cycle.commit_pc, pc + 4);
+                    assert!(
+                        !(0x400..0x410).contains(&cycle.commit_pc),
+                        "wrong-path trap"
+                    );
+                    loops += u32::from(cycle.commit_pc == 0xffc);
+                }
+            }
+            assert!(
+                loops >= 4,
+                "config {config}: no repeated boundary execution"
+            );
+            assert_eq!(driver.csr_value("mcause_q"), 0);
+        }
+    }
 }
 
 fn interrupt_program(body: impl IntoIterator<Item = (u32, u32)>) -> BTreeMap<u32, u32> {

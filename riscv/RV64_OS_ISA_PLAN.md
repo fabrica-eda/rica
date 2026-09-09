@@ -13,7 +13,7 @@ CPU 124.8 MHz、メモリ62.4 MHz、setup・hold各200 ps予約、実機326実�
 既存35診断は同一ELF・同一命令数で±1 cycle以内、通常処理の性能を維持している。
 [実測記録](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/PERFORMANCE.md)。
 
-| 分類 | 現行RTL | OS向けに必要な差分 |
+| 分類 | 認定済み基準 | OS向けに必要な差分 |
 | --- | --- | --- |
 | 整数ISA | RV64 I/M/B、整数圧縮Zca、Zicsr、Zifencei | A（Zaamo＋Zalrsc）。F/D/Vは後工程 |
 | 特権 | M-modeのみ。ECALL/EBREAK/不正命令、MRET | M/S/Uの実行権限、CSRアクセス権、例外委譲 |
@@ -29,7 +29,30 @@ CPU 124.8 MHz、メモリ62.4 MHz、setup・hold各200 ps予約、実機326実�
 特に現行の32-bit PC/EPCのまま `satp` を追加してもSv39にはならない。
 BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 
+開発中の `HardwareCompactAccessFaultTestTop` は `STRICT_MEMORY=1` を追加し、
+64-bit PC・分岐先・trap値と、RAM/MMIOの厳密な範囲検査を実装した。
+この構成の配置配線・実機認定は別途行う。通常load/storeに待ち段は追加していない。
+[Rust kernel](kernel/README.md) も実装し、認定済み基準で2タスクのyieldとタイマ切り替えを
+3回実機確認した。範囲外load/store、64-bit fetch先、RAM末尾の命令境界から復帰する
+kernel variantを、新しいCPU構成の試験に用いる。
+
 ## 実装順と合格条件
+
+### CPUとOSを同じ開発ループに置く
+
+最小kernelは **Rust `no_std`＋起動・trap入口のアセンブリ** で実装する。
+CPU機能の追加と、それを使うkernel経路・自己検査ELFを一組で進める。
+M-mode固有のCSR・timer操作はアーキテクチャ層へ置き、後のS-mode移行に備える。
+初版は固定メモリと少数タスクを用い、起動・例外記録・yield・タイマー切り替えを持つ。
+Rustの`core`もAを含まないターゲットでビルドし、生成ELFを命令単位で検査する。
+
+今回のCPU側はアドレス検査とaccess fault、kernel側は元のPC・原因・アドレスの記録、
+意図的なfaultからの復帰、タスク継続を実装する。以降はAとatomic操作、U/PMPとsyscall・隔離、
+S/Sv39とページ表・プロセス切り替えを対応させる。
+頻繁な検証はモデルで回し、RTL更新時は124.8 MHzのSTA・checked bitgen・実機まで確認する。
+OSだけの変更は認定済みbitstreamを再利用する。固定処理のIPCに加え、固定回数のyieldや
+例外処理に要するサイクルも記録する。CPUとOSの共通の誤りを見逃さないよう、
+仕様に基づく単体試験・ACT/SailはOSから独立して維持する。
 
 ### 0. 完了：除算改善とOS起動時のSYSTEM動作
 

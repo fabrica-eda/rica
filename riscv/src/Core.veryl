@@ -15,6 +15,7 @@ module Core #(
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
+    param STRICT_MEMORY    : bit = 0,
     param SYNC_DATA_MEMORY : bit = 0,
     param RELOCATE_LOW_DATA: bit = 0,
     // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
@@ -52,145 +53,153 @@ module Core #(
     debug_x31             : output logic<64>,
     instruction_flush     : output logic    ,
 ) {
-    // This implementation exposes a 32-bit physical address space while the
-    // architectural integer datapath and visible addresses remain XLEN-wide.
+    // Strict physical memory retains full architectural PC/trap values while
+    // admitting execution only in the platform RAM/reset regions. The predictor
+    // still indexes physical PCs; invalid full-width targets become fetch faults.
+    const ADDRESS_BITS: u32 = 32 + 32 * (STRICT_MEMORY as u32);
     // FetchPayload is the registered boundary after instruction-line selection;
     // FetchPacket adds the separately registered occupancy bit to its view.
     // DecodePacket keeps the original encoding beside its canonical RV64I form:
     // the latter feeds the ordinary decoder while the former remains available
     // for architectural traces and illegal-instruction trap values.
     struct FetchPacket {
-        pc             : logic<32>,
-        raw_instruction: logic<32>,
-        is_compressed  : logic    ,
-        valid          : logic    ,
+        pc             : logic<ADDRESS_BITS>,
+        raw_instruction: logic<32>          ,
+        is_compressed  : logic              ,
+        valid          : logic              ,
+        access_fault   : logic              ,
+        fault_boundary : logic              ,
     }
     struct FetchPayload {
-        pc             : logic<32>,
-        raw_instruction: logic<32>,
-        is_compressed  : logic    ,
+        pc             : logic<ADDRESS_BITS>,
+        raw_instruction: logic<32>          ,
+        is_compressed  : logic              ,
+        access_fault   : logic              ,
+        fault_boundary : logic              ,
     }
     struct DecodePacket {
-        pc               : logic<32>,
-        instruction      : logic<32>,
-        raw_instruction  : logic<32>,
-        is_compressed    : logic    ,
-        illegal          : logic    ,
-        prediction_token : logic<3> ,
-        predicted_kind   : logic<3> ,
-        predicted_taken  : logic    ,
-        predicted_next_pc: logic<32>,
-        valid            : logic    ,
+        pc               : logic<ADDRESS_BITS>,
+        instruction      : logic<32>          ,
+        raw_instruction  : logic<32>          ,
+        is_compressed    : logic              ,
+        illegal          : logic              ,
+        prediction_token : logic<3>           ,
+        predicted_kind   : logic<3>           ,
+        predicted_taken  : logic              ,
+        predicted_next_pc: logic<32>          ,
+        valid            : logic              ,
+        access_fault     : logic              ,
+        fault_boundary   : logic              ,
     }
-    var fetch_line_q             : logic       <29>;
-    var fetch_parcel_q           : logic       <2> ;
-    var fetch_address            : logic       <32>;
-    var taken_fetch_valid_q      : logic           ;
-    var taken_fetch_pc_q         : logic       <32>;
-    var fetch_line_plus_one      : logic       <29>;
-    var fetch_next_parcel        : logic       <2> ;
-    var fetch_cross_line         : logic           ;
-    var fetch_fallthrough        : logic       <32>;
-    var fetch_is_conditional     : logic           ;
-    var debug_x31_q              : logic       <64>;
-    var fetch_packet             : FetchPacket     ;
-    var fetch_payload_q          : FetchPayload    ;
-    var fetch_lookahead_payload_q: FetchPayload    ;
-    var fetch_tail_payload_q     : FetchPayload    ;
-    var fetch_valid_q            : logic           ;
-    var fetch_lookahead_valid_q  : logic           ;
-    var fetch_tail_valid_q       : logic           ;
-    var fetch_payload_write      : logic           ;
-    var fetch_lookahead_write    : logic           ;
-    var fetch_tail_write         : logic           ;
-    var fetch_q                  : FetchPacket     ;
-    var fetch_lookahead_q        : FetchPacket     ;
-    var decode_packet            : DecodePacket    ;
-    var fd_q                     : DecodePacket    ;
+    var fetch_line_q             : logic       <ADDRESS_BITS - 3>;
+    var fetch_parcel_q           : logic       <2>               ;
+    var fetch_address            : logic       <ADDRESS_BITS>    ;
+    var taken_fetch_valid_q      : logic                         ;
+    var taken_fetch_pc_q         : logic       <ADDRESS_BITS>    ;
+    var fetch_line_plus_one      : logic       <ADDRESS_BITS - 3>;
+    var fetch_next_parcel        : logic       <2>               ;
+    var fetch_cross_line         : logic                         ;
+    var fetch_fallthrough        : logic       <ADDRESS_BITS>    ;
+    var fetch_is_conditional     : logic                         ;
+    var debug_x31_q              : logic       <64>              ;
+    var fetch_packet             : FetchPacket                   ;
+    var fetch_payload_q          : FetchPayload                  ;
+    var fetch_lookahead_payload_q: FetchPayload                  ;
+    var fetch_tail_payload_q     : FetchPayload                  ;
+    var fetch_valid_q            : logic                         ;
+    var fetch_lookahead_valid_q  : logic                         ;
+    var fetch_tail_valid_q       : logic                         ;
+    var fetch_payload_write      : logic                         ;
+    var fetch_lookahead_write    : logic                         ;
+    var fetch_tail_write         : logic                         ;
+    var fetch_q                  : FetchPacket                   ;
+    var fetch_lookahead_q        : FetchPacket                   ;
+    var decode_packet            : DecodePacket                  ;
+    var fd_q                     : DecodePacket                  ;
 
-    var rx_valid_q            : logic    ;
-    var rx_pc_q               : logic<32>;
-    var rx_raw_instr_q        : logic<32>;
-    var rx_is_compressed_q    : logic    ;
-    var rx_rs1_q              : logic<5> ;
-    var rx_rs2_q              : logic<5> ;
-    var rx_rd_q               : logic<5> ;
-    var rx_immediate_q        : logic<64>;
-    var rx_alu_op_q           : logic<6> ;
-    var rx_use_pc_q           : logic    ;
-    var rx_use_immediate_q    : logic    ;
-    var rx_use_rs1_q          : logic    ;
-    var rx_use_rs2_q          : logic    ;
-    var rx_write_enable_q     : logic    ;
-    var rx_is_load_q          : logic    ;
-    var rx_load_size_q        : logic<2> ;
-    var rx_load_unsigned_q    : logic    ;
-    var rx_is_store_q         : logic    ;
-    var rx_store_size_q       : logic<2> ;
-    var rx_word_op_q          : logic    ;
-    var rx_is_branch_q        : logic    ;
-    var rx_branch_op_q        : logic<3> ;
-    var rx_is_jal_q           : logic    ;
-    var rx_is_jalr_q          : logic    ;
-    var rx_is_csr_q           : logic    ;
-    var rx_csr_op_q           : logic<2> ;
-    var rx_csr_use_imm_q      : logic    ;
-    var rx_csr_write_q        : logic    ;
-    var rx_csr_index_q        : logic<5> ;
-    var rx_is_ecall_q         : logic    ;
-    var rx_is_ebreak_q        : logic    ;
-    var rx_is_mret_q          : logic    ;
-    var rx_is_fence_i_q       : logic    ;
-    var rx_illegal_q          : logic    ;
-    var rx_prediction_token_q : logic<3> ;
-    var rx_predicted_kind_q   : logic<3> ;
-    var rx_predicted_taken_q  : logic    ;
-    var rx_predicted_next_pc_q: logic<32>;
-    var rx_stalled_q          : logic    ;
-    var rx_stall_data_a_q     : logic<64>;
-    var rx_stall_data_b_q     : logic<64>;
+    var rx_valid_q            : logic              ;
+    var rx_pc_q               : logic<ADDRESS_BITS>;
+    var rx_raw_instr_q        : logic<32>          ;
+    var rx_is_compressed_q    : logic              ;
+    var rx_rs1_q              : logic<5>           ;
+    var rx_rs2_q              : logic<5>           ;
+    var rx_rd_q               : logic<5>           ;
+    var rx_immediate_q        : logic<64>          ;
+    var rx_alu_op_q           : logic<6>           ;
+    var rx_use_pc_q           : logic              ;
+    var rx_use_immediate_q    : logic              ;
+    var rx_use_rs1_q          : logic              ;
+    var rx_use_rs2_q          : logic              ;
+    var rx_write_enable_q     : logic              ;
+    var rx_is_load_q          : logic              ;
+    var rx_load_size_q        : logic<2>           ;
+    var rx_load_unsigned_q    : logic              ;
+    var rx_is_store_q         : logic              ;
+    var rx_store_size_q       : logic<2>           ;
+    var rx_word_op_q          : logic              ;
+    var rx_is_branch_q        : logic              ;
+    var rx_branch_op_q        : logic<3>           ;
+    var rx_is_jal_q           : logic              ;
+    var rx_is_jalr_q          : logic              ;
+    var rx_is_csr_q           : logic              ;
+    var rx_csr_op_q           : logic<2>           ;
+    var rx_csr_use_imm_q      : logic              ;
+    var rx_csr_write_q        : logic              ;
+    var rx_csr_index_q        : logic<5>           ;
+    var rx_is_ecall_q         : logic              ;
+    var rx_is_ebreak_q        : logic              ;
+    var rx_is_mret_q          : logic              ;
+    var rx_is_fence_i_q       : logic              ;
+    var rx_illegal_q          : logic              ;
+    var rx_prediction_token_q : logic<3>           ;
+    var rx_predicted_kind_q   : logic<3>           ;
+    var rx_predicted_taken_q  : logic              ;
+    var rx_predicted_next_pc_q: logic<32>          ;
+    var rx_stalled_q          : logic              ;
+    var rx_stall_data_a_q     : logic<64>          ;
+    var rx_stall_data_b_q     : logic<64>          ;
 
-    var ex_valid_q              : logic    ;
-    var ex_pc_q                 : logic<32>;
-    var ex_raw_instr_q          : logic<32>;
-    var ex_rd_q                 : logic<5> ;
-    var ex_alu_op_q             : logic<6> ;
-    var ex_subtract_q           : logic    ;
-    var ex_write_enable_q       : logic    ;
-    var ex_can_bypass_q         : logic    ;
-    var ex_is_load_q            : logic    ;
-    var ex_load_size_q          : logic<2> ;
-    var ex_load_unsigned_q      : logic    ;
-    var ex_is_store_q           : logic    ;
-    var ex_store_size_q         : logic<2> ;
-    var ex_word_op_q            : logic    ;
-    var ex_is_branch_q          : logic    ;
-    var ex_branch_op_q          : logic<3> ;
-    var ex_link_q               : logic    ;
-    var ex_static_redirect_q    : logic    ;
-    var ex_control_fallthrough_q: logic    ;
-    var ex_is_csr_q             : logic    ;
-    var ex_csr_op_q             : logic<2> ;
-    var ex_csr_use_imm_q        : logic    ;
-    var ex_csr_immediate_q      : logic<5> ;
-    var ex_csr_write_q          : logic    ;
-    var ex_csr_index_q          : logic<5> ;
-    var ex_is_ecall_q           : logic    ;
-    var ex_is_ebreak_q          : logic    ;
-    var ex_is_mret_q            : logic    ;
-    var ex_is_fence_i_q         : logic    ;
-    var ex_illegal_q            : logic    ;
-    var ex_prediction_token_q   : logic<3> ;
-    var ex_predicted_kind_q     : logic<3> ;
-    var ex_predicted_taken_q    : logic    ;
-    var ex_predicted_next_pc_q  : logic<32>;
-    var ex_fallthrough_pc_q     : logic<32>;
-    var ex_operand_a_q          : logic<64>;
-    var ex_operand_b_q          : logic<64>;
-    var ex_store_data_q         : logic<64>;
-    var ex_redirect_base_q      : logic<32>;
-    var ex_redirect_offset_q    : logic<32>;
-    var ex_redirect_clear_lsb_q : logic    ;
+    var ex_valid_q              : logic              ;
+    var ex_pc_q                 : logic<ADDRESS_BITS>;
+    var ex_raw_instr_q          : logic<32>          ;
+    var ex_rd_q                 : logic<5>           ;
+    var ex_alu_op_q             : logic<6>           ;
+    var ex_subtract_q           : logic              ;
+    var ex_write_enable_q       : logic              ;
+    var ex_can_bypass_q         : logic              ;
+    var ex_is_load_q            : logic              ;
+    var ex_load_size_q          : logic<2>           ;
+    var ex_load_unsigned_q      : logic              ;
+    var ex_is_store_q           : logic              ;
+    var ex_store_size_q         : logic<2>           ;
+    var ex_word_op_q            : logic              ;
+    var ex_is_branch_q          : logic              ;
+    var ex_branch_op_q          : logic<3>           ;
+    var ex_link_q               : logic              ;
+    var ex_static_redirect_q    : logic              ;
+    var ex_control_fallthrough_q: logic              ;
+    var ex_is_csr_q             : logic              ;
+    var ex_csr_op_q             : logic<2>           ;
+    var ex_csr_use_imm_q        : logic              ;
+    var ex_csr_immediate_q      : logic<5>           ;
+    var ex_csr_write_q          : logic              ;
+    var ex_csr_index_q          : logic<5>           ;
+    var ex_is_ecall_q           : logic              ;
+    var ex_is_ebreak_q          : logic              ;
+    var ex_is_mret_q            : logic              ;
+    var ex_is_fence_i_q         : logic              ;
+    var ex_illegal_q            : logic              ;
+    var ex_prediction_token_q   : logic<3>           ;
+    var ex_predicted_kind_q     : logic<3>           ;
+    var ex_predicted_taken_q    : logic              ;
+    var ex_predicted_next_pc_q  : logic<32>          ;
+    var ex_fallthrough_pc_q     : logic<ADDRESS_BITS>;
+    var ex_operand_a_q          : logic<64>          ;
+    var ex_operand_b_q          : logic<64>          ;
+    var ex_store_data_q         : logic<64>          ;
+    var ex_redirect_base_q      : logic<64>          ;
+    var ex_redirect_offset_q    : logic<64>          ;
+    var ex_redirect_clear_lsb_q : logic              ;
     struct BypassState {
         operand_a : logic,
         operand_b : logic,
@@ -199,161 +208,177 @@ module Core #(
     }
     var ex_bypass_q: BypassState;
 
-    var cm_valid_q              : logic    ;
-    var cm_pc_q                 : logic<32>;
-    var cm_raw_instr_q          : logic<32>;
-    var cm_rd_q                 : logic<5> ;
-    var cm_write_enable_q       : logic    ;
-    var cm_is_load_q            : logic    ;
-    var cm_load_size_q          : logic<2> ;
-    var cm_load_unsigned_q      : logic    ;
-    var cm_is_store_q           : logic    ;
-    var cm_store_size_q         : logic<2> ;
-    var cm_is_branch_q          : logic    ;
-    var cm_branch_taken_q       : logic    ;
-    var cm_linear_match_q       : logic    ;
-    var ex_kind_match_q         : logic    ;
-    var cm_taken_match_q        : logic    ;
-    var cm_untaken_match_q      : logic    ;
-    var cm_branch_op_q          : logic<3> ;
-    var cm_control_fallthrough_q: logic    ;
-    var cm_branch_equal_q       : logic<4> ;
-    var cm_redirect_target_q    : logic<32>;
-    var cm_arithmetic_q         : logic<64>;
-    var cm_shift_low_q          : logic<64>;
-    var cm_shift_amount_q       : logic<3> ;
-    var cm_shift_arithmetic_q   : logic    ;
-    var cm_logic_result_q       : logic<64>;
-    var cm_use_logic_q          : logic    ;
-    var cm_use_shift_q          : logic    ;
-    var cm_use_bitmanip_q       : logic    ;
-    var bitmanip_result         : logic<64>;
-    var early_bitmanip_result   : logic<64>;
-    var ex_early_bitmanip       : logic    ;
-    var rx_early_bitmanip       : logic    ;
-    var cm_compare_less_q       : logic<4> ;
-    var cm_compare_sign_a_q     : logic    ;
-    var cm_compare_sign_b_q     : logic    ;
-    var cm_compare_signed_q     : logic    ;
-    var cm_use_compare_q        : logic    ;
-    var cm_shift_left_q         : logic    ;
-    var cm_shift_word_q         : logic    ;
-    var cm_lsu_address_q        : logic<32>;
-    var cm_lsu_memory_address_q : logic<32>;
-    var cm_lsu_wdata_q          : logic<64>;
-    var cm_is_csr_q             : logic    ;
-    var cm_csr_op_q             : logic<2> ;
-    var cm_csr_write_q          : logic    ;
-    var cm_csr_index_q          : logic<5> ;
-    var cm_csr_source_q         : logic<64>;
-    var cm_exception_q          : logic    ;
-    var cm_exception_cause_q    : logic<64>;
-    var cm_exception_value_q    : logic<64>;
-    var cm_is_mret_q            : logic    ;
-    var cm_is_fence_i_q         : logic    ;
-    var cm_prediction_token_q   : logic<3> ;
-    var cm_predicted_kind_q     : logic<3> ;
-    var cm_predicted_taken_q    : logic    ;
-    var cm_predicted_next_pc_q  : logic<32>;
-    var cm_fallthrough_pc_q     : logic<32>;
-    var cm_control_kind_q       : logic<3> ;
+    var cm_valid_q              : logic              ;
+    var cm_pc_q                 : logic<ADDRESS_BITS>;
+    var cm_raw_instr_q          : logic<32>          ;
+    var cm_rd_q                 : logic<5>           ;
+    var cm_write_enable_q       : logic              ;
+    var cm_is_load_q            : logic              ;
+    var cm_load_size_q          : logic<2>           ;
+    var cm_load_unsigned_q      : logic              ;
+    var cm_is_store_q           : logic              ;
+    var cm_store_size_q         : logic<2>           ;
+    var cm_is_branch_q          : logic              ;
+    var cm_branch_taken_q       : logic              ;
+    var cm_linear_match_q       : logic              ;
+    var ex_kind_match_q         : logic              ;
+    var cm_taken_match_q        : logic              ;
+    var cm_untaken_match_q      : logic              ;
+    var cm_branch_op_q          : logic<3>           ;
+    var cm_control_fallthrough_q: logic              ;
+    var cm_branch_equal_q       : logic<4>           ;
+    var cm_redirect_target_q    : logic<ADDRESS_BITS>;
+    var cm_arithmetic_q         : logic<64>          ;
+    var cm_shift_low_q          : logic<64>          ;
+    var cm_shift_amount_q       : logic<3>           ;
+    var cm_shift_arithmetic_q   : logic              ;
+    var cm_logic_result_q       : logic<64>          ;
+    var cm_use_logic_q          : logic              ;
+    var cm_use_shift_q          : logic              ;
+    var cm_use_bitmanip_q       : logic              ;
+    var bitmanip_result         : logic<64>          ;
+    var early_bitmanip_result   : logic<64>          ;
+    var ex_early_bitmanip       : logic              ;
+    var rx_early_bitmanip       : logic              ;
+    var cm_compare_less_q       : logic<4>           ;
+    var cm_compare_sign_a_q     : logic              ;
+    var cm_compare_sign_b_q     : logic              ;
+    var cm_compare_signed_q     : logic              ;
+    var cm_use_compare_q        : logic              ;
+    var cm_shift_left_q         : logic              ;
+    var cm_shift_word_q         : logic              ;
+    var cm_lsu_address_q        : logic<ADDRESS_BITS>;
+    var cm_lsu_memory_address_q : logic<32>          ;
+    var cm_lsu_wdata_q          : logic<64>          ;
+    var cm_is_csr_q             : logic              ;
+    var cm_csr_op_q             : logic<2>           ;
+    var cm_csr_write_q          : logic              ;
+    var cm_csr_index_q          : logic<5>           ;
+    var cm_csr_source_q         : logic<64>          ;
+    var cm_exception_q          : logic              ;
+    var cm_exception_cause_q    : logic<64>          ;
+    var cm_exception_value_q    : logic<64>          ;
+    var cm_is_mret_q            : logic              ;
+    var cm_is_fence_i_q         : logic              ;
+    var cm_prediction_token_q   : logic<3>           ;
+    var cm_predicted_kind_q     : logic<3>           ;
+    var cm_predicted_taken_q    : logic              ;
+    var cm_predicted_next_pc_q  : logic<32>          ;
+    var cm_fallthrough_pc_q     : logic<ADDRESS_BITS>;
+    var cm_control_kind_q       : logic<3>           ;
 
-    var wb_valid_q       : logic    ;
-    var wb_pc_q          : logic<32>;
-    var wb_raw_instr_q   : logic<32>;
-    var wb_rd_q          : logic<5> ;
-    var wb_write_enable_q: logic    ;
-    var wb_result_q      : logic<64>;
-    var wb_mem_we_q      : logic    ;
-    var wb_mem_addr_q    : logic<32>;
-    var wb_mem_wdata_q   : logic<64>;
-    var wb_mem_wmask_q   : logic<8> ;
+    var wb_valid_q       : logic              ;
+    var wb_pc_q          : logic<ADDRESS_BITS>;
+    var wb_raw_instr_q   : logic<32>          ;
+    var wb_rd_q          : logic<5>           ;
+    var wb_write_enable_q: logic              ;
+    var wb_result_q      : logic<64>          ;
+    var wb_mem_we_q      : logic              ;
+    var wb_mem_addr_q    : logic<ADDRESS_BITS>;
+    var wb_mem_wdata_q   : logic<64>          ;
+    var wb_mem_wmask_q   : logic<8>           ;
 
     var rf_write_enable: logic    ;
     var rf_read_data_a : logic<64>;
     var rf_read_data_b : logic<64>;
 
-    var cm_forward_data         : logic<64>;
-    var forwarded_rs1           : logic<64>;
-    var forwarded_rs2           : logic<64>;
-    var rx_operand_a            : logic<64>;
-    var rx_operand_b            : logic<64>;
-    var alu_operand_a           : logic<64>;
-    var alu_operand_b           : logic<64>;
-    var lsu_address             : logic<32>;
-    var bypass_data             : logic<64>;
-    var execute_store_data      : logic<64>;
-    var ex_bypass_hit_rs1       : logic    ;
-    var ex_bypass_hit_rs2       : logic    ;
-    var redirect_addend_a       : logic<32>;
-    var redirect_low            : logic<17>;
-    var redirect_high_c0        : logic<17>;
-    var redirect_high_c1        : logic<17>;
-    var redirect_high           : logic<17>;
-    var redirect_sum            : logic<32>;
-    var ex_branch_equal         : logic    ;
-    var ex_compare_less_high    : logic    ;
-    var ex_compare_less_low     : logic    ;
-    var ex_compare_unsigned     : logic    ;
-    var ex_compare_result       : logic    ;
-    var ex_branch_taken         : logic    ;
-    var cm_branch_taken         : logic    ;
-    var cm_compare_unsigned     : logic    ;
-    var cm_compare_result       : logic    ;
-    var rx_control_fallthrough  : logic    ;
-    var ex_redirect_valid       : logic    ;
-    var branch_redirect_valid   : logic    ;
-    var redirect_valid          : logic    ;
-    var ex_redirect_target      : logic<32>;
-    var redirect_target         : logic<32>;
-    var redirect_pending_q      : logic    ;
-    var redirect_preserve_cm    : logic    ;
-    var redirect_preserve_cm_q  : logic    ;
-    var redirect_discards_cm    : logic    ;
-    var redirect_event_delay_q  : logic    ;
-    var redirect_flush_wb_q     : logic    ;
-    var redirect_target_q       : logic<32>;
-    var pending_redirect_target : logic<32>;
-    var execution_hazard        : logic    ;
-    var decode_operand_match_rx : logic    ;
-    var rx_result_can_bypass    : logic    ;
-    var decode_execution_hazard : logic    ;
-    var rx_execution_hazard_q   : logic    ;
-    var backend_wait            : logic    ;
-    var memory_wait             : logic    ;
-    var muldiv_wait             : logic    ;
-    var muldiv_start            : logic    ;
-    var muldiv_done             : logic    ;
-    var muldiv_result           : logic<64>;
-    var cm_muldiv_pending_q     : logic    ;
-    var rx_is_muldiv_q          : logic    ;
-    var ex_is_muldiv_q          : logic    ;
-    var data_request_sequence_q : logic    ;
-    var csr_source              : logic<64>;
-    var csr_write_value         : logic<64>;
-    var ex_exception            : logic    ;
-    var ex_exception_cause      : logic<64>;
-    var ex_exception_value      : logic<64>;
-    var cm_trap_event           : logic    ;
-    var cm_mret_event           : logic    ;
-    var cm_system_redirect      : logic    ;
-    var ex_irq_fence            : logic    ;
-    var ex_system_barrier       : logic    ;
-    var cm_irq_fence_event      : logic    ;
-    var interrupt_drain         : logic    ;
-    var interrupt_event         : logic    ;
-    var interrupt_resume_pc_q   : logic<32>;
-    var frontend_hold           : logic    ;
-    var cm_fence_i_event        : logic    ;
-    var cm_retire_event         : logic    ;
-    var decompressed_instruction: logic<32>;
-    var compressed_illegal      : logic    ;
-    var rx_control_kind         : logic<3> ;
-    var ex_control_kind_q       : logic<3> ;
-    var ex_actual_next_pc       : logic<32>;
-    var ex_prediction_mismatch  : logic    ;
-    var cm_actual_next_pc       : logic<32>;
-    var cm_prediction_mismatch  : logic    ;
+    var cm_forward_data         : logic<64>          ;
+    var forwarded_rs1           : logic<64>          ;
+    var forwarded_rs2           : logic<64>          ;
+    var rx_operand_a            : logic<64>          ;
+    var rx_operand_b            : logic<64>          ;
+    var alu_operand_a           : logic<64>          ;
+    var alu_operand_b           : logic<64>          ;
+    var lsu_address             : logic<ADDRESS_BITS>;
+    var bypass_data             : logic<64>          ;
+    var execute_store_data      : logic<64>          ;
+    var ex_bypass_hit_rs1       : logic              ;
+    var ex_bypass_hit_rs2       : logic              ;
+    var redirect_addend_a       : logic<64>          ;
+    var redirect_low            : logic<17>          ;
+    var redirect_high_c0        : logic<17>          ;
+    var redirect_high_c1        : logic<17>          ;
+    var redirect_high           : logic<17>          ;
+    var redirect_sum            : logic<64>          ;
+    var ex_branch_equal         : logic              ;
+    var ex_compare_less_high    : logic              ;
+    var ex_compare_less_low     : logic              ;
+    var ex_compare_unsigned     : logic              ;
+    var ex_compare_result       : logic              ;
+    var ex_branch_taken         : logic              ;
+    var cm_branch_taken         : logic              ;
+    var cm_compare_unsigned     : logic              ;
+    var cm_compare_result       : logic              ;
+    var rx_control_fallthrough  : logic              ;
+    var ex_redirect_valid       : logic              ;
+    var branch_redirect_valid   : logic              ;
+    var redirect_valid          : logic              ;
+    var ex_redirect_target      : logic<ADDRESS_BITS>;
+    var redirect_target         : logic<ADDRESS_BITS>;
+    var redirect_pending_q      : logic              ;
+    var redirect_preserve_cm    : logic              ;
+    var redirect_preserve_cm_q  : logic              ;
+    var redirect_discards_cm    : logic              ;
+    var redirect_event_delay_q  : logic              ;
+    var redirect_flush_wb_q     : logic              ;
+    var redirect_target_q       : logic<ADDRESS_BITS>;
+    var pending_redirect_target : logic<ADDRESS_BITS>;
+    var execution_hazard        : logic              ;
+    var decode_operand_match_rx : logic              ;
+    var rx_result_can_bypass    : logic              ;
+    var decode_execution_hazard : logic              ;
+    var rx_execution_hazard_q   : logic              ;
+    var backend_wait            : logic              ;
+    var memory_wait             : logic              ;
+    var muldiv_wait             : logic              ;
+    var muldiv_start            : logic              ;
+    var muldiv_done             : logic              ;
+    var muldiv_result           : logic<64>          ;
+    var cm_muldiv_pending_q     : logic              ;
+    var rx_is_muldiv_q          : logic              ;
+    var ex_is_muldiv_q          : logic              ;
+    var data_request_sequence_q : logic              ;
+    var csr_source              : logic<64>          ;
+    var csr_write_value         : logic<64>          ;
+    var fetch_access_allowed    : logic              ;
+    var fetch_access_boundary   : logic              ;
+    var fetch_fault_address     : logic<64>          ;
+    var fetch_access_size       : logic<2>           ;
+    var lsu_access_allowed      : logic              ;
+    var lsu_access_boundary     : logic              ;
+    var lsu_fault_address       : logic<64>          ;
+    var lsu_access_size         : logic<2>           ;
+    var lsu_access_fault        : logic              ;
+    var rx_fetch_fault_q        : logic              ;
+    var rx_fault_boundary_q     : logic              ;
+    var ex_fetch_fault_q        : logic              ;
+    var ex_fault_boundary_q     : logic              ;
+    var redirect_upper_c0       : logic<32>          ;
+    var redirect_upper_c1       : logic<32>          ;
+    var redirect_upper          : logic<32>          ;
+    var ex_exception            : logic              ;
+    var ex_exception_cause      : logic<64>          ;
+    var ex_exception_value      : logic<64>          ;
+    var cm_trap_event           : logic              ;
+    var cm_mret_event           : logic              ;
+    var cm_system_redirect      : logic              ;
+    var ex_irq_fence            : logic              ;
+    var ex_system_barrier       : logic              ;
+    var cm_irq_fence_event      : logic              ;
+    var interrupt_drain         : logic              ;
+    var interrupt_event         : logic              ;
+    var interrupt_resume_pc_q   : logic<ADDRESS_BITS>;
+    var frontend_hold           : logic              ;
+    var cm_fence_i_event        : logic              ;
+    var cm_retire_event         : logic              ;
+    var decompressed_instruction: logic<32>          ;
+    var compressed_illegal      : logic              ;
+    var rx_control_kind         : logic<3>           ;
+    var ex_control_kind_q       : logic<3>           ;
+    var ex_actual_next_pc       : logic<ADDRESS_BITS>;
+    var ex_prediction_mismatch  : logic              ;
+    var cm_actual_next_pc       : logic<ADDRESS_BITS>;
+    var cm_prediction_mismatch  : logic              ;
 
     var predictor_ready                : logic    ;
     var predictor_wait                 : logic    ;
@@ -464,6 +489,7 @@ module Core #(
 
     inst csr_bus : CsrBus;
     inst csr_file: CsrFile #(
+        FULL_ADDRESS     : STRICT_MEMORY                         ,
         ENABLE_INTERRUPTS: ENABLE_INTERRUPTS                     ,
         ENABLE_M         : ENABLE_M                              ,
         ENABLE_B         : ENABLE_ZBA && ENABLE_ZBB && ENABLE_ZBS,
@@ -657,26 +683,63 @@ module Core #(
         );
     }
 
+    inst fetch_access: PhysicalAccessCheck (
+        address      : fetch_address        ,
+        size         : fetch_access_size    ,
+        instruction  : 1'b1                 ,
+        allowed      : fetch_access_allowed ,
+        crosses_bound: fetch_access_boundary,
+        fault_address: fetch_fault_address  ,
+    );
+    inst lsu_access: PhysicalAccessCheck #(
+        ENABLE_TIMER: ENABLE_INTERRUPTS,
+    ) (
+        address      : lsu_address        ,
+        size         : lsu_access_size    ,
+        instruction  : 1'b0               ,
+        allowed      : lsu_access_allowed ,
+        crosses_bound: lsu_access_boundary,
+        fault_address: lsu_fault_address  ,
+    );
+
     always_comb {
         rf_write_enable  = wb_valid_q && wb_write_enable_q && (wb_rd_q != 5'd0);
         decode_bus.instr = fd_q.instruction;
 
-        fetch_address                = {fetch_line_q, fetch_parcel_q, 1'b0};
-        fetch_line_plus_one[7:0]     = fetch_line_q[7:0] + 8'd1;
-        fetch_line_plus_one[15:8]    = fetch_line_q[15:8] + ((fetch_line_q[7:0] == 8'hff) as 8);
-        fetch_line_plus_one[23:16]   = fetch_line_q[23:16] + ((fetch_line_q[15:0] == 16'hffff) as 8);
-        fetch_line_plus_one[28:24]   = fetch_line_q[28:24] + ((fetch_line_q[23:0] == 24'hffffff) as 5);
-        fetch_packet.pc              = fetch_address;
-        fetch_packet.raw_instruction = instr;
-        fetch_packet.is_compressed   = instr_is_compressed;
-        fetch_packet.valid           = instr_valid;
+        fetch_address                            = {fetch_line_q, fetch_parcel_q, 1'b0};
+        fetch_line_plus_one[7:0]                 = fetch_line_q[7:0] + 8'd1;
+        fetch_line_plus_one[15:8]                = fetch_line_q[15:8] + ((fetch_line_q[7:0] == 8'hff) as 8);
+        fetch_line_plus_one[23:16]               = fetch_line_q[23:16] + ((fetch_line_q[15:0] == 16'hffff) as 8);
+        fetch_line_plus_one[ADDRESS_BITS - 4:24] = fetch_line_q[ADDRESS_BITS - 4:24]
+            + ((fetch_line_q[23:0] == 24'hffffff) as 64);
+        fetch_packet.pc                          = fetch_address;
+        fetch_packet.raw_instruction             = instr;
+        fetch_packet.is_compressed               = instr_is_compressed;
+        fetch_access_size                        = 2'd2;
+        if instr_is_compressed {
+            fetch_access_size = 2'd1;
+        }
+        fetch_packet.access_fault   = STRICT_MEMORY && !fetch_access_allowed;
+        fetch_packet.fault_boundary = fetch_access_boundary;
+        // An unmapped starting PC needs no memory response. At a mapped final
+        // halfword, wait for the instruction length before deciding whether its
+        // second parcel lies outside RAM. The memory returns zero for that line.
+        fetch_packet.valid = instr_valid || (STRICT_MEMORY && !fetch_access_allowed && !fetch_access_boundary);
+        if fetch_packet.access_fault {
+            fetch_packet.raw_instruction = 32'h0000_0013;
+            fetch_packet.is_compressed   = 1'b0;
+        }
         // Preserve the packed queue views used by decode and verification while
         // keeping their payload and occupancy in disjoint physical registers.
         fetch_q.pc                        = fetch_payload_q.pc;
+        fetch_q.access_fault              = fetch_payload_q.access_fault;
+        fetch_q.fault_boundary            = fetch_payload_q.fault_boundary;
         fetch_q.raw_instruction           = fetch_payload_q.raw_instruction;
         fetch_q.is_compressed             = fetch_payload_q.is_compressed;
         fetch_q.valid                     = fetch_valid_q;
         fetch_lookahead_q.pc              = fetch_lookahead_payload_q.pc;
+        fetch_lookahead_q.access_fault    = fetch_lookahead_payload_q.access_fault;
+        fetch_lookahead_q.fault_boundary  = fetch_lookahead_payload_q.fault_boundary;
         fetch_lookahead_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
         fetch_lookahead_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
         fetch_lookahead_q.valid           = fetch_lookahead_valid_q;
@@ -706,7 +769,11 @@ module Core #(
             fetch_cross_line  = fetch_parcel_q[1];
         }
 
-        decode_packet.pc                = fetch_q.pc;
+        decode_packet.pc = fetch_q.pc;
+
+        decode_packet.access_fault = fetch_q.access_fault;
+
+        decode_packet.fault_boundary    = fetch_q.fault_boundary;
         decode_packet.instruction       = fetch_q.raw_instruction;
         decode_packet.raw_instruction   = fetch_q.raw_instruction;
         decode_packet.is_compressed     = fetch_q.is_compressed;
@@ -823,6 +890,14 @@ module Core #(
         execute_bus.operand_a = alu_operand_a;
         execute_bus.operand_b = alu_operand_b;
         lsu_address           = alu_operand_a[31:0] + alu_operand_b[31:0];
+        if STRICT_MEMORY {
+            lsu_address = execute_bus.arithmetic;
+        }
+        lsu_access_size = ex_load_size_q;
+        if ex_is_store_q {
+            lsu_access_size = ex_store_size_q;
+        }
+        lsu_access_fault = STRICT_MEMORY && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
         if ex_bypass_q.store_data {
             execute_store_data = bypass_data;
         } else {
@@ -835,7 +910,8 @@ module Core #(
         } else {
             csr_source = alu_operand_a;
         }
-        ex_exception = ex_valid_q && (ex_illegal_q || ex_is_ecall_q || ex_is_ebreak_q);
+        ex_exception = ex_valid_q
+            && (ex_illegal_q || ex_is_ecall_q || ex_is_ebreak_q || (STRICT_MEMORY && ex_fetch_fault_q));
         if ex_is_ecall_q {
             ex_exception_cause = 64'd11;
         } else if ex_is_ebreak_q {
@@ -847,6 +923,16 @@ module Core #(
             ex_exception_value = {32'h0000_0000, ex_raw_instr_q};
         } else {
             ex_exception_value = 64'd0;
+        }
+        if STRICT_MEMORY && ex_fetch_fault_q {
+            ex_exception_cause = 64'd1;
+            ex_exception_value = ex_pc_q;
+            if ex_fault_boundary_q {
+                ex_exception_value = 64'h0000_0000_0000_1000;
+                if ex_pc_q[31] {
+                    ex_exception_value = 64'h0000_0000_8003_f000;
+                }
+            }
         }
         // Dynamic prediction keeps its EX direction result. Static prediction
         // finishes the reduction from the same registered compare slices as
@@ -929,7 +1015,7 @@ module Core #(
             }
         }
         if ex_bypass_q.redirect {
-            redirect_addend_a = bypass_data[31:0];
+            redirect_addend_a = bypass_data;
         } else {
             redirect_addend_a = ex_redirect_base_q;
         }
@@ -945,9 +1031,15 @@ module Core #(
         } else {
             redirect_high = redirect_high_c0;
         }
-        redirect_sum = {redirect_high[15:0], redirect_low[15:0]};
+        redirect_upper_c0 = redirect_addend_a[63:32] + ex_redirect_offset_q[63:32];
+        redirect_upper_c1 = redirect_upper_c0 + 32'd1;
+        redirect_upper    = redirect_upper_c0;
+        if redirect_high[16] {
+            redirect_upper = redirect_upper_c1;
+        }
+        redirect_sum = {redirect_upper, redirect_high[15:0], redirect_low[15:0]};
         if ex_redirect_clear_lsb_q {
-            ex_redirect_target = redirect_sum & 32'hffff_fffe;
+            ex_redirect_target = redirect_sum & 64'hffff_ffff_ffff_fffe;
         } else {
             ex_redirect_target = redirect_sum;
         }
@@ -1188,7 +1280,10 @@ module Core #(
             predictor_recover_taken       = predictor_recover_q.taken;
             predictor_recover_fallthrough = predictor_recover_q.fallthrough;
         }
-        predictor_discard_all = interrupt_event
+        // A data access fault is first registered in CM. It has not performed
+        // the earlier EX exception discard, so retire neither its token nor
+        // any younger prediction, and reset the speculative queue here.
+        predictor_discard_all = interrupt_event || (STRICT_MEMORY && cm_trap_event)
             || (!backend_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
                 && (ex_exception || ex_system_barrier));
 
@@ -1346,7 +1441,7 @@ module Core #(
             // waits and architectural flushes. Do not repeat those predicates
             // in a priority mux on the late instruction-valid -> PC path.
             if !backend_wait && redirect_pending_q {
-                fetch_line_q   = pending_redirect_target[31:3];
+                fetch_line_q   = pending_redirect_target[ADDRESS_BITS - 1:3];
                 fetch_parcel_q = pending_redirect_target[2:1];
             } else if predictor_frontend_redirect && !predictor_wait {
                 fetch_line_q   = predictor_response_next_pc[31:3];
@@ -1387,10 +1482,14 @@ module Core #(
         if fetch_payload_write {
             if fetch_lookahead_valid_q {
                 fetch_payload_q.pc              = fetch_lookahead_payload_q.pc;
+                fetch_payload_q.access_fault    = fetch_lookahead_payload_q.access_fault;
+                fetch_payload_q.fault_boundary  = fetch_lookahead_payload_q.fault_boundary;
                 fetch_payload_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
                 fetch_payload_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
             } else {
                 fetch_payload_q.pc              = fetch_packet.pc;
+                fetch_payload_q.access_fault    = fetch_packet.access_fault;
+                fetch_payload_q.fault_boundary  = fetch_packet.fault_boundary;
                 fetch_payload_q.raw_instruction = fetch_packet.raw_instruction;
                 fetch_payload_q.is_compressed   = fetch_packet.is_compressed;
             }
@@ -1399,16 +1498,22 @@ module Core #(
         if fetch_lookahead_write {
             if fetch_tail_valid_q {
                 fetch_lookahead_payload_q.pc              = fetch_tail_payload_q.pc;
+                fetch_lookahead_payload_q.access_fault    = fetch_tail_payload_q.access_fault;
+                fetch_lookahead_payload_q.fault_boundary  = fetch_tail_payload_q.fault_boundary;
                 fetch_lookahead_payload_q.raw_instruction = fetch_tail_payload_q.raw_instruction;
                 fetch_lookahead_payload_q.is_compressed   = fetch_tail_payload_q.is_compressed;
             } else {
                 fetch_lookahead_payload_q.pc              = fetch_packet.pc;
+                fetch_lookahead_payload_q.access_fault    = fetch_packet.access_fault;
+                fetch_lookahead_payload_q.fault_boundary  = fetch_packet.fault_boundary;
                 fetch_lookahead_payload_q.raw_instruction = fetch_packet.raw_instruction;
                 fetch_lookahead_payload_q.is_compressed   = fetch_packet.is_compressed;
             }
         }
         if fetch_tail_write {
             fetch_tail_payload_q.pc              = fetch_packet.pc;
+            fetch_tail_payload_q.access_fault    = fetch_packet.access_fault;
+            fetch_tail_payload_q.fault_boundary  = fetch_packet.fault_boundary;
             fetch_tail_payload_q.raw_instruction = fetch_packet.raw_instruction;
             fetch_tail_payload_q.is_compressed   = fetch_packet.is_compressed;
         }
@@ -1487,6 +1592,12 @@ module Core #(
             fd_q.predicted_taken   = 1'b0;
             fd_q.predicted_next_pc = 32'h0000_0004;
             fd_q.valid             = 1'b0;
+            fd_q.access_fault      = 1'b0;
+            fd_q.fault_boundary    = 1'b0;
+            rx_fetch_fault_q       = 1'b0;
+            rx_fault_boundary_q    = 1'b0;
+            ex_fetch_fault_q       = 1'b0;
+            ex_fault_boundary_q    = 1'b0;
 
             rx_valid_q             = 1'b0;
             rx_pc_q                = 64'h0000_0000_0000_0000;
@@ -1665,7 +1776,9 @@ module Core #(
                 redirect_event_delay_q = redirect_pending_q;
                 redirect_pending_q     = redirect_valid;
                 redirect_preserve_cm_q = redirect_preserve_cm;
-                redirect_flush_wb_q    = branch_redirect_valid;
+                // CM access faults can still have a younger EX follower.
+                // That follower must be discarded before it reaches WB.
+                redirect_flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event);
                 // Only a CM-owned pending redirect exposes this payload.
                 // Refresh it on every advancing cycle to keep the late
                 // redirect-valid decision out of a wide old-value mux.
@@ -1753,18 +1866,18 @@ module Core #(
                 cm_raw_instr_q      = ex_raw_instr_q;
                 cm_rd_q             = ex_rd_q;
                 cm_write_enable_q   = ex_write_enable_q;
-                cm_is_load_q        = ex_is_load_q;
+                cm_is_load_q        = ex_is_load_q && !ex_exception && !lsu_access_fault;
                 cm_load_size_q      = ex_load_size_q;
                 cm_load_unsigned_q  = ex_load_unsigned_q;
-                cm_is_store_q       = ex_is_store_q;
+                cm_is_store_q       = ex_is_store_q && !ex_exception && !lsu_access_fault;
                 // Only an older CM redirect makes the current EX memory
                 // instruction wrong-path.  A prediction-kind repair owned by
                 // this same load/store redirects younger fetch but must not
                 // suppress the architectural memory operation itself. Keeping
                 // ex_redirect_valid out of this CE also avoids routing the
                 // unrelated JALR target adder through the request token.
-                if ex_valid_q && (ex_is_load_q || ex_is_store_q) && !branch_redirect_valid && !cm_system_redirect
-                    && !redirect_pending_q {
+                if ex_valid_q && (ex_is_load_q || ex_is_store_q) && !ex_exception && !lsu_access_fault
+                    && !branch_redirect_valid && !cm_system_redirect && !redirect_pending_q {
                     data_request_sequence_q = !data_request_sequence_q;
                 }
                 cm_store_size_q   = ex_store_size_q;
@@ -1816,15 +1929,26 @@ module Core #(
                 if RELOCATE_LOW_DATA && !lsu_address[31] && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
                     cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
                 }
-                cm_lsu_wdata_q         = execute_store_data;
-                cm_is_csr_q            = ex_is_csr_q;
-                cm_csr_op_q            = ex_csr_op_q;
-                cm_csr_write_q         = ex_csr_write_q;
-                cm_csr_index_q         = ex_csr_index_q;
-                cm_csr_source_q        = csr_source;
-                cm_exception_q         = ex_exception;
-                cm_exception_cause_q   = ex_exception_cause;
-                cm_exception_value_q   = ex_exception_value;
+                cm_lsu_wdata_q       = execute_store_data;
+                cm_is_csr_q          = ex_is_csr_q;
+                cm_csr_op_q          = ex_csr_op_q;
+                cm_csr_write_q       = ex_csr_write_q;
+                cm_csr_index_q       = ex_csr_index_q;
+                cm_csr_source_q      = csr_source;
+                cm_exception_q       = ex_exception;
+                cm_exception_cause_q = ex_exception_cause;
+                cm_exception_value_q = ex_exception_value;
+                // Check the full effective address before issuing the token.
+                // A data fault enters CM directly; it does not put the address
+                // adder/permission reduction onto EX's frontend flush fanout.
+                if lsu_access_fault && !ex_exception {
+                    cm_exception_q       = 1'b1;
+                    cm_exception_cause_q = 64'd5;
+                    if ex_is_store_q {
+                        cm_exception_cause_q = 64'd7;
+                    }
+                    cm_exception_value_q = lsu_fault_address;
+                }
                 cm_is_mret_q           = ex_is_mret_q;
                 cm_is_fence_i_q        = ex_is_fence_i_q;
                 cm_control_kind_q      = ex_control_kind_q;
@@ -1878,6 +2002,8 @@ module Core #(
                 ex_is_mret_q             = rx_is_mret_q;
                 ex_is_fence_i_q          = rx_is_fence_i_q;
                 ex_illegal_q             = rx_illegal_q;
+                ex_fetch_fault_q         = rx_fetch_fault_q;
+                ex_fault_boundary_q      = rx_fault_boundary_q;
                 ex_control_kind_q        = rx_control_kind;
                 ex_prediction_token_q    = rx_prediction_token_q;
                 ex_predicted_kind_q      = rx_predicted_kind_q;
@@ -1905,11 +2031,11 @@ module Core #(
                 }
                 ex_store_data_q = forwarded_rs2;
                 if rx_is_jalr_q {
-                    ex_redirect_base_q = forwarded_rs1[31:0];
+                    ex_redirect_base_q = forwarded_rs1;
                 } else {
                     ex_redirect_base_q = rx_pc_q;
                 }
-                ex_redirect_offset_q    = rx_immediate_q[31:0];
+                ex_redirect_offset_q    = rx_immediate_q;
                 ex_redirect_clear_lsb_q = rx_is_jalr_q;
 
                 if redirect_pending_q {
@@ -1977,6 +2103,8 @@ module Core #(
                     rx_is_mret_q           = decode_bus.is_mret;
                     rx_is_fence_i_q        = decode_bus.is_fence_i;
                     rx_illegal_q           = decode_bus.illegal || fd_q.illegal;
+                    rx_fetch_fault_q       = fd_q.access_fault;
+                    rx_fault_boundary_q    = fd_q.fault_boundary;
                     rx_prediction_token_q  = fd_q.prediction_token;
                     rx_predicted_kind_q    = fd_q.predicted_kind;
                     rx_predicted_taken_q   = fd_q.predicted_taken;

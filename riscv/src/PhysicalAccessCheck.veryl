@@ -1,0 +1,57 @@
+/// Bounds for the single-hart BRAM/timer platform, before address truncation.
+/// RAM permits unaligned transfers, but every requested byte must fit in one
+/// mapped region. Timer accesses must be naturally aligned; emulating a split
+/// peripheral transfer is not supported. Instruction fetch never selects MMIO.
+module PhysicalAccessCheck #(
+    param ENABLE_TIMER: bit = 0,
+) (
+    address      : input  logic<64>,
+    size         : input  logic<2> ,
+    instruction  : input  logic    ,
+    allowed      : output logic    ,
+    crosses_bound: output logic    ,
+    fault_address: output logic<64>,
+) {
+    var boot_region : logic   ;
+    var ram_region  : logic   ;
+    var timer_region: logic   ;
+    var aligned     : logic   ;
+    var byte_last   : logic<3>;
+    var end_lane    : logic<4>;
+    var boot_cross  : logic   ;
+    var ram_cross   : logic   ;
+
+    always_comb {
+        boot_region  = address[63:12] == 52'd0;
+        ram_region   = (address[63:18] == 46'h0000_0000_2000) && (address[17:12] != 6'h3f);
+        timer_region = ENABLE_TIMER && !instruction && (address[63:16] == 48'h0000_0000_0200);
+        byte_last    = 3'd0;
+        aligned      = 1'b1;
+        case size {
+            2'd1: {
+                byte_last = 3'd1;
+                aligned   = address[0] == 1'b0;
+            }
+            2'd2: {
+                byte_last = 3'd3;
+                aligned   = address[1:0] == 2'd0;
+            }
+            2'd3: {
+                byte_last = 3'd7;
+                aligned   = address[2:0] == 3'd0;
+            }
+            default: {}
+        }
+        end_lane      = {1'b0, address[2:0]} + {1'b0, byte_last};
+        boot_cross    = boot_region && (address[11:3] == 9'h1ff) && end_lane[3];
+        ram_cross     = ram_region && (address[17:3] == 15'h7dff) && end_lane[3];
+        crosses_bound = boot_cross || ram_cross;
+        allowed       = ((boot_region || ram_region) && !crosses_bound) || (timer_region && aligned);
+        fault_address = address;
+        if boot_cross {
+            fault_address = 64'h0000_0000_0000_1000;
+        } else if ram_cross {
+            fault_address = 64'h0000_0000_8003_f000;
+        }
+    }
+}

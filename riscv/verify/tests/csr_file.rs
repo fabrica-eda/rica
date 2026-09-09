@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 
 const TEST_TOP: &str = r#"
-module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0) (
+module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0, param FULL_ADDRESS: bit = 0) (
     clk                 : input  clock    ,
     rst_n               : input  reset    ,
     index               : input  logic<5> ,
@@ -25,7 +25,7 @@ module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0) (
     counter_freeze      : input  logic    ,
     debug_counter_index : input  logic<4> ,
     trap_enter          : input  logic    ,
-    trap_pc             : input  logic<32>,
+    trap_pc             : input  logic<64>,
     trap_cause          : input  logic<64>,
     trap_value          : input  logic<64>,
     mret                : input  logic    ,
@@ -33,12 +33,12 @@ module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0) (
     interrupt_pending   : output logic,
     interrupt_cause     : output logic<4>,
     read_data           : output logic<64>,
-    trap_vector         : output logic<32>,
-    return_pc           : output logic<32>,
+    trap_vector         : output logic<64>,
+    return_pc           : output logic<64>,
     debug_counter_data  : output logic<64>,
 ) {
     inst csr_bus : CsrBus;
-    inst csr_file: CsrFile #(ENABLE_INTERRUPTS: ENABLE_INTERRUPTS) (
+    inst csr_file: CsrFile #(ENABLE_INTERRUPTS: ENABLE_INTERRUPTS, FULL_ADDRESS: FULL_ADDRESS) (
         clk  : clk    ,
         rst_n: rst_n  ,
         csr  : csr_bus,
@@ -109,6 +109,10 @@ impl CsrFileDriver {
     }
 
     fn with_backend(enabled: bool, mapped: bool) -> Self {
+        Self::with_address_backend(enabled, false, mapped)
+    }
+
+    fn with_address_backend(enabled: bool, full_address: bool, mapped: bool) -> Self {
         let riscv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -121,13 +125,14 @@ impl CsrFileDriver {
             TEST_TOP.to_owned(),
         ]
         .join("\n");
+        let source = source.replace(
+            "param FULL_ADDRESS: bit = 0",
+            &format!("param FULL_ADDRESS: bit = {}", u8::from(full_address)),
+        );
         let simulator = if mapped {
             let source = source.replace(
-                "module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0)",
-                &format!(
-                    "module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = {})",
-                    u8::from(enabled)
-                ),
+                "param ENABLE_INTERRUPTS: bit = 0",
+                &format!("param ENABLE_INTERRUPTS: bit = {}", u8::from(enabled)),
             );
             let rtl =
                 struo_frontend_veryl::analyze_and_lower(&source, "csr_test", "CsrFileTestTop")
@@ -237,6 +242,43 @@ impl CsrFileDriver {
         for name in PREDICTOR_EVENTS {
             self.set_u8(name, value);
         }
+    }
+}
+
+#[test]
+fn full_address_native_and_mapped_csrs_preserve_upper_bits_and_trap_priority() {
+    for mapped in [false, true] {
+        let mut driver = CsrFileDriver::with_address_backend(true, true, mapped);
+        for (index, bits, aligned) in [
+            (3, 0xffff_ffff_8000_123b, 0xffff_ffff_8000_1238),
+            (5, 0x0000_0001_8000_0123, 0x0000_0001_8000_0122),
+            (7, 0xfedc_ba98_7654_3210, 0xfedc_ba98_7654_3210),
+        ] {
+            driver.set_u8("index", index);
+            driver.set_u8("write_index", index);
+            driver.set_u8("write_enable", 1);
+            driver.set_u8("write_op", 0);
+            driver.set_u64("write_source", bits);
+            driver.tick();
+            driver.set_u8("write_enable", 0);
+            assert_eq!(driver.get("read_data"), aligned);
+        }
+        driver.set_u8("write_index", 5);
+        driver.set_u64("write_source", 0x4320);
+        driver.set_u8("write_enable", 1);
+        driver.set_u8("trap_enter", 1);
+        driver.set_u64("trap_pc", 0xffff_fffe_ffff_fffe);
+        driver.set_u64("trap_value", 0xffff_ffff_0000_0000);
+        driver.set_u64("trap_cause", 1);
+        driver.tick();
+        driver.set_u8("write_enable", 0);
+        driver.set_u8("trap_enter", 0);
+        driver.set_u8("index", 5);
+        assert_eq!(driver.get("read_data"), 0xffff_fffe_ffff_fffe);
+        assert_eq!(driver.get("return_pc"), 0xffff_fffe_ffff_fffe);
+        driver.set_u8("index", 7);
+        assert_eq!(driver.get("read_data"), 0xffff_ffff_0000_0000);
+        assert_eq!(driver.get("trap_vector"), 0xffff_ffff_8000_1238);
     }
 }
 

@@ -71,12 +71,12 @@ interface CsrBus {
     var debug_counter_index           : logic<4> ;
     var debug_counter_data            : logic<64>;
     var trap_enter                    : logic    ;
-    var trap_pc                       : logic<32>;
+    var trap_pc                       : logic<64>;
     var trap_cause                    : logic<64>;
     var trap_value                    : logic<64>;
     var mret                          : logic    ;
-    var trap_vector                   : logic<32>;
-    var return_pc                     : logic<32>;
+    var trap_vector                   : logic<64>;
+    var return_pc                     : logic<64>;
     var machine_interrupts            : logic<3> ;
     var interrupt_pending             : logic    ;
     var interrupt_cause               : logic<4> ;

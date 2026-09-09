@@ -1,0 +1,25 @@
+[package]
+name = "rica-kernel"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+publish = false
+
+# The host verification workspace must not build a bare-metal executable.
+[workspace]
+
+[features]
+access-faults = []
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = true
+codegen-units = 1
+debug = 1
+
+[[bin]]
+name = "rica-kernel"
+path = "src/main.rs"
+test = false
+bench = false

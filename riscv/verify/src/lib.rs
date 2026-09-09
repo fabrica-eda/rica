@@ -8,7 +8,7 @@ use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
 pub mod timed_memory;
 
-const CORE_SOURCES: [&str; 21] = [
+const CORE_SOURCES: [&str; 22] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -27,6 +27,7 @@ const CORE_SOURCES: [&str; 21] = [
     "ShiftUnit.veryl",
     "ShiftHighUnit.veryl",
     "CompletionUnit.veryl",
+    "PhysicalAccessCheck.veryl",
     "Core.veryl",
     "StaticBranchPredictor.veryl",
     "CompactBranchPredictor.veryl",

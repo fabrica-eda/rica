@@ -95,6 +95,53 @@ before exposing memory protection or Sv39. This map does not claim complete
 CLINT/ACLINT, PLIC, SBI, OpenSBI or Linux compatibility. A CSR `time` alias is not
 implemented; software reads MMIO MTIME and the frequency register.
 
+## Strict physical access configuration
+
+`HardwareCompactAccessFaultTestTop` additionally selects `STRICT_MEMORY=1`.
+The qualified interrupt image described above keeps the original setting until
+the new image completes its own timing and hardware qualification.
+
+| Architectural range (inclusive) | Data | Fetch |
+| --- | --- | --- |
+| 0x0000_0000–0x0000_0fff | Read/write reset RAM | Execute |
+| 0x8000_0000–0x8003_efff | Read/write main RAM | Execute |
+| 0x0200_0000–0x0200_ffff | Timer, naturally aligned transfers | Access fault |
+| Everything else, including any nonzero upper 32 bits | Access fault | Access fault |
+
+This is a platform access-type/bounds check, not PMP or page translation. Every
+byte of a RAM transfer must fit in its region; otherwise no memory request is
+issued and no part of a store is written. Unaligned RAM transfers within a region
+remain supported. Unaligned timer transfers raise access faults (5 for loads,
+7 for stores); a handler must not emulate them as several peripheral accesses.
+Reserved aligned timer slots retain their zero/ignored behavior.
+
+Strict mode keeps architectural PC, control targets, MEPC and MTVAL at 64 bits.
+MTVEC retains all upper bits and forces direct mode; MEPC clears only bit zero.
+Access faults report causes 1/5/7. MTVAL is the original inaccessible address,
+or the first inaccessible byte when a transfer crosses a region boundary.
+For a 32-bit instruction at 0x8003_effe, MEPC is 0x8003_effe and MTVAL is
+0x8003_f000; a 16-bit instruction there can retire before the next fetch faults.
+A jump to an inaccessible target still retires its link; the fetch at that
+target owns the exception. Invalid fetched bytes cannot become illegal-opcode
+exceptions, execute MMIO or override an older exception/branch repair.
+
+Fetch faults travel with their queued instruction, so wrong-path prefetches do
+not trap. The instruction-memory interface returns an inert line for an unmapped
+32-bit request, allowing boundary fetches to complete. The core performs the
+64-bit check before accepting the instruction. Data validation precedes the
+request token, and CM drains an older request before taking the exception.
+CM fault recovery discards speculative predictor entries and younger WB state.
+The memory backend still receives relocated physical BRAM addresses; its private
+ports and the stopped debug loader are not architectural CPU accesses.
+
+Predictor tags/targets and physical memory ports remain 32 bits because permitted
+execution is in the physical regions above. Sv39 will require translation and a
+new predictor tag/target policy in addition to this full-width trap state.
+The optional configuration and its evidence are tracked in the
+[access-fault measurement directory](../toolchain/measurements/2026-09-10-rv64-access-faults/).
+These exception-value and unsupported unaligned-MMIO choices follow
+[Machine ISA 1.13](https://docs.riscv.org/reference/isa/v20260120/priv/machine.html).
+
 ## Reproduce functional tests
 
 Build the two self-checking programs with:

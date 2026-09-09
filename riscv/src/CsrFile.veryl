@@ -8,28 +8,30 @@ module CsrFile #(
     param ENABLE_M         : bit = 0,
     param ENABLE_B         : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
+    param FULL_ADDRESS     : bit = 0,
 ) (
     clk  : input   clock       ,
     rst_n: input   reset       ,
     csr  : modport CsrBus::file,
 ) {
-    // This core has a 32-bit physical address space.
+    const ADDRESS_BITS: u32 = 32 + 32 * (FULL_ADDRESS as u32);
+    // Physical execution remains bounded; full-width state retains bad addresses.
     // Keep only implemented WARL/WLRL fields in flops; CSR reads expand them
     // to XLEN. This avoids routing 64-bit write muxes to mostly constant state.
     // {MPP[1:0], MPIE, MIE}
-    var mstatus_q         : logic<4> ;
-    var mtvec_q           : logic<30>;
-    var mscratch_q        : logic<64>;
-    var mepc_q            : logic<31>;
-    var mcause_q          : logic<4> ;
-    var mcause_interrupt_q: logic    ;
-    var mie_q             : logic<3> ;
-    var interrupt_enabled : logic<3> ;
-    var mie_read          : logic<64>;
-    var mip_read          : logic<64>;
-    var mtval_q           : logic<32>;
-    var mcycle_value      : logic<64>;
-    var minstret_value    : logic<64>;
+    var mstatus_q         : logic<4>               ;
+    var mtvec_q           : logic<ADDRESS_BITS - 2>;
+    var mscratch_q        : logic<64>              ;
+    var mepc_q            : logic<ADDRESS_BITS - 1>;
+    var mcause_q          : logic<4>               ;
+    var mcause_interrupt_q: logic                  ;
+    var mie_q             : logic<3>               ;
+    var interrupt_enabled : logic<3>               ;
+    var mie_read          : logic<64>              ;
+    var mip_read          : logic<64>              ;
+    var mtval_q           : logic<ADDRESS_BITS>    ;
+    var mcycle_value      : logic<64>              ;
+    var minstret_value    : logic<64>              ;
 
     // The two custom machine CSRs at 0x7c0/0x7c1 select and access one of nine
     // implementation-defined event counters without consuming nine entries
@@ -249,9 +251,9 @@ module CsrFile #(
 
         if csr.index[0] {
             csr_mux_level0[0] = mstatus_read_value;
-            csr_mux_level0[1] = {32'd0, mtvec_q, 2'b00};
-            csr_mux_level0[2] = {32'd0, mepc_q, 1'b0};
-            csr_mux_level0[3] = {32'd0, mtval_q};
+            csr_mux_level0[1] = {mtvec_q, 2'b00};
+            csr_mux_level0[2] = {mepc_q, 1'b0};
+            csr_mux_level0[3] = mtval_q;
             csr_mux_level0[4] = 64'd0;
             csr_mux_level0[5] = 64'd0;
             csr_mux_level0[6] = minstret_value;
@@ -466,11 +468,11 @@ module CsrFile #(
             mtvec_q = 30'd0;
         } else if csr.write_enable && (csr.write_index == 4'd3) && (csr.write_op != 2'd3) {
             if csr.write_op == 2'd0 {
-                mtvec_q = csr.write_source[31:2];
+                mtvec_q = csr.write_source[ADDRESS_BITS - 1:2];
             } else if csr.write_op == 2'd1 {
-                mtvec_q = mtvec_q | csr.write_source[31:2];
+                mtvec_q = mtvec_q | csr.write_source[ADDRESS_BITS - 1:2];
             } else {
-                mtvec_q = mtvec_q & ~csr.write_source[31:2];
+                mtvec_q = mtvec_q & ~csr.write_source[ADDRESS_BITS - 1:2];
             }
         }
     }
@@ -494,13 +496,13 @@ module CsrFile #(
             mepc_q = 31'd0;
         } else if csr.trap_enter || (csr.write_enable && (csr.write_index == 4'd5) && (csr.write_op != 2'd3)) {
             if csr.trap_enter {
-                mepc_q = csr.trap_pc[31:1];
+                mepc_q = csr.trap_pc[ADDRESS_BITS - 1:1];
             } else if csr.write_op == 2'd0 {
-                mepc_q = csr.write_source[31:1];
+                mepc_q = csr.write_source[ADDRESS_BITS - 1:1];
             } else if csr.write_op == 2'd1 {
-                mepc_q = mepc_q | csr.write_source[31:1];
+                mepc_q = mepc_q | csr.write_source[ADDRESS_BITS - 1:1];
             } else {
-                mepc_q = mepc_q & ~csr.write_source[31:1];
+                mepc_q = mepc_q & ~csr.write_source[ADDRESS_BITS - 1:1];
             }
         }
     }
@@ -526,13 +528,13 @@ module CsrFile #(
             mtval_q = 32'd0;
         } else if csr.trap_enter || (csr.write_enable && (csr.write_index == 4'd7) && (csr.write_op != 2'd3)) {
             if csr.trap_enter {
-                mtval_q = csr.trap_value[31:0];
+                mtval_q = csr.trap_value[ADDRESS_BITS - 1:0];
             } else if csr.write_op == 2'd0 {
-                mtval_q = csr.write_source[31:0];
+                mtval_q = csr.write_source[ADDRESS_BITS - 1:0];
             } else if csr.write_op == 2'd1 {
-                mtval_q = mtval_q | csr.write_source[31:0];
+                mtval_q = mtval_q | csr.write_source[ADDRESS_BITS - 1:0];
             } else {
-                mtval_q = mtval_q & ~csr.write_source[31:0];
+                mtval_q = mtval_q & ~csr.write_source[ADDRESS_BITS - 1:0];
             }
         }
     }

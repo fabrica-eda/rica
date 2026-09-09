@@ -53,6 +53,7 @@ pub struct ExecutionConfig<'a> {
     pub early_taken_fetch: bool,
     pub early_divide: bool,
     pub machine_interrupts: bool,
+    pub strict_memory: bool,
     pub trace: Option<TraceConfig<'a>>,
 }
 
@@ -152,6 +153,7 @@ pub fn run(
         .param("EARLY_TAKEN_FETCH", u64::from(execution.early_taken_fetch))
         .param("EARLY_DIVIDE", u64::from(execution.early_divide))
         .param("ENABLE_INTERRUPTS", u64::from(execution.machine_interrupts))
+        .param("STRICT_MEMORY", u64::from(execution.strict_memory))
         .build()?;
     let reset = sim.signal("rst_n");
     let run = sim.signal("run");

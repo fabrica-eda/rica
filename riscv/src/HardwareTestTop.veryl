@@ -17,6 +17,7 @@ module HardwareTestTop #(
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
+    param STRICT_MEMORY    : bit = 0,
 ) (
     clk        : input  'reference clock             ,
     clk_cpu    : input  'cpu       clock             ,
@@ -164,8 +165,9 @@ module HardwareTestTop #(
     var core_machine_interrupts  : 'cpu    logic<3>;
     unsafe (cdc) {
         inst hardware_memory: HardwareMemory #(
-            ENABLE_TIMER: ENABLE_INTERRUPTS,
-            FAST_LSU    : FAST_LSU         ,
+            STRICT_MEMORY: STRICT_MEMORY    ,
+            ENABLE_TIMER : ENABLE_INTERRUPTS,
+            FAST_LSU     : FAST_LSU         ,
         ) (
             clk                        : clk_mem                       ,
             rst_n                      : debug_rst_n                   ,
@@ -223,6 +225,7 @@ module HardwareTestTop #(
     }
 
     inst core: Core #(
+        STRICT_MEMORY          : STRICT_MEMORY         ,
         ENABLE_INTERRUPTS      : ENABLE_INTERRUPTS     ,
         ENABLE_ZBA             : ENABLE_ZBA            ,
         ENABLE_ZBB             : ENABLE_ZBB            ,
