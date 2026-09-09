@@ -55,6 +55,17 @@ in the [measurement directory](../../toolchain/measurements/2026-09-10-rv64-acce
 
 ## Run in the CPU/memory model
 
+Use one command for the CPU/kernel development loop:
+
+```sh
+python3 riscv/kernel/check.py
+```
+
+It builds and audits both kernels, builds the repository's model runner, and
+runs both serialized clock orders plus simultaneous CPU/memory edges. Reports,
+input hashes and logs are written to `riscv/build/rust-kernel/check.json` and
+`check-*.log`. This checks the current RTL; physical qualification is separate.
+
 From the repository root:
 
 ```sh
