@@ -2462,6 +2462,11 @@ fn access_jalr_upper_carry_and_borrow_survive_forwarding_and_memory_waits() {
             (0x1234_5678_0000_0009, -16),
             (0xffff_ffff_ffff_ff80, 512),
             (0x0000_0000_0000_0241, -64),
+            // Invalid fetches whose speculative successor crosses bit 32 or
+            // wraps XLEN still trap at the complete original target.
+            (0x0000_0000_ffff_fffe, 0),
+            (0xffff_ffff_ffff_fff8, 0),
+            (0xffff_ffff_ffff_ffff, 0),
         ] {
             for wait_for_store in [false, true] {
                 let target = base.wrapping_add_signed(i64::from(offset)) & !1;

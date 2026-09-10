@@ -248,8 +248,6 @@ module Core #(
     var ex_early_bitmanip       : logic                     ;
     var rx_early_bitmanip       : logic                     ;
     var cm_compare_less_q       : logic<4>                  ;
-    var cm_branch_less32_q      : logic<2>                  ;
-    var cm_branch_upper_equal_q : logic                     ;
     var cm_compare_sign_a_q     : logic                     ;
     var cm_compare_sign_b_q     : logic                     ;
     var cm_compare_signed_q     : logic                     ;
@@ -1106,10 +1104,7 @@ module Core #(
         cm_compare_unsigned = cm_compare_less_q[3] || (cm_branch_equal_q[3] && cm_compare_less_q[2])
             || (cm_branch_equal_q[3] && cm_branch_equal_q[2]
                 && (cm_compare_less_q[1] || (cm_branch_equal_q[1] && cm_compare_less_q[0])));
-        if STRICT_MEMORY && ((BRANCH_PREDICTOR_CONFIG & 8) != 0) {
-            cm_compare_unsigned = cm_branch_less32_q[1] || (cm_branch_upper_equal_q && cm_branch_less32_q[0]);
-        }
-        cm_compare_result = cm_compare_unsigned;
+        cm_compare_result   = cm_compare_unsigned;
         if cm_compare_signed_q && (cm_compare_sign_a_q != cm_compare_sign_b_q) {
             cm_compare_result = cm_compare_sign_a_q;
         }
@@ -1912,8 +1907,6 @@ module Core #(
             cm_use_shift_q           = 1'b0;
             cm_use_bitmanip_q        = 1'b0;
             cm_compare_less_q        = 4'b0000;
-            cm_branch_less32_q       = 2'd0;
-            cm_branch_upper_equal_q  = 1'b0;
             cm_compare_sign_a_q      = 1'b0;
             cm_compare_sign_b_q      = 1'b0;
             cm_compare_signed_q      = 1'b0;
@@ -2122,17 +2115,11 @@ module Core #(
                 } else {
                     cm_shift_amount_q = alu_operand_b[5:3];
                 }
-                cm_shift_arithmetic_q = ex_alu_op_q == 4'd8;
-                cm_use_logic_q        = (execute_bus.result_use_logic || ex_early_bitmanip) && !ex_is_csr_q;
-                cm_use_shift_q        = execute_bus.result_use_shift;
-                cm_use_bitmanip_q     = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
-                cm_compare_less_q     = execute_bus.compare_less;
-                // Resolve each 32-bit half at the EX/CM edge. The strict
-                // compact branch path then reduces three registered bits,
-                // before sign selection and redirect/request suppression.
-                cm_branch_less32_q[0]   = ex_compare_less_low;
-                cm_branch_less32_q[1]   = ex_compare_less_high;
-                cm_branch_upper_equal_q = execute_bus.compare_equal[3] && execute_bus.compare_equal[2];
+                cm_shift_arithmetic_q   = ex_alu_op_q == 4'd8;
+                cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip) && !ex_is_csr_q;
+                cm_use_shift_q          = execute_bus.result_use_shift;
+                cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
+                cm_compare_less_q       = execute_bus.compare_less;
                 cm_compare_sign_a_q     = execute_bus.compare_sign_a;
                 cm_compare_sign_b_q     = execute_bus.compare_sign_b;
                 cm_compare_signed_q     = ex_alu_op_q == 4'd9;
