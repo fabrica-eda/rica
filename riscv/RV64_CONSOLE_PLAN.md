@@ -1,6 +1,6 @@
 # USB/JTAGコンソールとRust kernel
 
-2026-09-11。実装・検証中。認定済みCPUはaccess-fault版のまま。
+2026-09-11。実装済み、実機回帰中。既定のCPUイメージはaccess-fault版のまま。
 
 ECP5-EVNのUART配線は標準状態ではR34/R35が未実装なので、既存USB/JTAGを
 最初のホスト接続にする。根拠は[基板マニュアル6.2](https://www.latticesemi.com/view_document?document_id=52479)。
@@ -51,14 +51,16 @@ bit11=RX空きあり（同時CPU popを含む）、bits23:16=完了したcommand
 - `python3 riscv/kernel/check.py` は3 variantの計9実行に対応し、全件合格。
 
 計測・入力SHAは[2026-09-11の記録](../toolchain/measurements/2026-09-11-rv64-console/)。
-実機認定は配置配線・STA完了後に行う。trial 32時点ではsetup −32 ps／hold +90 ps、
-setup違反6件で未達。trial 20の−313 ps・98件から改善したが、コンソール版の
-bitstreamは生成・書込みしていない。LSUアドレス加算器→RAMの元の最悪経路を直し、
-その際に遅くなった周辺経路も修復してから全体のSTAで採否を決めるようにした。
-中間状態を実装として保存せず、最後に元の結果を改善した場合だけ採用する。
-bitmanipの違反は解消し、現在はLSU要求トークン・演算結果・fetch・例外値などの
-残る違反を、改善済み配置配線から詰めている。
+trial 33でsetup **+2 ps／hold +90 ps**、各19,690検査に合格した。
 条件は124.8/62.4 MHz、JTCK 6 MHz、setup/hold各200 ps予約のまま。
+配置配線・STAに探索変更を含まないツールでcheckpointをバイト単位で再現し、
+JTCKの各515検査も別構築グラフと一致した。元のchecked bitgenで生成した
+同一bitstreamを実機に書き込み、console kernelは3回とも686 byteのログがモデルと一致した。
+現在は既存238 ELFの実機回帰と反復性能測定を進めている。既定化は全検証の完了後に行う。
+
+配置配線では、LSUアドレス加算器→RAMの経路と、変更時に遅くなる周辺経路をまとめて修復し、
+全体のSTAで採否を決めるようにした。最終段階は局所配置6件・配線3件の改善で閉じた。
+探索中の悪化した中間状態は実装に採用していない。
 
 ## 順序と合格条件
 
