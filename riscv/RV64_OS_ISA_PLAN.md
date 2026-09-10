@@ -26,7 +26,7 @@ CPU 124.8 MHz、メモリ62.4 MHz、setup・hold各200 ps予約、実機326実�
 
 根拠は `src/Core.veryl`、`CsrFile.veryl`、`Decoder.veryl`、
 `PipelineInterfaces.veryl`、`HardwareMemory.veryl`。
-特に現行の32-bit PC/EPCのまま `satp` を追加してもSv39にはならない。
+特に認定済み構成の32-bit PC/EPCのまま `satp` を追加してもSv39にはならない。
 BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 
 開発中の `HardwareCompactAccessFaultTestTop` は `STRICT_MEMORY=1` を追加し、
@@ -36,45 +36,33 @@ BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 3回実機確認した。範囲外load/store、64-bit fetch先、RAM末尾の命令境界から復帰する
 kernel variantを、新しいCPU構成の試験に用いる。
 
-アドレス検査と割り込み受理の更新は、CPU試験60件と238 ELF×2通りのclock順序で合格した。
-Rust kernelは `python3 riscv/kernel/check.py` でCPUモデルと一緒に検証できる。
-通常診断35本の命令数・サイクル数は基準と一致している。
-その後、転送元ごとの範囲検査、メモリポート用アドレスの領域タグ再利用、
-演算結果の選択条件の前段保持、実行結果レジスタのenableを整理した。
-全workspace 242件、厳密構成476実行、無効構成468実行、Rust kernelの6実行に合格した。
-JTAG経由のnative board試験では終了storeを含む命令数の凍結と、clear後の再実行も確認した。
-さらにloadの幅・符号拡張を既存のCPU応答レジスタの手前へ移す試作を追加した。
-この変更も238 ELF×2通りで合格し、通常診断35本とRust kernelのサイクル数を維持した。
-続いて分岐予測先との比較を16 bitごとに保持し、CMで結果をまとめる構成を試作した。
-CPU試験60件、厳密構成476実行、無効構成468実行に合格し、分岐回復とkernelのサイクル数を維持した。
-除算の剰余ゼロ判定を保持し、アドレス末尾の境界判定から追加の加算器を除いた。
-さらにZbaの加算前処理を選ぶ3 bitをRX→EXで保持した。最新の組合せはCPU・整数演算試験75件、
-厳密構成476実行、無効構成468実行に合格し、通常診断35本とkernelのサイクル数を維持した。
-末尾オフセットを13 bitで前段保持し、開始・末尾のページを並行検査する試作も同じ回帰に合格した。
-境界判定のnative／mapped 706,848ケースに加え、CPUのfault試験を即値−2048／−1／0／2047へ広げた。
-その後のALU16と追加転送レジスタの試作は、配置配線結果が悪化したため採用しない。
-現在はALU32と従来の末尾境界判定を使い、既存の結果レジスタを転送と共有し、
-64-bit JALRの上位加算を既存EX/CM境界で分ける案を検証中。
-CPU試験61件（上位桁上がり・借り下がり・待機を含む48組を追加）、476/468実行、
-通常35診断とkernelの同一カウンタ値を確認した。物理タイミングの改善とは区別する。
-未使用の論理結果を待機中も更新できるようにし、分岐比較の32 bit部分結果をEX/CMで
-保持する試作も同じ回帰に合格したが、比較の分割はSTAが悪化したため採用しない。
-mstatus/mie/mip書込みの停止条件をRX側で分類する試作も、61件・476/468実行と
-通常診断/kernelのカウンタ値を維持したがSTAは未達。候補ページの許可を先に計算する案と、
-除算の65 bit減算を32＋33 bitへ分ける案も機能・サイクル数を維持したが、STAが改善せず採用しない。
-順次PC計算を短くする案もCPU 61件（JALR境界・waitの66組）、476/468実行と
-通常35診断・kernelの同一カウンタ値を確認したが、STAが改善せず採用しない。
-順次PCを元の64 bit演算へ戻し、data access fault時だけ1 cycleを加えて
-64-bit MTVALを確定する案も検証した。通常のload/storeに待ちは加えず、
-元base・符号付きoffset・境界情報を保持する。全幅の許可検査は要求発行前に行う。
-CPU 61件、通常35診断の同一カウンタ値とRust tasksの同一サイクル数を確認した。
-fault kernelは92,237 cycles／31,949 instructionsで、基準比+2 cycles、命令数差0だったが、
-STAは−2,895 psで採用しない。現在は追加サイクルのない `free-logic` へ戻し、境界試験を維持した。
-CPU側の細分化だけでは改善が安定しないため、最良チェックポイントのRTLを固定し、
-最悪slackから250 ps以内の経路も局所配置の候補に含める探索を追加している。
-配置候補の受理条件・STAモデル・予約値は変えない。
-新構成の124.8 MHz STAはまだ未達で、認定済みimageの置き換えは行っていない。
-[実装・検証と配置配線の記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
+現在のCPUソースは、通常のload/storeやfaultに追加サイクルを入れず、
+64-bit PC・転送先・例外値を保持する `free-logic` 構成。
+ALUは32 bitごとのcarry selectを使い、JALR上位加算を既存のEX/CM境界で分け、
+待機中に使わない論理結果レジスタのenableを除いた。
+CPU試験61件（64-bit JALR境界・待機の66組を含む）、厳密構成476実行、
+無効構成468実行が合格し、通常診断35本の命令数・サイクル数も基準と一致する。
+Rust kernelの同時edgeモデルはtasksが86,653 cycles／30,725 instructions、
+access-faultsが92,235 cycles／31,949 instructions。
+現在の37 RTLファイルと既存の機能検証記録の一致、新しい境界試験の結果は
+[free-logic-return-validation.json](../toolchain/measurements/2026-09-10-rv64-access-faults/free-logic-return-validation.json)
+に保存している。これは新bitstreamの実機認定ではない。
+
+**新構成の124.8 MHz STAは未達。** 現在のCPUソースの最良結果はsetup −882 ps、
+別の `target-slices` 構成の最良結果は−508 psで、いずれもholdは+90 ps。
+CPU 124.8 MHz／メモリ62.4 MHzとsetup・hold各200 ps予約を維持し、
+認定済みimageの置き換えは行っていない。
+
+ページ許可の並行化、除算減算器の分割、順次PC計算の短縮、fault時だけの待機追加は、
+機能検証後のSTAが悪化したため採用しない。RTLを細分化するだけでは配置配線後の改善が
+安定しないため、最良のRTLを固定して配置探索を改善している。
+最悪slackから250 ps以内の経路も候補に含める試作は6回の配置改善を受理し、
+setup違反端点を411から405へ減らしたが、最悪slackは−508 psのままだった。
+次に、互換性のある配置単位を丸ごと交換できる候補を追加した。
+固定配置・共有資源・carry chainの制約を確認する試験を含め、配置器217件が合格した。
+この候補の配線後STAを測定し、改善がなければ採用しない。
+配置候補の受理条件、STAモデル、予約値は変更しない。
+[実装・検証と配置配線の全記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
 
 ## 実装順と合格条件
 
