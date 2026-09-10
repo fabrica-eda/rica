@@ -2451,6 +2451,78 @@ fn access_pc_relative_jump_and_jalr_carry_keep_full_rv64_target() {
 }
 
 #[test]
+fn access_jalr_upper_carry_and_borrow_survive_forwarding_and_memory_waits() {
+    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+        for (base, offset) in [
+            (0x0000_0000_ffff_fff8_u64, 16_i32),
+            (0x0000_0001_0000_0008, -16),
+            (0x0000_0001_0000_0800, -2048),
+            (0x0000_0000_ffff_f801, 2047),
+            (0x1234_5678_ffff_fff9, 16),
+            (0x1234_5678_0000_0009, -16),
+            (0xffff_ffff_ffff_ff80, 512),
+            (0x0000_0000_0000_0241, -64),
+        ] {
+            for wait_for_store in [false, true] {
+                let target = base.wrapping_add_signed(i64::from(offset)) & !1;
+                let accessible = target < 0x1000;
+                let mut program = access_program();
+                let mut pc = 8;
+                append_constant(&mut program, &mut pc, 2, base);
+                if wait_for_store {
+                    program.insert(pc, encode_sd(2, 0, 0x300));
+                    pc += 4;
+                }
+                program.insert(
+                    pc,
+                    ((offset as u32) & 0xfff) << 20 | 2 << 15 | 31 << 7 | 0x67,
+                );
+                if accessible {
+                    program.insert(target as u32, encode_addi(30, 0, 77));
+                    program.insert(target as u32 + 4, encode_jal(0, 0));
+                }
+                let mut driver = CoreDriver::with_config(program, config);
+                let mut waits = 0;
+                let mut links = 0;
+                let mut done = false;
+                for _ in 0..400 {
+                    let cycle = driver.step();
+                    if cycle.memory_wait {
+                        waits += 1;
+                        if waits >= 12 {
+                            driver.acknowledge_data_request();
+                        }
+                    }
+                    if cycle.commit_valid && cycle.commit_pc == pc {
+                        links += 1;
+                        assert_eq!(cycle.commit_data, u64::from(pc + 4));
+                    }
+                    if cycle.commit_valid {
+                        if accessible && u64::from(cycle.commit_pc) == target {
+                            assert_eq!(cycle.commit_data, 77);
+                            done = true;
+                            break;
+                        }
+                        if !accessible && cycle.commit_pc == 0x408 {
+                            assert_eq!(driver.csr_value("mcause_q"), 1);
+                            assert_eq!(driver.csr_value("mepc_q") << 1, target);
+                            assert_eq!(driver.csr_value("mtval_q"), target);
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(
+                    done && links == 1,
+                    "config={config} base={base:016x} offset={offset} store={wait_for_store}"
+                );
+                assert_eq!(waits >= 12, wait_for_store);
+            }
+        }
+    }
+}
+
+#[test]
 fn access_wrong_path_faults_and_boundary_prefetch_have_no_architectural_effect() {
     for config in [ACCESS_CONFIG, 98_432, 98_436] {
         for store in [false, true] {

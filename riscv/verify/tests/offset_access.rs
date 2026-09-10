@@ -72,7 +72,6 @@ fn native_and_mapped_offset_permissions_match_bytewise_effective_addresses() {
         for mut sim in [native, mapped] {
             let a = sim.signal("base");
             let o = sim.signal("offset");
-            let e = sim.signal("end_offset");
             let s = sim.signal("size");
             let out = sim.signal("allowed");
             let boot = sim.signal("boot_boundary");
@@ -99,7 +98,6 @@ fn native_and_mapped_offset_permissions_match_bytewise_effective_addresses() {
                     sim.modify(|io| {
                         io.set(a, base);
                         io.set(o, (offset as u16) & 0xfff);
-                        io.set(e, ((offset + (1_i64 << size) - 1) as u16) & 0x1fff);
                         io.set(s, size);
                     })
                     .unwrap();

@@ -103,3 +103,18 @@ module ExecuteUnit #(
                 || (ENABLE_ZBA && (execute.alu_op == 6'd16)));
     }
 }
+
+/// Match a redirect's upper word without waiting for its upper carry chain.
+/// Redirect immediates are sign-extended from at most 21 bits, so their upper
+/// word is zero or all ones. carry is the unsigned carry from the lower word.
+module RedirectUpperZero (
+    upper    : input  logic<32>,
+    decrement: input  logic    ,
+    carry    : input  logic    ,
+    is_zero  : output logic    ,
+) {
+    always_comb {
+        is_zero = ((upper == 32'd0) && (decrement == carry)) || ((upper == 32'hffff_ffff) && !decrement && carry)
+            || ((upper == 32'd1) && decrement && !carry);
+    }
+}

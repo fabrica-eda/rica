@@ -222,3 +222,66 @@ fn zba_enable_and_neighboring_encodings_have_exact_legality() {
         }
     }
 }
+
+#[test]
+fn native_and_mapped_redirect_upper_zero_match_wrapping_integer_arithmetic() {
+    let source = source();
+    let native = SimulatorBuilder::new(&source, "RedirectUpperZero")
+        .build_native()
+        .unwrap();
+    let rtl = struo_frontend_veryl::analyze_and_lower(
+        &source,
+        "redirect_upper_test",
+        "RedirectUpperZero",
+    )
+    .unwrap();
+    let mapped = struo_target_ecp5::map_to_ecp5_with_options(
+        &struo_synth::synthesize(&rtl).unwrap().netlist,
+        struo_target_ecp5::MappingOptions {
+            timing_goal_mhz: 175,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mapped = struo_celox::ecp5_simulator(&mapped)
+        .unwrap()
+        .build_native()
+        .unwrap();
+    let mut words = vec![0_u32, 1, 2, u32::MAX, u32::MAX - 1];
+    for bit in 0..32 {
+        words.extend([1_u32 << bit, u32::MAX ^ (1_u32 << bit), 1 | (1_u32 << bit)]);
+    }
+    let mut random = 0x6572_7063_u32;
+    for _ in 0..1024 {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        words.push(random);
+    }
+    for mut sim in [native, mapped] {
+        let upper = sim.signal("upper");
+        let decrement = sim.signal("decrement");
+        let carry = sim.signal("carry");
+        for &word in &words {
+            for negative in [false, true] {
+                for carry_in in [false, true] {
+                    sim.modify(|io| {
+                        io.set(upper, word);
+                        io.set(decrement, u8::from(negative));
+                        io.set(carry, u8::from(carry_in));
+                    })
+                    .unwrap();
+                    let expected = word
+                        .wrapping_add_signed(if negative { -1 } else { 0 })
+                        .wrapping_add(u32::from(carry_in))
+                        == 0;
+                    assert_eq!(
+                        value(&mut sim, "is_zero") != 0,
+                        expected,
+                        "upper={word:08x} negative={negative} carry={carry_in}"
+                    );
+                }
+            }
+        }
+    }
+}

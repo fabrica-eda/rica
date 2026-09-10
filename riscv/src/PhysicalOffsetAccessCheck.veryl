@@ -1,12 +1,10 @@
-/// Data permissions from a base and signed start/end offsets.
-/// end_offset must equal sign-extended offset + (1 << size) - 1. The caller
-/// prepares it before EX, so both possible page carries are evaluated in parallel.
+/// Data permissions from a base and the implemented signed 12-bit immediate.
+/// Decode the three possible 4 KiB pages in parallel with the low address sum.
 module PhysicalOffsetAccessCheck #(
     param ENABLE_TIMER: bit = 0,
 ) (
     base         : input  logic<64>,
     offset       : input  logic<12>,
-    end_offset   : input  logic<13>,
     size         : input  logic<2> ,
     allowed      : output logic    ,
     boot_boundary: output logic    ,
@@ -14,31 +12,33 @@ module PhysicalOffsetAccessCheck #(
     boot_region  : output logic    ,
     timer_region : output logic    ,
 ) {
-    var low_sum       : logic<13>;
-    var end_sum       : logic<13>;
-    var last_boot     : logic    ;
-    var last_ram      : logic    ;
-    var boot_current  : logic    ;
-    var boot_next     : logic    ;
-    var boot_previous : logic    ;
-    var ram_current   : logic    ;
-    var ram_next      : logic    ;
-    var ram_previous  : logic    ;
-    var timer_current : logic    ;
-    var timer_next    : logic    ;
-    var timer_previous: logic    ;
-    var ram           : logic    ;
-    var boot          : logic    ;
-    var timer         : logic    ;
-    var aligned       : logic    ;
-    var upper_zero    : logic    ;
-    var wrapped_boot  : logic    ;
-    var boot_crossing : logic    ;
-    var ram_crossing  : logic    ;
+    var low_sum          : logic<13>;
+    var boot_current     : logic    ;
+    var boot_next        : logic    ;
+    var boot_previous    : logic    ;
+    var ram_current      : logic    ;
+    var ram_next         : logic    ;
+    var ram_previous     : logic    ;
+    var end_current      : logic    ;
+    var end_next         : logic    ;
+    var end_previous     : logic    ;
+    var timer_current    : logic    ;
+    var timer_next       : logic    ;
+    var timer_previous   : logic    ;
+    var ram              : logic    ;
+    var boot             : logic    ;
+    var end_page         : logic    ;
+    var timer            : logic    ;
+    var aligned          : logic    ;
+    var end_lane_crossing: logic    ;
+    var crossing         : logic    ;
+    var upper_zero       : logic    ;
+    var wrapped_boot     : logic    ;
+    var boot_crossing    : logic    ;
+    var ram_crossing     : logic    ;
 
     always_comb {
         low_sum = {1'b0, base[11:0]} + {1'b0, offset};
-        end_sum = {1'b0, base[11:0]} + {1'b0, end_offset[11:0]};
         // Keep the common upper-address check parallel to region selection.
         // No implemented region is near the 32-bit boundary. The only valid
         // nonzero-upper base is immediately below zero in XLEN arithmetic;
@@ -51,44 +51,52 @@ module PhysicalOffsetAccessCheck #(
         ram_current    = (base[31:18] == 14'h2000) && (base[17:12] != 6'h3f);
         ram_next       = ((base[31:18] == 14'h2000) && (base[17:12] <= 6'h3d)) || (base[31:12] == 20'h7_ffff);
         ram_previous   = (base[31:18] == 14'h2000) && (base[17:12] != 6'd0);
+        end_current    = base[31:12] == 20'h8_003e;
+        end_next       = base[31:12] == 20'h8_003d;
+        end_previous   = base[31:12] == 20'h8_003f;
         timer_current  = ENABLE_TIMER && (base[31:16] == 16'h0200);
         timer_next     = ENABLE_TIMER
             && (((base[31:16] == 16'h0200) && (base[15:12] != 4'hf)) || (base[31:12] == 20'h1fff));
         timer_previous = ENABLE_TIMER
             && (((base[31:16] == 16'h0200) && (base[15:12] != 4'd0)) || (base[31:12] == 20'h2010));
 
-        boot  = boot_current;
-        ram   = ram_current;
-        timer = timer_current;
+        boot     = boot_current;
+        ram      = ram_current;
+        end_page = end_current;
+        timer    = timer_current;
         if !offset[11] && low_sum[12] {
-            boot  = boot_next;
-            ram   = ram_next;
-            timer = timer_next;
+            boot     = boot_next;
+            ram      = ram_next;
+            end_page = end_next;
+            timer    = timer_next;
         } else if offset[11] && !low_sum[12] {
-            boot  = boot_previous;
-            ram   = ram_previous;
-            timer = timer_previous;
+            boot     = boot_previous;
+            ram      = ram_previous;
+            end_page = end_previous;
+            timer    = timer_previous;
         }
-        // A 13-bit signed end offset also represents 2047 + 7. Its
-        // carry selects the same three pages independently of low_sum.
-        last_boot = boot_current;
-        last_ram  = ram_current;
-        if !end_offset[12] && end_sum[12] {
-            last_boot = boot_next;
-            last_ram  = ram_next;
-        } else if end_offset[12] && !end_sum[12] {
-            last_boot = boot_previous;
-            last_ram  = ram_previous;
-        }
-        aligned = 1'b1;
+        end_lane_crossing = 1'b0;
+        aligned           = 1'b1;
         case size {
-            2'd1   : aligned = low_sum[0] == 1'b0;
-            2'd2   : aligned = low_sum[1:0] == 2'd0;
-            2'd3   : aligned = low_sum[2:0] == 3'd0;
+            2'd1: {
+                end_lane_crossing = low_sum[2:0] == 3'd7;
+                aligned           = low_sum[0] == 1'b0;
+            }
+            2'd2: {
+                end_lane_crossing = low_sum[2] && (low_sum[1] || low_sum[0]);
+                aligned           = low_sum[1:0] == 2'd0;
+            }
+            2'd3: {
+                end_lane_crossing = low_sum[2:0] != 3'd0;
+                aligned           = low_sum[2:0] == 3'd0;
+            }
             default: {}
         }
-        boot_crossing = boot && !last_boot;
-        ram_crossing  = ram && !last_ram;
+        // Decode the last-byte carry directly. Do not chain another adder
+        // after the base-plus-offset sum on the request permission path.
+        crossing      = (low_sum[11:3] == 9'h1ff) && end_lane_crossing;
+        boot_crossing = boot && crossing;
+        ram_crossing  = end_page && crossing;
         boot_boundary = upper_zero && boot_crossing;
         ram_boundary  = upper_zero && ram_crossing;
         boot_region   = wrapped_boot || (upper_zero && boot);
