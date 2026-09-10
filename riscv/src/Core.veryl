@@ -61,7 +61,8 @@ module Core #(
     // Strict physical memory retains full architectural PC/trap values while
     // admitting execution only in the platform RAM/reset regions. The predictor
     // still indexes physical PCs; invalid full-width targets become fetch faults.
-    const ADDRESS_BITS: u32 = 32 + 32 * (STRICT_MEMORY as u32);
+    const ADDRESS_BITS       : u32 = 32 + 32 * (STRICT_MEMORY as u32);
+    const TARGET_MATCH_SLICES: u32 = ADDRESS_BITS / 16;
     // FetchPayload is the registered boundary after instruction-line selection;
     // FetchPacket adds the separately registered occupancy bit to its view.
     // DecodePacket keeps the original encoding beside its canonical RV64I form:
@@ -213,64 +214,64 @@ module Core #(
     }
     var ex_bypass_q: BypassState;
 
-    var cm_valid_q              : logic              ;
-    var cm_pc_q                 : logic<ADDRESS_BITS>;
-    var cm_raw_instr_q          : logic<32>          ;
-    var cm_rd_q                 : logic<5>           ;
-    var cm_write_enable_q       : logic              ;
-    var cm_is_load_q            : logic              ;
-    var cm_load_size_q          : logic<2>           ;
-    var cm_load_unsigned_q      : logic              ;
-    var cm_is_store_q           : logic              ;
-    var cm_store_size_q         : logic<2>           ;
-    var cm_is_branch_q          : logic              ;
-    var cm_branch_taken_q       : logic              ;
-    var cm_linear_match_q       : logic              ;
-    var ex_kind_match_q         : logic              ;
-    var cm_taken_match_q        : logic              ;
-    var cm_untaken_match_q      : logic              ;
-    var cm_branch_op_q          : logic<3>           ;
-    var cm_control_fallthrough_q: logic              ;
-    var cm_branch_equal_q       : logic<4>           ;
-    var cm_redirect_target_q    : logic<ADDRESS_BITS>;
-    var cm_arithmetic_q         : logic<64>          ;
-    var cm_shift_low_q          : logic<64>          ;
-    var cm_shift_amount_q       : logic<3>           ;
-    var cm_shift_arithmetic_q   : logic              ;
-    var cm_logic_result_q       : logic<64>          ;
-    var cm_use_logic_q          : logic              ;
-    var cm_use_shift_q          : logic              ;
-    var cm_use_bitmanip_q       : logic              ;
-    var bitmanip_result         : logic<64>          ;
-    var early_bitmanip_result   : logic<64>          ;
-    var ex_early_bitmanip       : logic              ;
-    var rx_early_bitmanip       : logic              ;
-    var cm_compare_less_q       : logic<4>           ;
-    var cm_compare_sign_a_q     : logic              ;
-    var cm_compare_sign_b_q     : logic              ;
-    var cm_compare_signed_q     : logic              ;
-    var cm_use_compare_q        : logic              ;
-    var cm_shift_left_q         : logic              ;
-    var cm_shift_word_q         : logic              ;
-    var cm_lsu_address_q        : logic<ADDRESS_BITS>;
-    var cm_lsu_memory_address_q : logic<32>          ;
-    var cm_lsu_wdata_q          : logic<64>          ;
-    var cm_is_csr_q             : logic              ;
-    var cm_csr_op_q             : logic<2>           ;
-    var cm_csr_write_q          : logic              ;
-    var cm_csr_index_q          : logic<5>           ;
-    var cm_csr_source_q         : logic<64>          ;
-    var cm_exception_q          : logic              ;
-    var cm_exception_cause_q    : logic<64>          ;
-    var cm_exception_value_q    : logic<64>          ;
-    var cm_is_mret_q            : logic              ;
-    var cm_is_fence_i_q         : logic              ;
-    var cm_prediction_token_q   : logic<3>           ;
-    var cm_predicted_kind_q     : logic<3>           ;
-    var cm_predicted_taken_q    : logic              ;
-    var cm_predicted_next_pc_q  : logic<32>          ;
-    var cm_fallthrough_pc_q     : logic<ADDRESS_BITS>;
-    var cm_control_kind_q       : logic<3>           ;
+    var cm_valid_q              : logic                     ;
+    var cm_pc_q                 : logic<ADDRESS_BITS>       ;
+    var cm_raw_instr_q          : logic<32>                 ;
+    var cm_rd_q                 : logic<5>                  ;
+    var cm_write_enable_q       : logic                     ;
+    var cm_is_load_q            : logic                     ;
+    var cm_load_size_q          : logic<2>                  ;
+    var cm_load_unsigned_q      : logic                     ;
+    var cm_is_store_q           : logic                     ;
+    var cm_store_size_q         : logic<2>                  ;
+    var cm_is_branch_q          : logic                     ;
+    var cm_branch_taken_q       : logic                     ;
+    var cm_linear_match_q       : logic<TARGET_MATCH_SLICES>;
+    var ex_kind_match_q         : logic                     ;
+    var cm_taken_match_q        : logic<TARGET_MATCH_SLICES>;
+    var cm_untaken_match_q      : logic                     ;
+    var cm_branch_op_q          : logic<3>                  ;
+    var cm_control_fallthrough_q: logic                     ;
+    var cm_branch_equal_q       : logic<4>                  ;
+    var cm_redirect_target_q    : logic<ADDRESS_BITS>       ;
+    var cm_arithmetic_q         : logic<64>                 ;
+    var cm_shift_low_q          : logic<64>                 ;
+    var cm_shift_amount_q       : logic<3>                  ;
+    var cm_shift_arithmetic_q   : logic                     ;
+    var cm_logic_result_q       : logic<64>                 ;
+    var cm_use_logic_q          : logic                     ;
+    var cm_use_shift_q          : logic                     ;
+    var cm_use_bitmanip_q       : logic                     ;
+    var bitmanip_result         : logic<64>                 ;
+    var early_bitmanip_result   : logic<64>                 ;
+    var ex_early_bitmanip       : logic                     ;
+    var rx_early_bitmanip       : logic                     ;
+    var cm_compare_less_q       : logic<4>                  ;
+    var cm_compare_sign_a_q     : logic                     ;
+    var cm_compare_sign_b_q     : logic                     ;
+    var cm_compare_signed_q     : logic                     ;
+    var cm_use_compare_q        : logic                     ;
+    var cm_shift_left_q         : logic                     ;
+    var cm_shift_word_q         : logic                     ;
+    var cm_lsu_address_q        : logic<ADDRESS_BITS>       ;
+    var cm_lsu_memory_address_q : logic<32>                 ;
+    var cm_lsu_wdata_q          : logic<64>                 ;
+    var cm_is_csr_q             : logic                     ;
+    var cm_csr_op_q             : logic<2>                  ;
+    var cm_csr_write_q          : logic                     ;
+    var cm_csr_index_q          : logic<5>                  ;
+    var cm_csr_source_q         : logic<64>                 ;
+    var cm_exception_q          : logic                     ;
+    var cm_exception_cause_q    : logic<64>                 ;
+    var cm_exception_value_q    : logic<64>                 ;
+    var cm_is_mret_q            : logic                     ;
+    var cm_is_fence_i_q         : logic                     ;
+    var cm_prediction_token_q   : logic<3>                  ;
+    var cm_predicted_kind_q     : logic<3>                  ;
+    var cm_predicted_taken_q    : logic                     ;
+    var cm_predicted_next_pc_q  : logic<32>                 ;
+    var cm_fallthrough_pc_q     : logic<ADDRESS_BITS>       ;
+    var cm_control_kind_q       : logic<3>                  ;
 
     var wb_valid_q       : logic              ;
     var wb_pc_q          : logic<ADDRESS_BITS>;
@@ -323,6 +324,7 @@ module Core #(
     var branch_redirect_valid   : logic                  ;
     var redirect_valid          : logic                  ;
     var ex_redirect_target      : logic<ADDRESS_BITS>    ;
+    var ex_predicted_address    : logic<ADDRESS_BITS>    ;
     var redirect_target         : logic<ADDRESS_BITS>    ;
     var redirect_pending_q      : logic                  ;
     var redirect_preserve_cm    : logic                  ;
@@ -1135,7 +1137,8 @@ module Core #(
         } else {
             ex_redirect_target = redirect_sum;
         }
-        ex_actual_next_pc = ex_fallthrough_pc_q;
+        ex_predicted_address = ex_predicted_next_pc_q;
+        ex_actual_next_pc    = ex_fallthrough_pc_q;
         if ex_link_q {
             ex_actual_next_pc = ex_redirect_target;
         }
@@ -1180,7 +1183,8 @@ module Core #(
         }
         if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
             cm_prediction_mismatch = cm_valid_q && !cm_exception_q && !cm_is_mret_q && !cm_is_fence_i_q
-                && ((!cm_is_branch_q && !cm_linear_match_q) || (cm_is_branch_q && cm_branch_taken && !cm_taken_match_q)
+                && ((!cm_is_branch_q && !(&cm_linear_match_q))
+                    || (cm_is_branch_q && cm_branch_taken && !(&cm_taken_match_q))
                     || (cm_is_branch_q && !cm_branch_taken && !cm_untaken_match_q));
         }
         ex_redirect_valid     = ex_prediction_mismatch;
@@ -2012,18 +2016,23 @@ module Core #(
                 cm_control_fallthrough_q = ex_control_fallthrough_q;
                 cm_branch_equal_q        = execute_bus.compare_equal;
                 cm_redirect_target_q     = ex_redirect_target;
-                // Register each complete path match before CM chooses direction.
+                // Keep the late JALR sum local to 16-bit comparisons in EX.
+                // CM reduces their registered matches while choosing direction,
+                // at the same recovery edge as before.
                 cm_taken_match_q   = 1'b0;
                 cm_untaken_match_q = 1'b0;
                 cm_linear_match_q  = 1'b0;
                 if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
-                    cm_taken_match_q   = ex_kind_match_q && ex_predicted_taken_q
-                        && (ex_predicted_next_pc_q == ex_redirect_target);
+                    for i in 0..TARGET_MATCH_SLICES {
+                        cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q
+                            && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]);
+                        cm_linear_match_q[i] = ex_kind_match_q
+                            && ((ex_link_q && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]))
+                                || (!ex_link_q
+                                    && (ex_predicted_address[i * 16+:16] == ex_fallthrough_pc_q[i * 16+:16])));
+                    }
                     cm_untaken_match_q = ex_kind_match_q && !ex_predicted_taken_q
                         && (ex_predicted_next_pc_q == ex_fallthrough_pc_q);
-                    cm_linear_match_q  = ex_kind_match_q
-                        && ((ex_link_q && (ex_predicted_next_pc_q == ex_redirect_target))
-                            || (!ex_link_q && (ex_predicted_next_pc_q == ex_fallthrough_pc_q)));
                 }
                 cm_shift_low_q = execute_bus.shift_result;
                 if ex_word_op_q {

@@ -45,6 +45,8 @@ Rust kernelは `python3 riscv/kernel/check.py` でCPUモデルと一緒に検証
 JTAG経由のnative board試験では終了storeを含む命令数の凍結と、clear後の再実行も確認した。
 さらにloadの幅・符号拡張を既存のCPU応答レジスタの手前へ移す試作を追加した。
 この変更も238 ELF×2通りで合格し、通常診断35本とRust kernelのサイクル数を維持した。
+続いて分岐予測先との比較を16 bitごとに保持し、CMで結果をまとめる構成を試作した。
+CPU試験60件、厳密構成476実行、無効構成468実行に合格し、分岐回復とkernelのサイクル数を維持した。
 新構成の124.8 MHz STAはまだ未達で、認定済みimageの置き換えは行っていない。
 [実装・検証と配置配線の記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
 

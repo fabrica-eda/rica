@@ -151,6 +151,12 @@ applies the same byte/halfword/word extension used by the raw Core interface;
 the registered return can then enter forwarding without another width/sign
 selection. This moves logic across the existing boundary without adding a
 load wait cycle. The direct Core interface still accepts raw load data by default.
+
+Compact prediction recovery registers each 16-bit target comparison separately
+and reduces those matches in CM, at the existing recovery edge. This separates
+the late dependent JALR sum from the full-width equality reduction. Predictions
+remain physical 32-bit targets, explicitly zero-extended for the comparison;
+every architectural target bit participates, including invalid upper bits.
 The qualified interrupt bitstream predates this timing refinement.
 
 Predictor tags/targets and physical memory ports remain 32 bits because permitted
