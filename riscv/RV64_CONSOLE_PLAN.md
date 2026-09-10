@@ -1,6 +1,7 @@
 # USB/JTAGコンソールとRust kernel
 
-2026-09-11。実装済み、実機回帰中。既定のCPUイメージはaccess-fault版のまま。
+2026-09-11。実装・実機認定済み。既定は `HardwareCompactConsoleTestTop` の
+`riscv-hardware-compact-console-124p8-20260911.bit`。
 
 ECP5-EVNのUART配線は標準状態ではR34/R35が未実装なので、既存USB/JTAGを
 最初のホスト接続にする。根拠は[基板マニュアル6.2](https://www.latticesemi.com/view_document?document_id=52479)。
@@ -56,7 +57,11 @@ trial 33でsetup **+2 ps／hold +90 ps**、各19,690検査に合格した。
 配置配線・STAに探索変更を含まないツールでcheckpointをバイト単位で再現し、
 JTCKの各515検査も別構築グラフと一致した。元のchecked bitgenで生成した
 同一bitstreamを実機に書き込み、console kernelは3回とも686 byteのログがモデルと一致した。
-現在は既存238 ELFの実機回帰と反復性能測定を進めている。既定化は全検証の完了後に行う。
+既存238 ELFと反復78回、console kernel 3回の計319実行が合格した。
+既定化・ホスト再ビルド後の8実行も合格し、同一bitstreamで計327実行を確認した。
+固定処理35本は同一ELF・同一命令数で、従来実機・同時edgeモデルとの差は最大1 cycle。
+[認定記録](../toolchain/measurements/2026-09-11-rv64-console/qualification.json)・
+[IPCと設定クロック](../toolchain/measurements/2026-09-11-rv64-console/PERFORMANCE.md)。
 
 配置配線では、LSUアドレス加算器→RAMの経路と、変更時に遅くなる周辺経路をまとめて修復し、
 全体のSTAで採否を決めるようにした。最終段階は局所配置6件・配線3件の改善で閉じた。

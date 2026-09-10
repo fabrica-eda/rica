@@ -81,19 +81,17 @@ target/release/verify-riscv --hardware-memory-rtl \
   riscv/build/rust-kernel/kernel-access-faults.elf
 ```
 
-Add `--timed-clocks` for atomic coincident CPU/memory edges. Both ELFs now pass
-three hardware runs on the qualified **124.8 MHz** strict-memory image,
-`HardwareCompactAccessFaultTestTop`. Tasks retires **30,725 instructions in
-86,653 cycles** in every run; access-faults retires **31,949 instructions in
-92,234 / 92,235 / 92,235 cycles**, recovering from all eight faults before
+Add `--timed-clocks` for atomic coincident CPU/memory edges. Both exact legacy
+ELFs pass three hardware runs on the qualified **124.8 MHz** console image,
+`HardwareCompactConsoleTestTop`. Tasks retires **30,725 instructions in
+86,652 / 86,653 / 86,653 cycles**; access-faults retires **31,949 instructions
+in 92,235 cycles** in all three runs, recovering from all eight faults before
 completing both tasks. The medians match the current simultaneous-edge model.
-The previous interrupt image ran the same task ELF in 86,644 cycles; this
-comparison includes the revised interrupt-claim behavior. Timer-driven run
-lengths are integration measurements, not fixed-work IPC benchmarks.
+Timer-driven run lengths are integration measurements, not fixed-work IPC benchmarks.
 
 The hardware runner defaults to
-`build/riscv-hardware-compact-access-faults-124p8-20260910.bit`.
-See the [qualification and counters](../../toolchain/measurements/2026-09-10-rv64-access-faults/PERFORMANCE.md).
+`build/riscv-hardware-compact-console-124p8-20260911.bit`.
+See the [qualification and counters](../../toolchain/measurements/2026-09-11-rv64-console/PERFORMANCE.md).
 
 ## Live console
 
@@ -110,12 +108,19 @@ checks all eight 64-bit fault records plus the final success messages.
 `--machine-console` enables the device without this kernel-specific host protocol,
 for regression of ordinary ELFs on the new platform.
 
-The physical runner supports `--kernel-console --xvc 127.0.0.1:3721` with the
-console ELF and an explicitly selected, qualified console bitstream. It streams
-logs while the CPU runs and drains remaining output after `tohost` freezes the
-counters. A disconnected host applies backpressure; console waiting time is
-included in those counters. Compare CPU performance using the unchanged plain
-ELFs, not the host-dependent console run.
+The console kernel passes three runs on the same qualified bitstream, producing
+exactly the model's 686-byte transcript and receiving `ping\n` through MEI.
+Run it on the default image with:
+
+```sh
+target/release/hardware-riscv-tests --kernel-console --xvc 127.0.0.1:3721 \
+  riscv/build/rust-kernel/kernel-console.elf
+```
+
+The runner streams logs while the CPU runs and drains remaining output after
+`tohost` freezes the counters. A disconnected host applies backpressure;
+console waiting time is included in those counters. Compare CPU performance
+using the unchanged plain ELFs, not the host-dependent console run.
 
 The next CPU/kernel pairs are A plus atomics, U/PMP plus syscall and isolation,
 then S/Sv39 plus page tables and process switching. See the
