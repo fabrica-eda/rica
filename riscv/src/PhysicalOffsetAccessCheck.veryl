@@ -9,6 +9,8 @@ module PhysicalOffsetAccessCheck #(
     allowed      : output logic    ,
     boot_boundary: output logic    ,
     ram_boundary : output logic    ,
+    boot_region  : output logic    ,
+    timer_region : output logic    ,
 ) {
     var low_sum       : logic<13>;
     var boot_current  : logic    ;
@@ -31,23 +33,33 @@ module PhysicalOffsetAccessCheck #(
     var byte_last     : logic<3> ;
     var end_lane      : logic<4> ;
     var crossing      : logic    ;
+    var upper_zero    : logic    ;
+    var wrapped_boot  : logic    ;
+    var boot_crossing : logic    ;
+    var ram_crossing  : logic    ;
 
     always_comb {
-        low_sum        = {1'b0, base[11:0]} + {1'b0, offset};
-        boot_current   = base[63:12] == 52'd0;
-        boot_next      = base[63:12] == 52'hf_ffff_ffff_ffff;
-        boot_previous  = base[63:12] == 52'd1;
-        ram_current    = (base[63:18] == 46'h2000) && (base[17:12] != 6'h3f);
-        ram_next       = ((base[63:18] == 46'h2000) && (base[17:12] <= 6'h3d)) || (base[63:12] == 52'h7_ffff);
-        ram_previous   = (base[63:18] == 46'h2000) && (base[17:12] != 6'd0);
-        end_current    = base[63:12] == 52'h8_003e;
-        end_next       = base[63:12] == 52'h8_003d;
-        end_previous   = base[63:12] == 52'h8_003f;
-        timer_current  = ENABLE_TIMER && (base[63:16] == 48'h0200);
+        low_sum = {1'b0, base[11:0]} + {1'b0, offset};
+        // Keep the common upper-address check parallel to region selection.
+        // No implemented region is near the 32-bit boundary. The only valid
+        // nonzero-upper base is immediately below zero in XLEN arithmetic;
+        // a positive 12-bit offset can wrap it into the first 2047 boot bytes.
+        upper_zero     = base[63:32] == 32'd0;
+        wrapped_boot   = (base[63:32] == 32'hffff_ffff) && (base[31:12] == 20'hfffff) && !offset[11] && low_sum[12];
+        boot_current   = base[31:12] == 20'd0;
+        boot_next      = 1'b0;
+        boot_previous  = base[31:12] == 20'd1;
+        ram_current    = (base[31:18] == 14'h2000) && (base[17:12] != 6'h3f);
+        ram_next       = ((base[31:18] == 14'h2000) && (base[17:12] <= 6'h3d)) || (base[31:12] == 20'h7_ffff);
+        ram_previous   = (base[31:18] == 14'h2000) && (base[17:12] != 6'd0);
+        end_current    = base[31:12] == 20'h8_003e;
+        end_next       = base[31:12] == 20'h8_003d;
+        end_previous   = base[31:12] == 20'h8_003f;
+        timer_current  = ENABLE_TIMER && (base[31:16] == 16'h0200);
         timer_next     = ENABLE_TIMER
-            && (((base[63:16] == 48'h0200) && (base[15:12] != 4'hf)) || (base[63:12] == 52'h1fff));
+            && (((base[31:16] == 16'h0200) && (base[15:12] != 4'hf)) || (base[31:12] == 20'h1fff));
         timer_previous = ENABLE_TIMER
-            && (((base[63:16] == 48'h0200) && (base[15:12] != 4'd0)) || (base[63:12] == 52'h2010));
+            && (((base[31:16] == 16'h0200) && (base[15:12] != 4'd0)) || (base[31:12] == 20'h2010));
 
         boot     = boot_current;
         ram      = ram_current;
@@ -83,8 +95,13 @@ module PhysicalOffsetAccessCheck #(
         }
         end_lane      = {1'b0, low_sum[2:0]} + {1'b0, byte_last};
         crossing      = (low_sum[11:3] == 9'h1ff) && end_lane[3];
-        boot_boundary = boot && crossing;
-        ram_boundary  = end_page && crossing;
-        allowed       = ((boot || ram) && !(boot_boundary || ram_boundary)) || (timer && aligned);
+        boot_crossing = boot && crossing;
+        ram_crossing  = end_page && crossing;
+        boot_boundary = upper_zero && boot_crossing;
+        ram_boundary  = upper_zero && ram_crossing;
+        boot_region   = wrapped_boot || (upper_zero && boot);
+        timer_region  = upper_zero && timer;
+        allowed       = wrapped_boot
+            || (upper_zero && (((boot || ram) && !(boot_crossing || ram_crossing)) || (timer && aligned)));
     }
 }

@@ -76,6 +76,8 @@ fn native_and_mapped_offset_permissions_match_bytewise_effective_addresses() {
             let out = sim.signal("allowed");
             let boot = sim.signal("boot_boundary");
             let ram = sim.signal("ram_boundary");
+            let boot_region = sim.signal("boot_region");
+            let timer_region = sim.signal("timer_region");
             let sparse = bases.iter().flat_map(|&base| {
                 [-2048_i64, -17, -8, -1, 0, 1, 7, 16, 2047]
                     .into_iter()
@@ -100,7 +102,8 @@ fn native_and_mapped_offset_permissions_match_bytewise_effective_addresses() {
                     })
                     .unwrap();
                     let actual = sim.get(out).to_u64_digits().first().copied().unwrap_or(0) != 0;
-                    let expected = expected(base.wrapping_add_signed(offset), size, timer);
+                    let address = base.wrapping_add_signed(offset);
+                    let expected = expected(address, size, timer);
                     let boot_boundary =
                         sim.get(boot).to_u64_digits().first().copied().unwrap_or(0) != 0;
                     let ram_boundary =
@@ -113,6 +116,27 @@ fn native_and_mapped_offset_permissions_match_bytewise_effective_addresses() {
                             expected.1 == Some(0x8003_f000)
                         ),
                         "base={base:016x} offset={offset} size={size} timer={timer}"
+                    );
+                    assert_eq!(
+                        (
+                            sim.get(boot_region)
+                                .to_u64_digits()
+                                .first()
+                                .copied()
+                                .unwrap_or(0)
+                                != 0,
+                            sim.get(timer_region)
+                                .to_u64_digits()
+                                .first()
+                                .copied()
+                                .unwrap_or(0)
+                                != 0,
+                        ),
+                        (
+                            address < 0x1000,
+                            timer && (0x0200_0000..0x0201_0000).contains(&address),
+                        ),
+                        "region: base={base:016x} offset={offset} size={size} timer={timer}"
                     );
                 }
             }

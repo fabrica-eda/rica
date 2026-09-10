@@ -56,6 +56,9 @@ module HardwareTestTop #(
     var tohost_address_q    : 'cpu logic          <32>;
     var result_q            : 'cpu logic          <64>;
     var result_valid_q      : 'cpu logic              ;
+    var result_clear        : 'cpu logic              ;
+    var result_capture      : 'cpu logic              ;
+    var result_enable       : 'cpu logic              ;
     var command_error_q     : 'cpu logic              ;
     var last_sequence_q     : 'cpu logic          <8> ;
     var activity_q          : 'cpu logic          <24>;
@@ -289,8 +292,13 @@ module HardwareTestTop #(
     }
 
     always_comb {
-        cpu_rst_n     = debug_rst_n && run_q;
-        response_bank = 32'd0;
+        cpu_rst_n      = debug_rst_n && run_q;
+        result_clear   = command_valid && (command_frame_low[7:0] == 8'hd5) && (command_frame_low[11:8] == 4'd1)
+            && (command_frame_low[15:12] == 4'd3) && !write_busy_q && command_frame_low[57];
+        result_capture = run_q && data_we && (data_addr[31:0] == tohost_address_q)
+            && (data_response_sequence == data_request_sequence);
+        result_enable  = result_clear || result_capture;
+        response_bank  = 32'd0;
         case response_selector_q[7:5] {
             3'd0   : response_bank = {
                 last_sequence_q, 2'b00, command_error_q, write_busy_q || (memory_debug_write_q != 2'd0), halted,
@@ -349,12 +357,26 @@ module HardwareTestTop #(
         led[7] = !pll_locked;
     }
 
+    // An explicit enable lets the result bank use local register CEs instead
+    // of routing command decode through each feedback mux. Acknowledged stores
+    // take precedence over a simultaneous CONTROL clear, as before.
+    always_ff (clk_cpu, debug_rst_n) {
+        if_reset {
+            result_q       = 64'd0;
+            result_valid_q = 1'b0;
+        } else if result_enable {
+            result_q = data_wdata;
+            if !result_capture {
+                result_q = 64'd0;
+            }
+            result_valid_q = result_capture && (data_wdata != 64'd0);
+        }
+    }
+
     always_ff (clk_cpu, debug_rst_n) {
         if_reset {
             run_q                = 1'b0;
             tohost_address_q     = 32'h0000_0000;
-            result_q             = 64'h0000_0000_0000_0000;
-            result_valid_q       = 1'b0;
             command_error_q      = 1'b0;
             last_sequence_q      = 8'h00;
             response_selector_q  = 8'd0;
@@ -438,8 +460,6 @@ module HardwareTestTop #(
                                 run_q           = command_frame_low[56];
                                 last_sequence_q = command_frame_low[23:16];
                                 if command_frame_low[57] {
-                                    result_valid_q  = 1'b0;
-                                    result_q        = 64'h0000_0000_0000_0000;
                                     command_error_q = 1'b0;
                                 }
                             }
@@ -456,15 +476,6 @@ module HardwareTestTop #(
                 }
             }
 
-            // Capture only after the synchronous memory acknowledges the
-            // terminal store. The same edge is its CM retirement event, so
-            // the old result_valid still lets minstret include that store and
-            // memory-wait include every preceding wait cycle before freezing.
-            if run_q && data_we && (data_addr[31:0] == tohost_address_q)
-                && (data_response_sequence == data_request_sequence) {
-                result_q       = data_wdata;
-                result_valid_q = data_wdata != 64'h0000_0000_0000_0000;
-            }
         }
     }
 }

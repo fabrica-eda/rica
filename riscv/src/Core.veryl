@@ -351,6 +351,14 @@ module Core #(
     var lsu_access_allowed      : logic                  ;
     var lsu_boot_boundary       : logic                  ;
     var lsu_ram_boundary        : logic                  ;
+    var lsu_boot_region         : logic                  ;
+    var lsu_timer_region        : logic                  ;
+    var lsu_access_bases        : logic<64>           [3];
+    var lsu_allowed_candidates  : logic               [3];
+    var lsu_boot_candidates     : logic               [3];
+    var lsu_ram_candidates      : logic               [3];
+    var lsu_boot_regions        : logic               [3];
+    var lsu_timer_regions       : logic               [3];
     var lsu_fault_address       : logic<64>              ;
     var lsu_access_size         : logic<2>               ;
     var lsu_access_fault        : logic                  ;
@@ -562,9 +570,15 @@ module Core #(
 
     // Only shallow operations use the existing registered ALU forwarding path.
     // BEXT, min/max, rotates and counts still complete through CM and WB.
-    assign ex_early_bitmanip = EARLY_BITMANIP
-        && ((ENABLE_ZBB && (ex_alu_op_q[5:3] == 3'b100))
-            || (ENABLE_ZBS && (ex_alu_op_q[5:2] == 4'b1101) && (ex_alu_op_q[1] || !ex_alu_op_q[0])));
+    // Decode the forwarding class before EX so opcode comparisons do not
+    // precede its word-wide result select. It advances with ex_alu_op_q.
+    always_ff (clk, rst_n) {
+        if_reset {
+            ex_early_bitmanip = 1'b0;
+        } else if !backend_wait {
+            ex_early_bitmanip = rx_early_bitmanip;
+        }
+    }
     assign rx_early_bitmanip = EARLY_BITMANIP
         && ((ENABLE_ZBB && (rx_alu_op_q[5:3] == 3'b100))
             || (ENABLE_ZBS && (rx_alu_op_q[5:2] == 4'b1101) && (rx_alu_op_q[1] || !rx_alu_op_q[0])));
@@ -700,16 +714,20 @@ module Core #(
         crosses_bound: fetch_access_boundary,
         fault_address: fetch_fault_address  ,
     );
-    inst lsu_access: PhysicalOffsetAccessCheck #(
-        ENABLE_TIMER: ENABLE_INTERRUPTS,
-    ) (
-        base         : alu_operand_a             ,
-        offset       : ex_redirect_offset_q[11:0],
-        size         : lsu_access_size           ,
-        allowed      : lsu_access_allowed        ,
-        boot_boundary: lsu_boot_boundary         ,
-        ram_boundary : lsu_ram_boundary          ,
-    );
+    for source in 0..3 :g_lsu_access {
+        inst check: PhysicalOffsetAccessCheck #(
+            ENABLE_TIMER: ENABLE_INTERRUPTS,
+        ) (
+            base         : lsu_access_bases[source]      ,
+            offset       : ex_redirect_offset_q[11:0]    ,
+            size         : lsu_access_size               ,
+            allowed      : lsu_allowed_candidates[source],
+            boot_boundary: lsu_boot_candidates[source]   ,
+            ram_boundary : lsu_ram_candidates[source]    ,
+            boot_region  : lsu_boot_regions[source]      ,
+            timer_region : lsu_timer_regions[source]     ,
+        );
+    }
 
     always_comb {
         rf_write_enable  = wb_valid_q && wb_write_enable_q && (wb_rd_q != 5'd0);
@@ -930,6 +948,32 @@ module Core #(
         }
         // Classify the possible base pages while the low effective address
         // is added. Request/trap control need not wait for the upper sum.
+        // Evaluate each registered forwarding source independently. The late
+        // ALU/bypass selectors choose three permission bits instead of driving
+        // a 64-bit address mux followed by the entire permission reduction.
+        lsu_access_bases[0] = ex_operand_a_q;
+        lsu_access_bases[1] = cm_arithmetic_q;
+        lsu_access_bases[2] = cm_logic_result_q;
+        lsu_access_allowed  = lsu_allowed_candidates[0];
+        lsu_boot_boundary   = lsu_boot_candidates[0];
+        lsu_ram_boundary    = lsu_ram_candidates[0];
+        lsu_boot_region     = lsu_boot_regions[0];
+        lsu_timer_region    = lsu_timer_regions[0];
+        if ex_bypass_q.operand_a {
+            if cm_use_logic_q {
+                lsu_access_allowed = lsu_allowed_candidates[2];
+                lsu_boot_boundary  = lsu_boot_candidates[2];
+                lsu_ram_boundary   = lsu_ram_candidates[2];
+                lsu_boot_region    = lsu_boot_regions[2];
+                lsu_timer_region   = lsu_timer_regions[2];
+            } else {
+                lsu_access_allowed = lsu_allowed_candidates[1];
+                lsu_boot_boundary  = lsu_boot_candidates[1];
+                lsu_ram_boundary   = lsu_ram_candidates[1];
+                lsu_boot_region    = lsu_boot_regions[1];
+                lsu_timer_region   = lsu_timer_regions[1];
+            }
+        }
         lsu_access_fault  = STRICT_MEMORY && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
         lsu_fault_address = lsu_address;
         if lsu_boot_boundary {
@@ -1993,7 +2037,21 @@ module Core #(
                 cm_shift_word_q         = ex_word_op_q;
                 cm_lsu_address_q        = lsu_address;
                 cm_lsu_memory_address_q = lsu_address;
-                if RELOCATE_LOW_DATA && !lsu_address[31] && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
+                if STRICT_MEMORY && RELOCATE_LOW_DATA {
+                    // A permitted transfer belongs to exactly one physical
+                    // region. Reconstruct its private memory-port prefix from
+                    // the early region tags, without waiting for the upper
+                    // address carry and a second MMIO/relocation comparison.
+                    // Faulting/non-memory instructions issue no token; the
+                    // architectural address above remains full width for traps.
+                    cm_lsu_memory_address_q = {32'd0, 14'h2000, lsu_address[17:0]};
+                    if lsu_boot_region {
+                        cm_lsu_memory_address_q = {46'd0, 6'h3f, lsu_address[11:0]};
+                    } else if lsu_timer_region {
+                        cm_lsu_memory_address_q = {32'd0, 16'h0200, lsu_address[15:0]};
+                    }
+                } else if RELOCATE_LOW_DATA && !lsu_address[31]
+                    && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
                     cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
                 }
                 cm_lsu_wdata_q       = execute_store_data;
@@ -2002,14 +2060,17 @@ module Core #(
                 cm_csr_write_q       = ex_csr_write_q;
                 cm_csr_index_q       = ex_csr_index_q;
                 cm_csr_source_q      = csr_source;
-                cm_exception_q       = ex_exception;
+                cm_exception_q       = ex_exception || lsu_access_fault;
                 cm_exception_cause_q = ex_exception_cause;
                 cm_exception_value_q = ex_exception_value;
                 // Check the full effective address before issuing the token.
                 // A data fault enters CM directly; it does not put the address
                 // adder/permission reduction onto EX's frontend flush fanout.
-                if lsu_access_fault && !ex_exception {
-                    cm_exception_q       = 1'b1;
+                // Prepare the data-fault payload for every load/store. Only
+                // cm_exception_q makes it observable, so the late permission
+                // result need not select all 64 MTVAL bits. Instruction faults
+                // keep priority over any load/store bits in the fetched word.
+                if STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception {
                     cm_exception_cause_q = 64'd5;
                     if ex_is_store_q {
                         cm_exception_cause_q = 64'd7;

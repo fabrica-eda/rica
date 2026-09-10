@@ -36,6 +36,16 @@ BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 3回実機確認した。範囲外load/store、64-bit fetch先、RAM末尾の命令境界から復帰する
 kernel variantを、新しいCPU構成の試験に用いる。
 
+アドレス検査と割り込み受理の更新は、CPU試験60件と238 ELF×2通りのclock順序で合格した。
+Rust kernelは `python3 riscv/kernel/check.py` でCPUモデルと一緒に検証できる。
+通常診断35本の命令数・サイクル数は基準と一致している。
+その後、転送元ごとの範囲検査、メモリポート用アドレスの領域タグ再利用、
+演算結果の選択条件の前段保持、実行結果レジスタのenableを整理した。
+全workspace 242件、厳密構成476実行、無効構成468実行、Rust kernelの6実行に合格した。
+JTAG経由のnative board試験では終了storeを含む命令数の凍結と、clear後の再実行も確認した。
+新構成の124.8 MHz STAはまだ未達で、認定済みimageの置き換えは行っていない。
+[実装・検証と配置配線の記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
+
 ## 実装順と合格条件
 
 ### CPUとOSを同じ開発ループに置く

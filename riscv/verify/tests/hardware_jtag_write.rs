@@ -1,10 +1,10 @@
-//! Exercise the board's complete JTAG-to-BRAM-to-CPU path after technology mapping.
+//! Exercise the board's complete JTAG-to-BRAM-to-CPU path.
 //! This complements physical WRITE64 diagnostics: a passing zero-delay model
 //! cannot establish the timing of the independent JTAG clock domain.
 use std::fs;
 use std::path::Path;
 
-use celox::{NativeBackend, Simulator};
+use celox::{NativeBackend, Simulator, SimulatorBuilder};
 use struo_celox::ecp5_simulator;
 use struo_frontend_veryl::analyze_and_lower;
 use struo_synth::synthesize;
@@ -76,9 +76,7 @@ impl Board {
     }
 }
 
-#[test]
-#[ignore = "struo-celox rejects the derived board reset with NonScalarControl; see the WRITE64 MRE"]
-fn mapped_board_loads_and_executes_masked_write64_payloads() {
+fn board_source() -> String {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut source = verify_riscv::core_source(project).unwrap();
     for name in [
@@ -88,9 +86,25 @@ fn mapped_board_loads_and_executes_masked_write64_payloads() {
         "JtagDebugTransport.veryl",
         "HardwareTestTop.veryl",
         "HardwareCachedTestTop.veryl",
+        "HardwareCompactTestTop.veryl",
     ] {
         source.push_str(&fs::read_to_string(project.join("src").join(name)).unwrap());
     }
+    source
+}
+
+#[test]
+fn native_board_clears_captures_and_freezes_terminal_results() {
+    let sim = SimulatorBuilder::new(&board_source(), "HardwareCompactAccessFaultTestTop")
+        .build_native()
+        .unwrap();
+    exercise_board(sim);
+}
+
+#[test]
+#[ignore = "struo-celox rejects the derived board reset with NonScalarControl; see the WRITE64 MRE"]
+fn mapped_board_loads_and_executes_masked_write64_payloads() {
+    let source = board_source();
     let design = analyze_and_lower(&source, "rica_riscv", "HardwareCached4KTestTop").unwrap();
     let synthesized = synthesize(&design).unwrap();
     let mapped = map_to_ecp5_with_options(
@@ -107,6 +121,10 @@ fn mapped_board_loads_and_executes_masked_write64_payloads() {
         mapped.cells().len()
     );
     let sim = ecp5_simulator(&mapped).unwrap().build_native().unwrap();
+    exercise_board(sim);
+}
+
+fn exercise_board(sim: Simulator<NativeBackend>) {
     let mut board = Board { sim, cycles: 0 };
     board.set("pll_locked", 0);
     board.set("jtag_rst_n", 0);
@@ -122,12 +140,12 @@ fn mapped_board_loads_and_executes_masked_write64_payloads() {
     board.run(10);
 
     for write_bytes in [8, 1] {
-        for immediate in [0x5a_u32, 0x123, 0x200] {
+        for (immediate, terminal) in [(0x5a_u32, 1_u32), (0x123, 0), (0x200, 3)] {
             // Set x31, then retire a terminal store to 0x100.
             let words = [
                 immediate << 20 | 0xf93,
                 0x1000_0093,
-                0x0010_0113,
+                terminal << 20 | 0x113,
                 0x0020_b023,
                 0x0000_006f,
                 0x0000_0013,
@@ -137,6 +155,8 @@ fn mapped_board_loads_and_executes_masked_write64_payloads() {
                 .flat_map(u32::to_le_bytes)
                 .collect::<Vec<_>>();
             board.command(3, 0, 2, 0);
+            assert_eq!(board.read(32, 64), 0, "CONTROL clears the previous result");
+            assert_eq!(board.read(18, 1), 0, "CONTROL clears result_valid");
             for (index, chunk) in bytes.chunks(write_bytes).enumerate() {
                 let mut payload = [0_u8; 8];
                 payload[..chunk.len()].copy_from_slice(chunk);
@@ -153,10 +173,34 @@ fn mapped_board_loads_and_executes_masked_write64_payloads() {
             board.run(2_000);
             assert_eq!(
                 board.read(32, 64),
-                1,
+                u64::from(terminal),
                 "write_bytes={write_bytes} immediate={immediate:x}"
             );
             assert_eq!(board.read(96, 64), u64::from(immediate));
+            assert_eq!(board.read(18, 1), u64::from(terminal != 0));
+            let retired = board.read(160 + 256, 64);
+            board.run(200);
+            let later_retired = board.read(160 + 256, 64);
+            if terminal != 0 {
+                assert_eq!(
+                    retired, 4,
+                    "minstret includes the acknowledged terminal store"
+                );
+                assert_eq!(later_retired, retired, "nonzero result freezes counters");
+            } else {
+                assert!(
+                    later_retired > retired,
+                    "zero result leaves the CPU running"
+                );
+            }
+            board.command(0, 0, 0, 0);
+            board.command(2, 0x108, 0, 0);
+            board.command(3, 0, 0, 0);
+            assert_eq!(
+                board.read(32, 64),
+                u64::from(terminal),
+                "stopping without clear preserves the result"
+            );
         }
     }
 }
