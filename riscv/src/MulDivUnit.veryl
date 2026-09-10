@@ -29,33 +29,30 @@ module MulDivUnit #(
     const DSP_WAIT  : u32 = 9;
     const DIV_SETUP : u32 = 10;
 
-    var state_q           : logic<4>  ;
-    var operation_q       : logic<3>  ;
-    var word_q            : logic     ;
-    var count_q           : logic<6>  ;
-    var a_q               : logic<64> ;
-    var b_q               : logic<64> ;
-    var high_q            : logic<64> ;
-    var low_q             : logic<64> ;
-    var triple_q          : logic<66> ;
-    var negative_a_q      : logic     ;
-    var negative_b_q      : logic     ;
-    var divisor_zero_q    : logic     ;
-    var raw_result_q      : logic<64> ;
-    var result_q          : logic<64> ;
-    var normalized_a      : logic<64> ;
-    var normalized_b      : logic<64> ;
-    var magnitude_a       : logic<64> ;
-    var magnitude_b       : logic<64> ;
-    var multiple          : logic<66> ;
-    var product_step      : logic<66> ;
-    var division_step     : logic<65> ;
-    var division_result   : logic<64> ;
-    var division_negative : logic     ;
-    var div_high_zero_q   : logic     ;
-    var division_zero_next: logic     ;
-    var divide_skip_byte  : logic     ;
-    var dsp_product       : logic<128>;
+    var state_q          : logic<4>  ;
+    var operation_q      : logic<3>  ;
+    var word_q           : logic     ;
+    var count_q          : logic<6>  ;
+    var a_q              : logic<64> ;
+    var b_q              : logic<64> ;
+    var high_q           : logic<64> ;
+    var low_q            : logic<64> ;
+    var triple_q         : logic<66> ;
+    var negative_a_q     : logic     ;
+    var negative_b_q     : logic     ;
+    var divisor_zero_q   : logic     ;
+    var raw_result_q     : logic<64> ;
+    var result_q         : logic<64> ;
+    var normalized_a     : logic<64> ;
+    var normalized_b     : logic<64> ;
+    var magnitude_a      : logic<64> ;
+    var magnitude_b      : logic<64> ;
+    var multiple         : logic<66> ;
+    var product_step     : logic<66> ;
+    var division_step    : logic<65> ;
+    var division_result  : logic<64> ;
+    var division_negative: logic     ;
+    var dsp_product      : logic<128>;
 
     if USE_DSP :g_dsp {
         inst multiplier: DspMultiply64 (
@@ -93,17 +90,10 @@ module MulDivUnit #(
             2'd2   : multiple = {1'b0, b_q, 1'b0};
             default: multiple = triple_q;
         }
-        product_step  = {2'd0, high_q} + multiple;
-        division_step = {high_q, low_q[63]} - {1'b0, b_q};
-        // A restoring step has zero remainder iff its shifted input is zero
-        // or equals the divisor. Evaluate equality alongside subtraction;
-        // the byte-skip control then reads one registered bit, not 64 bits.
-        division_zero_next = (div_high_zero_q && !low_q[63])
-            || ((high_q == {1'b0, b_q[63:1]}) && (low_q[63] == b_q[0]));
-        divide_skip_byte   = EARLY_DIVIDE && !divisor_zero_q && (count_q[5:3] != 3'd0) && div_high_zero_q
-            && (low_q[63:56] == 8'd0);
-        division_result    = low_q;
-        division_negative  = (negative_a_q ^ negative_b_q) && !divisor_zero_q;
+        product_step      = {2'd0, high_q} + multiple;
+        division_step     = {high_q, low_q[63]} - {1'b0, b_q};
+        division_result   = low_q;
+        division_negative = (negative_a_q ^ negative_b_q) && !divisor_zero_q;
         if operation_q[1] {
             division_result   = high_q;
             division_negative = negative_a_q;
@@ -114,21 +104,20 @@ module MulDivUnit #(
 
     always_ff (clk, rst_n) {
         if_reset {
-            state_q         = IDLE;
-            operation_q     = 3'd0;
-            word_q          = 1'b0;
-            count_q         = 6'd0;
-            a_q             = 64'd0;
-            b_q             = 64'd0;
-            high_q          = 64'd0;
-            low_q           = 64'd0;
-            triple_q        = 66'd0;
-            negative_a_q    = 1'b0;
-            negative_b_q    = 1'b0;
-            divisor_zero_q  = 1'b0;
-            div_high_zero_q = 1'b0;
-            raw_result_q    = 64'd0;
-            result_q        = 64'd0;
+            state_q        = IDLE;
+            operation_q    = 3'd0;
+            word_q         = 1'b0;
+            count_q        = 6'd0;
+            a_q            = 64'd0;
+            b_q            = 64'd0;
+            high_q         = 64'd0;
+            low_q          = 64'd0;
+            triple_q       = 66'd0;
+            negative_a_q   = 1'b0;
+            negative_b_q   = 1'b0;
+            divisor_zero_q = 1'b0;
+            raw_result_q   = 64'd0;
+            result_q       = 64'd0;
         } else {
             case state_q {
                 IDLE: {
@@ -147,8 +136,6 @@ module MulDivUnit #(
                 }
                 PREPARE: {
                     high_q = 64'd0;
-                    // The cached predicate is owned only after PREPARE.
-                    div_high_zero_q = 1'b1;
                     if operation_q[2] {
                         low_q   = magnitude_a;
                         count_q = 6'd63;
@@ -221,9 +208,8 @@ module MulDivUnit #(
                     if EARLY_DIVIDE {
                         // Ordinary inputs perform the first restoring step
                         // on this edge: the shortcuts add no setup latency.
-                        div_high_zero_q = division_zero_next;
-                        low_q           = {low_q[62:0], !division_step[64]};
-                        high_q          = {high_q[62:0], low_q[63]};
+                        low_q  = {low_q[62:0], !division_step[64]};
+                        high_q = {high_q[62:0], low_q[63]};
                         if !division_step[64] {
                             high_q = division_step[63:0];
                         }
@@ -232,27 +218,24 @@ module MulDivUnit #(
                         if divisor_zero_q || (a_q <: b_q) {
                             // Keep the dividend as the unsigned remainder.
                             // DIV_SIGN also handles a negative REM-by-zero.
-                            high_q          = a_q;
-                            div_high_zero_q = a_q == 64'd0;
-                            low_q           = 64'd0;
-                            state_q         = DIV_SIGN;
+                            high_q  = a_q;
+                            low_q   = 64'd0;
+                            state_q = DIV_SIGN;
                             if divisor_zero_q {
                                 low_q = 64'hffff_ffff_ffff_ffff;
                             }
                         } else if !word_q && (b_q[63:32] != 32'd0) {
                             // A divisor >= 2^32 cannot fit into the first 32
                             // dividend bits. Their quotient bits are all zero.
-                            high_q          = {32'd0, a_q[63:32]};
-                            div_high_zero_q = a_q[63:32] == 32'd0;
-                            low_q           = {a_q[31:0], 32'd0};
-                            count_q         = 6'd31;
+                            high_q  = {32'd0, a_q[63:32]};
+                            low_q   = {a_q[31:0], 32'd0};
+                            count_q = 6'd31;
                         }
                     }
                 }
                 DIVIDE: {
-                    div_high_zero_q = division_zero_next;
-                    low_q           = {low_q[62:0], !division_step[64]};
-                    high_q          = {high_q[62:0], low_q[63]};
+                    low_q  = {low_q[62:0], !division_step[64]};
+                    high_q = {high_q[62:0], low_q[63]};
                     if !division_step[64] {
                         high_q = division_step[63:0];
                     }
@@ -260,14 +243,14 @@ module MulDivUnit #(
                     if count_q == 6'd0 {
                         state_q = DIV_SIGN;
                     }
-                    if divide_skip_byte {
+                    if EARLY_DIVIDE && !divisor_zero_q && (count_q[5:3] != 3'd0) && (high_q == 64'd0)
+                        && (low_q[63:56] == 8'd0) {
                         // Skip eight leading zero dividend/quotient bits.
                         // At least one ordinary iteration remains, so the
                         // completion and signed/word formatting stay shared.
-                        high_q          = 64'd0;
-                        div_high_zero_q = 1'b1;
-                        low_q           = {low_q[55:0], 8'd0};
-                        count_q         = count_q - 6'd8;
+                        high_q  = 64'd0;
+                        low_q   = {low_q[55:0], 8'd0};
+                        count_q = count_q - 6'd8;
                     }
                 }
                 DIV_SIGN: {

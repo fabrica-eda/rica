@@ -4,7 +4,7 @@ use std::path::Path;
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 
 const TOP: &str = r#"
-module ZbaTestTop #(param ENABLE_ZBA: bit = 0, param PREDECODED_ZBA: bit = 0) (
+module ZbaTestTop #(param ENABLE_ZBA: bit = 0) (
     instr: input logic<32>, a: input logic<64>, b: input logic<64>,
     result: output logic<64>, illegal: output logic,
     word_op: output logic, use_rs2: output logic, write_enable: output logic,
@@ -13,16 +13,12 @@ module ZbaTestTop #(param ENABLE_ZBA: bit = 0, param PREDECODED_ZBA: bit = 0) (
     inst e: ExecuteBus;
     inst h: ShiftHighBus;
     inst decoder: Decoder #(ENABLE_ZBA: ENABLE_ZBA) (decode: d);
-    inst execute: ExecuteUnit #(ENABLE_ZBA: ENABLE_ZBA, PREDECODED_ZBA: PREDECODED_ZBA) (execute: e);
+    inst execute: ExecuteUnit #(ENABLE_ZBA: ENABLE_ZBA) (execute: e);
     inst high: ShiftHighUnit (shift: h);
     var shifted: logic<64>;
     always_comb {
         d.instr = instr;
         e.alu_op = d.alu_op;
-        e.zba_control = 3'd0;
-        if PREDECODED_ZBA && !d.alu_op[5] && d.alu_op[4] {
-            e.zba_control = d.alu_op[2:0];
-        }
         e.subtract = d.alu_op == 6'd1;
         e.word_op = d.word_op;
         e.link = 1'b0;
@@ -54,17 +50,15 @@ fn source() -> String {
         "ShiftUnit",
         "ShiftHighUnit",
     ] {
-        source
-            .push_str(&fs::read_to_string(root.join(format!("src/{name}.veryl"))).unwrap());
+        source.push_str(&fs::read_to_string(root.join(format!("src/{name}.veryl"))).unwrap());
     }
     source.push_str(TOP);
     source
 }
 
-fn simulator(enabled: bool, predecoded: bool) -> Simulator<NativeBackend> {
+fn simulator(enabled: bool) -> Simulator<NativeBackend> {
     SimulatorBuilder::new(&source(), "ZbaTestTop")
         .param("ENABLE_ZBA", u64::from(enabled))
-        .param("PREDECODED_ZBA", u64::from(predecoded))
         .build_native()
         .unwrap()
 }
@@ -100,40 +94,32 @@ fn register_instruction(shift: u32, unsigned_word: bool) -> u32 {
 
 #[test]
 fn all_zba_operations_match_integer_oracle_and_use_full_width_results() {
-    for predecoded in [false, true] {
-        exercise_oracle(simulator(true, predecoded));
-    }
+    exercise_oracle(simulator(true));
 }
 
 #[test]
 fn mapped_zba_operations_match_the_same_independent_integer_oracle() {
-    for predecoded in [false, true] {
-        let source = source()
-            .replace("param ENABLE_ZBA: bit = 0", "param ENABLE_ZBA: bit = 1")
-            .replace(
-                "param PREDECODED_ZBA: bit = 0",
-                &format!("param PREDECODED_ZBA: bit = {}", u8::from(predecoded)),
-            );
-        let rtl =
-            struo_frontend_veryl::analyze_and_lower(&source, "zba_mapped", "ZbaTestTop")
-                .unwrap();
-        let synthesized = struo_synth::synthesize(&rtl).unwrap();
-        let mapped = struo_target_ecp5::map_to_ecp5_with_options(
-            &synthesized.netlist,
-            struo_target_ecp5::MappingOptions {
-                timing_goal_mhz: 175,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(mapped.retiming().equivalence_signed_off);
-        exercise_oracle(
-            struo_celox::ecp5_simulator(&mapped)
-                .unwrap()
-                .build_native()
-                .unwrap(),
-        );
-    }
+    let source = source().replace(
+        "module ZbaTestTop #(param ENABLE_ZBA: bit = 0)",
+        "module ZbaTestTop #(param ENABLE_ZBA: bit = 1)",
+    );
+    let rtl = struo_frontend_veryl::analyze_and_lower(&source, "zba_mapped", "ZbaTestTop").unwrap();
+    let synthesized = struo_synth::synthesize(&rtl).unwrap();
+    let mapped = struo_target_ecp5::map_to_ecp5_with_options(
+        &synthesized.netlist,
+        struo_target_ecp5::MappingOptions {
+            timing_goal_mhz: 175,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(mapped.retiming().equivalence_signed_off);
+    exercise_oracle(
+        struo_celox::ecp5_simulator(&mapped)
+            .unwrap()
+            .build_native()
+            .unwrap(),
+    );
 }
 
 fn exercise_oracle(mut sim: Simulator<NativeBackend>) {
@@ -197,192 +183,28 @@ fn exercise_oracle(mut sim: Simulator<NativeBackend>) {
 
 #[test]
 fn zba_enable_and_neighboring_encodings_have_exact_legality() {
-    for predecoded in [false, true] {
-        for enabled in [false, true] {
-            let mut sim = simulator(enabled, predecoded);
-            for opcode in [0x33, 0x3b, 0x13, 0x1b] {
-                for funct7 in [4, 5, 16, 17] {
-                    for funct3 in 0..8 {
-                        let instruction = funct7 << 25
-                            | 2 << 20
-                            | 1 << 15
-                            | funct3 << 12
-                            | 3 << 7
-                            | opcode;
-                        let base_legal = (opcode == 0x13 && funct3 != 1 && funct3 != 5)
-                            || (opcode == 0x1b && funct3 == 0);
-                        let zba_legal = (opcode == 0x3b && funct7 == 4 && funct3 == 0)
-                            || ((opcode == 0x33 || opcode == 0x3b)
-                                && funct7 == 16
-                                && matches!(funct3, 2 | 4 | 6))
-                            || (opcode == 0x1b && matches!(funct7, 4 | 5) && funct3 == 1);
-                        evaluate(&mut sim, instruction, 0, 0);
-                        assert_eq!(
-                            value(&mut sim, "illegal") == 0,
-                            base_legal || (enabled && zba_legal),
-                            "enabled={enabled} instr={instruction:08x}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[test]
-fn native_and_mapped_redirect_upper_zero_match_wrapping_integer_arithmetic() {
-    let source = source();
-    let native = SimulatorBuilder::new(&source, "RedirectUpperZero")
-        .build_native()
-        .unwrap();
-    let rtl = struo_frontend_veryl::analyze_and_lower(
-        &source,
-        "redirect_upper_test",
-        "RedirectUpperZero",
-    )
-    .unwrap();
-    let mapped = struo_target_ecp5::map_to_ecp5_with_options(
-        &struo_synth::synthesize(&rtl).unwrap().netlist,
-        struo_target_ecp5::MappingOptions {
-            timing_goal_mhz: 175,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let mapped = struo_celox::ecp5_simulator(&mapped)
-        .unwrap()
-        .build_native()
-        .unwrap();
-    let mut words = vec![0_u32, 1, 2, u32::MAX, u32::MAX - 1];
-    for bit in 0..32 {
-        words.extend([1_u32 << bit, u32::MAX ^ (1_u32 << bit), 1 | (1_u32 << bit)]);
-    }
-    let mut random = 0x6572_7063_u32;
-    for _ in 0..1024 {
-        random ^= random << 13;
-        random ^= random >> 17;
-        random ^= random << 5;
-        words.push(random);
-    }
-    for mut sim in [native, mapped] {
-        let upper = sim.signal("upper");
-        let decrement = sim.signal("decrement");
-        let carry = sim.signal("carry");
-        for &word in &words {
-            for negative in [false, true] {
-                for carry_in in [false, true] {
-                    sim.modify(|io| {
-                        io.set(upper, word);
-                        io.set(decrement, u8::from(negative));
-                        io.set(carry, u8::from(carry_in));
-                    })
-                    .unwrap();
-                    let expected = word
-                        .wrapping_add_signed(if negative { -1 } else { 0 })
-                        .wrapping_add(u32::from(carry_in))
-                        == 0;
+    for enabled in [false, true] {
+        let mut sim = simulator(enabled);
+        for opcode in [0x33, 0x3b, 0x13, 0x1b] {
+            for funct7 in [4, 5, 16, 17] {
+                for funct3 in 0..8 {
+                    let instruction =
+                        funct7 << 25 | 2 << 20 | 1 << 15 | funct3 << 12 | 3 << 7 | opcode;
+                    let base_legal = (opcode == 0x13 && funct3 != 1 && funct3 != 5)
+                        || (opcode == 0x1b && funct3 == 0);
+                    let zba_legal = (opcode == 0x3b && funct7 == 4 && funct3 == 0)
+                        || ((opcode == 0x33 || opcode == 0x3b)
+                            && funct7 == 16
+                            && matches!(funct3, 2 | 4 | 6))
+                        || (opcode == 0x1b && matches!(funct7, 4 | 5) && funct3 == 1);
+                    evaluate(&mut sim, instruction, 0, 0);
                     assert_eq!(
-                        value(&mut sim, "is_zero") != 0,
-                        expected,
-                        "upper={word:08x} negative={negative} carry={carry_in}"
+                        value(&mut sim, "illegal") == 0,
+                        base_legal || (enabled && zba_legal),
+                        "enabled={enabled} instr={instruction:08x}"
                     );
                 }
             }
         }
     }
-}
-
-#[test]
-fn native_and_mapped_jalr_middle_match_full_integer_addition() {
-    let source = source();
-    let native = SimulatorBuilder::new(&source, "JalrMiddleMatch")
-        .build_native()
-        .unwrap();
-    let rtl = struo_frontend_veryl::analyze_and_lower(
-        &source,
-        "jalr_middle_test",
-        "JalrMiddleMatch",
-    )
-    .unwrap();
-    let mapped = struo_target_ecp5::map_to_ecp5_with_options(
-        &struo_synth::synthesize(&rtl).unwrap().netlist,
-        struo_target_ecp5::MappingOptions {
-            timing_goal_mhz: 175,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let mapped = struo_celox::ecp5_simulator(&mapped)
-        .unwrap()
-        .build_native()
-        .unwrap();
-    let mut bases = vec![
-        0_u32,
-        1,
-        0x7ff,
-        0x800,
-        0xf800,
-        0xfffe,
-        0xffff,
-        0x10000,
-        0x10001,
-        0x7fff_ffff,
-        0x8000_0000,
-        0xffff_0000,
-        0xffff_07ff,
-        0xffff_0800,
-        0xffff_fffe,
-        0xffff_ffff,
-    ];
-    let mut random = 0x5269_6361_u32;
-    for _ in 0..1024 {
-        random ^= random << 13;
-        random ^= random >> 17;
-        random ^= random << 5;
-        bases.push(random);
-    }
-    let mut cases = 0;
-    for mut sim in [native, mapped] {
-        let ports = [
-            "base",
-            "predicted",
-            "predicted_m1",
-            "predicted_p1",
-            "decrement",
-            "carry",
-        ]
-        .map(|name| sim.signal(name));
-        for &base in &bases {
-            for offset in [-2048_i32, -1024, -1, 0, 1, 1024, 2047] {
-                // The oracle uses a complete 32-bit signed-offset addition,
-                // independently of the three-candidate implementation.
-                let target = base.wrapping_add_signed(offset) & !1;
-                let middle = (target >> 16) as u16;
-                for predicted in [
-                    middle,
-                    middle.wrapping_sub(1),
-                    middle.wrapping_add(1),
-                    base as u16,
-                ] {
-                    let lower_sum = u32::from(base as u16) + u32::from(offset as u16);
-                    sim.modify(|io| {
-                        io.set(ports[0], (base >> 16) as u16);
-                        io.set(ports[1], predicted);
-                        io.set(ports[2], predicted.wrapping_sub(1));
-                        io.set(ports[3], predicted.wrapping_add(1));
-                        io.set(ports[4], u8::from(offset < 0));
-                        io.set(ports[5], u8::from(lower_sum > 0xffff));
-                    })
-                    .unwrap();
-                    assert_eq!(
-                        value(&mut sim, "matched") != 0,
-                        predicted == middle,
-                        "base={base:08x} offset={offset} predicted={predicted:04x}"
-                    );
-                    cases += 1;
-                }
-            }
-        }
-    }
-    assert_eq!(cases, 58_240);
 }

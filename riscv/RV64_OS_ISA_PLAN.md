@@ -36,20 +36,22 @@ BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 3回実機確認した。範囲外load/store、64-bit fetch先、RAM末尾の命令境界から復帰する
 kernel variantを、新しいCPU構成の試験に用いる。
 
-CPU側の機能検証済みの親構成は、通常のload/storeやfaultに追加サイクルを入れず、
-64-bit PC・転送先・例外値を保持する `free-logic` 構成。
-ALUは32 bitごとのcarry selectを使い、JALR上位加算を既存のEX/CM境界で分け、
-待機中に使わない論理結果レジスタのenableを除いた。
-CPU試験61件（64-bit JALR境界・待機の66組を含む）、厳密構成476実行、
-無効構成468実行が合格し、通常診断35本の命令数・サイクル数も基準と一致する。
+現在の開発基準は、配置後STAが最も良い `target-slices` 構成。
+通常のload/storeやfaultに追加サイクルを入れず、64-bit PC・転送先・例外値を保持し、
+分岐予測先との16 bitごとの比較を既存EX/CM境界でまとめる。
+作業ツリーの37 RTLファイルを、配置探索43／70〜72の入力へ完全に一致させた。
+後の構造変更は、それぞれのソース・機能検証・STA記録とともに保存している。
+
+このRTLの厳密構成476実行・無効構成468実行と、通常診断35本の同一カウンタ値は確認済み。
+再利用する記録については、全RTL・全ELF・モデル実行ファイル・ログのハッシュを照合する。
 Rust kernelの同時edgeモデルはtasksが86,653 cycles／30,725 instructions、
 access-faultsが92,235 cycles／31,949 instructions。
-親構成の37 RTLファイルと既存の機能検証記録の一致、新しい境界試験の結果は
-[free-logic-return-validation.json](../toolchain/measurements/2026-09-10-rv64-access-faults/free-logic-return-validation.json)
-に保存している。これは新bitstreamの実機認定ではない。
+最新のCPU境界試験61件（64-bit JALRの66組を含む）、乗除算9件、
+アドレス検査1件、Zba 3件を、選択した構成のインターフェースで再確認し、全74件が合格した。
+[selected-target-functional-validation.json](../toolchain/measurements/2026-09-10-rv64-access-faults/selected-target-functional-validation.json)
+に、現在の入力と再利用した機能・性能記録の照合結果を保存している。
 
-**新構成の124.8 MHz STAは未達。** 現在のCPUソースの最良結果はsetup −882 ps、
-別の `target-slices` 構成の最良確定結果は−476 psで、いずれもholdは+90 ps。
+**新構成の124.8 MHz STAは未達。** 確定した最良結果はsetup −476 ps／hold +90 ps。
 CPU 124.8 MHz／メモリ62.4 MHzとsetup・hold各200 ps予約を維持し、
 認定済みimageの置き換えは行っていない。
 
@@ -70,10 +72,11 @@ setup違反端点を411から405へ減らしたが、最悪slackは−508 psの�
 従来35診断のサイクル維持だけを条件にせず、必要なアドレス検査を保ち、
 124.8 MHzでSTAを通すことと、同じ処理の実行時間を合わせて判断する。
 新たに遅延を加える場合は、変わった診断の命令数・cycles・原因を個別に記録する。
-現在の作業ソースでは、JALRの予測先の中位16 bitについて±1の候補をRXで保持し、
-EXでは転送元との比較を選ぶ試作を追加した。追加サイクルはなく、native／mappedの
-58,240ケース、CPU 61件とZba／redirect 5件、厳密476／無効468実行に合格した。
-通常35診断とRust kernelのカウンタ値も一致した。配置後STAを検証中。
+JALRの予測先の中位16 bitについて±1の候補をRXで保持し、EXでは転送元との比較を
+選ぶ試作は、native／mapped 58,240ケース、CPU 61件とZba／redirect 5件、
+厳密476／無効468実行に合格し、通常35診断とRust kernelのカウンタ値も一致した。
+ただし最終STAが−1,626 psで改善しなかったため、開発基準には採用しない。
+
 [実装・検証と配置配線の全記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
 
 ## 実装順と合格条件

@@ -170,7 +170,6 @@ module Core #(
     var ex_raw_instr_q          : logic<32>          ;
     var ex_rd_q                 : logic<5>           ;
     var ex_alu_op_q             : logic<6>           ;
-    var ex_zba_control_q        : logic<3>           ;
     var ex_subtract_q           : logic              ;
     var ex_write_enable_q       : logic              ;
     var ex_can_bypass_q         : logic              ;
@@ -200,8 +199,6 @@ module Core #(
     var ex_predicted_kind_q     : logic<3>           ;
     var ex_predicted_taken_q    : logic              ;
     var ex_predicted_next_pc_q  : logic<32>          ;
-    var ex_predicted_mid_m1_q   : logic<16>          ;
-    var ex_predicted_mid_p1_q   : logic<16>          ;
     var ex_fallthrough_pc_q     : logic<ADDRESS_BITS>;
     var ex_operand_a_q          : logic<64>          ;
     var ex_operand_b_q          : logic<64>          ;
@@ -236,7 +233,7 @@ module Core #(
     var cm_branch_op_q          : logic<3>                  ;
     var cm_control_fallthrough_q: logic                     ;
     var cm_branch_equal_q       : logic<4>                  ;
-    var cm_redirect_target      : logic<ADDRESS_BITS>       ;
+    var cm_redirect_target_q    : logic<ADDRESS_BITS>       ;
     var cm_arithmetic_q         : logic<64>                 ;
     var cm_shift_low_q          : logic<64>                 ;
     var cm_shift_amount_q       : logic<3>                  ;
@@ -313,10 +310,6 @@ module Core #(
     var redirect_high_c1        : logic<17>              ;
     var redirect_high           : logic<17>              ;
     var redirect_sum            : logic<64>              ;
-    var fallthrough_upper_zero  : logic                  ;
-    var redirect_upper_zero     : logic                  ;
-    var jalr_middle_match       : logic                  ;
-    var redirect_middle_match   : logic                  ;
     var ex_branch_equal         : logic                  ;
     var ex_compare_less_high    : logic                  ;
     var ex_compare_less_low     : logic                  ;
@@ -530,69 +523,9 @@ module Core #(
         csr  : csr_bus,
     );
 
-    inst execute_bus         : ExecuteBus;
-    inst redirect_upper_match: RedirectUpperZero (
-        upper    : redirect_addend_a[63:32],
-        decrement: ex_redirect_offset_q[63],
-        carry    : redirect_high[16]       ,
-        is_zero  : redirect_upper_zero     ,
-    );
-
-    inst jalr_middle: JalrMiddleMatch (
-        base        : redirect_addend_a[31:16]     ,
-        predicted   : ex_predicted_next_pc_q[31:16],
-        predicted_m1: ex_predicted_mid_m1_q        ,
-        predicted_p1: ex_predicted_mid_p1_q        ,
-        decrement   : ex_redirect_offset_q[63]     ,
-        carry       : redirect_low[16]             ,
-        matched     : jalr_middle_match            ,
-    );
-
-    if STRICT_MEMORY && ((BRANCH_PREDICTOR_CONFIG & 8) != 0) :g_redirect_upper_completion {
-        var low_q    : logic<32>;
-        var upper_q  : logic<32>;
-        var add_one_q: logic    ;
-        var sub_one_q: logic    ;
-        var upper    : logic<32>;
-
-        // Compact prediction already resolves in CM. Carry the upper base
-        // across the existing EX/CM edge and finish its +/-1 adjustment there.
-        // EX needs only the direct upper-zero predicate for its match flags.
-        // The redirect and interrupt-resume edges therefore stay unchanged.
-        always_ff (clk, rst_n) {
-            if_reset {
-                low_q     = 32'd0;
-                upper_q   = 32'd0;
-                add_one_q = 1'b0;
-                sub_one_q = 1'b0;
-            } else if !backend_wait {
-                low_q     = ex_redirect_target[31:0];
-                upper_q   = redirect_addend_a[63:32];
-                add_one_q = !ex_redirect_offset_q[63] && redirect_high[16];
-                sub_one_q = ex_redirect_offset_q[63] && !redirect_high[16];
-            }
-        }
-        always_comb {
-            upper = upper_q;
-            if add_one_q {
-                upper = upper_q + 32'd1;
-            } else if sub_one_q {
-                upper = upper_q - 32'd1;
-            }
-            cm_redirect_target = {upper, low_q};
-        }
-    } else :g_redirect_direct {
-        always_ff (clk, rst_n) {
-            if_reset {
-                cm_redirect_target = 32'd0;
-            } else if !backend_wait {
-                cm_redirect_target = ex_redirect_target;
-            }
-        }
-    }
+    inst execute_bus : ExecuteBus;
     inst execute_unit: ExecuteUnit #(
-        ENABLE_ZBA    : ENABLE_ZBA,
-        PREDECODED_ZBA: 1         ,
+        ENABLE_ZBA: ENABLE_ZBA,
     ) (
         execute: execute_bus,
     );
@@ -902,8 +835,14 @@ module Core #(
             decode_packet.predicted_next_pc = 32'd0;
         }
 
-        // Transfer banks mask the unused result before the register edge.
-        bypass_data                     = cm_arithmetic_q | cm_logic_result_q;
+        // The preceding EX result is already registered in the common
+        // completion stage. Reuse that copy for the fast EX bypass instead of
+        // duplicating two 64-bit result banks in a second bypass register.
+        if cm_use_logic_q {
+            bypass_data = cm_logic_result_q;
+        } else {
+            bypass_data = cm_arithmetic_q;
+        }
         completion_bus.arithmetic       = cm_arithmetic_q;
         completion_bus.logic_result     = cm_logic_result_q;
         completion_bus.use_logic        = cm_use_logic_q;
@@ -982,14 +921,13 @@ module Core #(
             alu_operand_b = ex_operand_b_q;
         }
 
-        execute_bus.alu_op      = ex_alu_op_q;
-        execute_bus.zba_control = ex_zba_control_q;
-        execute_bus.subtract    = ex_subtract_q;
-        execute_bus.link        = ex_link_q;
-        execute_bus.word_op     = ex_word_op_q;
-        execute_bus.operand_a   = alu_operand_a;
-        execute_bus.operand_b   = alu_operand_b;
-        lsu_address             = alu_operand_a[31:0] + alu_operand_b[31:0];
+        execute_bus.alu_op    = ex_alu_op_q;
+        execute_bus.subtract  = ex_subtract_q;
+        execute_bus.link      = ex_link_q;
+        execute_bus.word_op   = ex_word_op_q;
+        execute_bus.operand_a = alu_operand_a;
+        execute_bus.operand_b = alu_operand_b;
+        lsu_address           = alu_operand_a[31:0] + alu_operand_b[31:0];
         // Loads/stores only add a base and offset. Do not route address
         // permission checks through the ALU's Zba/subtract/word selectors.
         // Four short carry-select slices also keep a dependent address's
@@ -1199,15 +1137,8 @@ module Core #(
         } else {
             ex_redirect_target = redirect_sum;
         }
-        // JALR's signed 12-bit immediate has a uniform middle slice.
-        // Compare its three possible bases before the lower carry arrives.
-        redirect_middle_match = ex_predicted_next_pc_q[31:16] == ex_redirect_target[31:16];
-        if ex_redirect_clear_lsb_q {
-            redirect_middle_match = jalr_middle_match;
-        }
-        ex_predicted_address   = ex_predicted_next_pc_q;
-        fallthrough_upper_zero = ex_fallthrough_pc_q == {32'd0, ex_fallthrough_pc_q[31:0]};
-        ex_actual_next_pc      = ex_fallthrough_pc_q;
+        ex_predicted_address = ex_predicted_next_pc_q;
+        ex_actual_next_pc    = ex_fallthrough_pc_q;
         if ex_link_q {
             ex_actual_next_pc = ex_redirect_target;
         }
@@ -1229,14 +1160,14 @@ module Core #(
         }
 
         if cm_branch_taken {
-            cm_actual_next_pc = cm_redirect_target;
+            cm_actual_next_pc = cm_redirect_target_q;
         } else {
             cm_actual_next_pc = cm_fallthrough_pc_q;
         }
         if ((BRANCH_PREDICTOR_CONFIG & 8) != 0) && !cm_is_branch_q {
             cm_actual_next_pc = cm_fallthrough_pc_q;
             if cm_control_kind_q != 3'd0 {
-                cm_actual_next_pc = cm_redirect_target;
+                cm_actual_next_pc = cm_redirect_target_q;
             }
         }
         // A faulting branch must enter the trap vector; a future branch-side
@@ -1363,7 +1294,7 @@ module Core #(
         if redirect_preserve_cm_q {
             pending_redirect_target = cm_fallthrough_pc_q;
             if cm_control_kind_q != 3'd0 {
-                pending_redirect_target = cm_redirect_target;
+                pending_redirect_target = cm_redirect_target_q;
             }
         }
         // Classify the FD consumer against the RX producer one edge before
@@ -1547,7 +1478,7 @@ module Core #(
                 } else if cm_is_branch_q {
                     interrupt_resume_pc_q = cm_actual_next_pc;
                 } else if cm_control_kind_q != 3'd0 {
-                    interrupt_resume_pc_q = cm_redirect_target;
+                    interrupt_resume_pc_q = cm_redirect_target_q;
                 } else {
                     interrupt_resume_pc_q = cm_fallthrough_pc_q;
                 }
@@ -1585,7 +1516,7 @@ module Core #(
         predictor_retire_q.pc          = cm_pc_q;
         predictor_retire_q.kind        = cm_control_kind_q;
         predictor_retire_q.taken       = !cm_is_branch_q || cm_branch_taken;
-        predictor_retire_q.target      = cm_redirect_target;
+        predictor_retire_q.target      = cm_redirect_target_q;
         predictor_retire_q.fallthrough = cm_fallthrough_pc_q;
         // Capture the current CM branch candidate unconditionally.  Only the
         // adjacent registered source tag makes this bank observable, so no late
@@ -1745,25 +1676,6 @@ module Core #(
         }
     }
 
-    // Logic results are consumed only by a nonblocking CM producer. During
-    // memory/M waits CM selects load/M data, and the held EX instruction cannot
-    // have a bypass dependency on that blocking producer. Refresh this unused
-    // payload instead of routing a backend-hold enable to the whole bank.
-    // On every advancing edge the unselected bank is still zero for OR bypass.
-    always_ff (clk, rst_n) {
-        if_reset {
-            cm_logic_result_q = 64'd0;
-        } else {
-            cm_logic_result_q = 64'd0;
-            if (execute_bus.result_use_logic || ex_early_bitmanip) && !ex_is_csr_q {
-                cm_logic_result_q = execute_bus.logic_result;
-                if ex_early_bitmanip {
-                    cm_logic_result_q = early_bitmanip_result;
-                }
-            }
-        }
-    }
-
     // Pending M results are invisible to consumers while the backend is held.
     // Refresh that payload until done, so only a small result mux crosses this
     // boundary. The completion edge reads the last registered M result.
@@ -1772,11 +1684,10 @@ module Core #(
             cm_arithmetic_q = 64'd0;
         } else if ENABLE_M && muldiv_wait {
             cm_arithmetic_q = muldiv_result;
-        } else if !backend_wait {
-            cm_arithmetic_q = 64'd0;
+        } else if ENABLE_M || !backend_wait {
             if ex_is_csr_q {
                 cm_arithmetic_q = csr_bus.read_data;
-            } else if !(execute_bus.result_use_logic || ex_early_bitmanip) {
+            } else {
                 cm_arithmetic_q = execute_bus.arithmetic;
             }
         }
@@ -1858,7 +1769,6 @@ module Core #(
             ex_raw_instr_q           = 32'h0000_0013;
             ex_rd_q                  = 5'd0;
             ex_alu_op_q              = 4'd0;
-            ex_zba_control_q         = 3'd0;
             ex_subtract_q            = 1'b0;
             ex_write_enable_q        = 1'b0;
             ex_can_bypass_q          = 1'b0;
@@ -1889,8 +1799,6 @@ module Core #(
             ex_predicted_kind_q      = 3'd0;
             ex_predicted_taken_q     = 1'b0;
             ex_predicted_next_pc_q   = 32'h0000_0004;
-            ex_predicted_mid_m1_q    = 16'hffff;
-            ex_predicted_mid_p1_q    = 16'd1;
             ex_fallthrough_pc_q      = 32'h0000_0004;
             ex_operand_a_q           = 64'h0000_0000_0000_0000;
             ex_operand_b_q           = 64'h0000_0000_0000_0000;
@@ -1922,9 +1830,11 @@ module Core #(
             cm_branch_op_q           = 3'd0;
             cm_control_fallthrough_q = 1'b0;
             cm_branch_equal_q        = 4'b0000;
+            cm_redirect_target_q     = 32'h0000_0000;
             cm_shift_low_q           = 64'h0000_0000_0000_0000;
             cm_shift_amount_q        = 3'b000;
             cm_shift_arithmetic_q    = 1'b0;
+            cm_logic_result_q        = 64'h0000_0000_0000_0000;
             cm_use_logic_q           = 1'b0;
             cm_use_shift_q           = 1'b0;
             cm_use_bitmanip_q        = 1'b0;
@@ -2105,6 +2015,7 @@ module Core #(
                 cm_branch_op_q           = ex_branch_op_q;
                 cm_control_fallthrough_q = ex_control_fallthrough_q;
                 cm_branch_equal_q        = execute_bus.compare_equal;
+                cm_redirect_target_q     = ex_redirect_target;
                 // Keep the late JALR sum local to 16-bit comparisons in EX.
                 // CM reduces their registered matches while choosing direction,
                 // at the same recovery edge as before.
@@ -2113,25 +2024,12 @@ module Core #(
                 cm_linear_match_q  = 1'b0;
                 if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
                     for i in 0..TARGET_MATCH_SLICES {
-                        if i == 1 {
-                            cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q && redirect_middle_match;
-                            cm_linear_match_q[i] = ex_kind_match_q
-                                && ((ex_link_q && redirect_middle_match)
-                                    || (!ex_link_q && (ex_predicted_address[31:16] == ex_fallthrough_pc_q[31:16])));
-                        } else if i <: 2 {
-                            cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q
-                                && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]);
-                            cm_linear_match_q[i] = ex_kind_match_q
-                                && ((ex_link_q && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]))
-                                    || (!ex_link_q
-                                        && (ex_predicted_address[i * 16+:16] == ex_fallthrough_pc_q[i * 16+:16])));
-                        } else {
-                            // The current predictor supplies a 32-bit target.
-                            // Its upper match needs only the exact zero flag.
-                            cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q && redirect_upper_zero;
-                            cm_linear_match_q[i] = ex_kind_match_q
-                                && ((ex_link_q && redirect_upper_zero) || (!ex_link_q && fallthrough_upper_zero));
-                        }
+                        cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q
+                            && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]);
+                        cm_linear_match_q[i] = ex_kind_match_q
+                            && ((ex_link_q && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]))
+                                || (!ex_link_q
+                                    && (ex_predicted_address[i * 16+:16] == ex_fallthrough_pc_q[i * 16+:16])));
                     }
                     cm_untaken_match_q = ex_kind_match_q && !ex_predicted_taken_q
                         && (ex_predicted_next_pc_q == ex_fallthrough_pc_q);
@@ -2142,7 +2040,11 @@ module Core #(
                 } else {
                     cm_shift_amount_q = alu_operand_b[5:3];
                 }
-                cm_shift_arithmetic_q   = ex_alu_op_q == 4'd8;
+                cm_shift_arithmetic_q = ex_alu_op_q == 4'd8;
+                cm_logic_result_q     = execute_bus.logic_result;
+                if ex_early_bitmanip {
+                    cm_logic_result_q = early_bitmanip_result;
+                }
                 cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip) && !ex_is_csr_q;
                 cm_use_shift_q          = execute_bus.result_use_shift;
                 cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
@@ -2217,12 +2119,6 @@ module Core #(
                 ex_raw_instr_q = rx_raw_instr_q;
                 ex_rd_q        = rx_rd_q;
                 ex_alu_op_q    = rx_alu_op_q;
-                // Decode the Zba input selects before EX's shift-and-add
-                // carry chain. The controls stall with their instruction.
-                ex_zba_control_q = 3'd0;
-                if ENABLE_ZBA && !rx_alu_op_q[5] && rx_alu_op_q[4] {
-                    ex_zba_control_q = rx_alu_op_q[2:0];
-                }
                 // Decode subtraction before EX so the carry-chain input does
                 // not start behind a four-bit opcode equality comparator.
                 ex_subtract_q            = rx_alu_op_q == 4'd1;
@@ -2261,8 +2157,6 @@ module Core #(
                 ex_predicted_kind_q      = rx_predicted_kind_q;
                 ex_predicted_taken_q     = rx_predicted_taken_q;
                 ex_predicted_next_pc_q   = rx_predicted_next_pc_q;
-                ex_predicted_mid_m1_q    = rx_predicted_next_pc_q[31:16] - 16'd1;
-                ex_predicted_mid_p1_q    = rx_predicted_next_pc_q[31:16] + 16'd1;
                 ex_kind_match_q          = 1'b0;
                 if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
                     ex_kind_match_q = rx_predicted_kind_q == rx_control_kind;

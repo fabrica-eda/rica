@@ -1,7 +1,6 @@
 /// RV64 integer execution unit with two 32-bit carry-select slices.
 module ExecuteUnit #(
-    param ENABLE_ZBA    : bit = 0,
-    param PREDECODED_ZBA: bit = 0,
+    param ENABLE_ZBA: bit = 0,
 ) (
     execute: modport ExecuteBus::execute,
 ) {
@@ -9,7 +8,6 @@ module ExecuteUnit #(
     var arithmetic_b: logic<64>;
     var zba_source  : logic<64>;
     var zba_shift1  : logic<64>;
-    var zba_control : logic<3> ;
     var sum_low     : logic<33>;
     var sum_high_c0 : logic<33>;
     var sum_high_c1 : logic<33>;
@@ -22,25 +20,17 @@ module ExecuteUnit #(
     );
 
     always_comb {
-        zba_control = 3'd0;
-        if ENABLE_ZBA {
-            if PREDECODED_ZBA {
-                zba_control = execute.zba_control;
-            } else if !execute.alu_op[5] && execute.alu_op[4] {
-                zba_control = execute.alu_op[2:0];
-            }
-        }
         zba_source = execute.operand_a;
-        if zba_control[2] {
+        if ENABLE_ZBA && !execute.alu_op[5] && execute.alu_op[4] && execute.alu_op[2] {
             zba_source = {32'd0, execute.operand_a[31:0]};
         }
         // Two binary selects implement shifts 0..3 without a priority chain.
         zba_shift1 = zba_source;
-        if zba_control[0] {
+        if ENABLE_ZBA && !execute.alu_op[5] && execute.alu_op[4] && execute.alu_op[0] {
             zba_shift1 = {zba_source[62:0], 1'd0};
         }
         arithmetic_a = zba_shift1;
-        if zba_control[1] {
+        if ENABLE_ZBA && !execute.alu_op[5] && execute.alu_op[4] && execute.alu_op[1] {
             arithmetic_a = {zba_shift1[61:0], 2'd0};
         }
         if execute.subtract {
@@ -101,37 +91,5 @@ module ExecuteUnit #(
         execute.result_use_shift = !execute.link
             && ((execute.alu_op == 4'd6) || (execute.alu_op == 4'd7) || (execute.alu_op == 4'd8)
                 || (ENABLE_ZBA && (execute.alu_op == 6'd16)));
-    }
-}
-
-/// Match a redirect's upper word without waiting for its upper carry chain.
-/// Redirect immediates are sign-extended from at most 21 bits, so their upper
-/// word is zero or all ones. carry is the unsigned carry from the lower word.
-module RedirectUpperZero (
-    upper    : input  logic<32>,
-    decrement: input  logic    ,
-    carry    : input  logic    ,
-    is_zero  : output logic    ,
-) {
-    always_comb {
-        is_zero = ((upper == 32'd0) && (decrement == carry)) || ((upper == 32'hffff_ffff) && !decrement && carry)
-            || ((upper == 32'd1) && decrement && !carry);
-    }
-}
-
-/// Match JALR bits 31:16 using prediction candidates prepared in RX.
-/// The 12-bit signed immediate contributes only -1, 0 or +1 to this slice.
-module JalrMiddleMatch (
-    base        : input  logic<16>,
-    predicted   : input  logic<16>,
-    predicted_m1: input  logic<16>,
-    predicted_p1: input  logic<16>,
-    decrement   : input  logic    ,
-    carry       : input  logic    ,
-    matched     : output logic    ,
-) {
-    always_comb {
-        matched = ((decrement == carry) && (base == predicted)) || (!decrement && carry && (base == predicted_m1))
-            || (decrement && !carry && (base == predicted_p1));
     }
 }

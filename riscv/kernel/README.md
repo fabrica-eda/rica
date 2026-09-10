@@ -80,7 +80,9 @@ target/release/verify-riscv --hardware-memory-rtl \
 Add `--timed-clocks` for atomic coincident CPU/memory edges. The task ELF also
 runs on the qualified interrupt image without strict access faults; it passed
 three physical runs at **124.8 MHz** with **30,725 retired instructions** in
-**86,644 cycles** in each run (86,645 in the simultaneous-edge model). The access-fault ELF requires
+**86,644 cycles** in each run. The initial strict-RTL model recorded 86,645 cycles;
+the currently selected strict RTL records 86,653 cycles after interrupt-claim
+changes. These model counts do not qualify a new hardware image. The access-fault ELF requires
 `HardwareCompactAccessFaultTestTop`; its physical qualification is recorded
 separately. Timer-driven run lengths are integration measurements, not fixed-work
 IPC benchmarks.
