@@ -15,7 +15,10 @@ Core accepts three **CPU-clock synchronous levels** in `machine_interrupts[2:0]`
 external, timer, software. An asynchronous external source requires platform
 synchronization before this input. The board connects the memory-domain timer
 and MSIP through a CPU-domain sampling register; the clocks are related 2:1.
-The board has no external device/controller connected yet and ties MEIP low.
+The access-fault baseline ties MEIP low. `HardwareCompactConsoleTestTop` adds
+`ENABLE_CONSOLE=1` and routes its memory-domain RX level through the same
+CPU-domain register. Draining its RX FIFO or masking IRQ_ENABLE acknowledges MEI.
+See [the console contract and qualification status](RV64_CONSOLE_PLAN.md).
 
 With this configuration, `mie` (0x304) implements bits 11, 7 and 3. Other bits
 read zero and ignore writes. `mip` (0x344) exposes the corresponding source
@@ -49,12 +52,13 @@ schedule. Writes to the three interrupt-control CSRs pay serialization cost.
 
 ## Memory-mapped time and software interrupt
 
-The **0x0200_0000–0x0200_ffff** window selects the timer peripheral and never
+The **0x0200_0000–0x0200_ffff** window selects platform peripherals and never
 writes its BRAM alias. Instruction fetch does not access this peripheral.
 
 | Address | Register | Access/reset |
 | --- | --- | --- |
 | 0x0200_0000 | MSIP | Read/write bit 0, all other bits zero; reset 0 |
+| 0x0200_1000–0x0200_103f | Optional USB/JTAG console | TX/RX FIFOs, status, RX IRQ mask; disabled by default |
 | 0x0200_4000 | MTIMECMP | Read/write 64 bits; reset 0xffff_ffff_ffff_ffff |
 | 0x0200_bff0 | Timebase frequency | Read-only 64-bit value **62,400,000 Hz** |
 | 0x0200_bff8 | MTIME | Read/write 64 bits; reset 0, increments each memory edge |

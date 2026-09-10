@@ -204,3 +204,81 @@ fn exercise_board(sim: Simulator<NativeBackend>) {
         }
     }
 }
+
+#[test]
+fn native_console_exchanges_while_running_and_drains_after_tohost() {
+    let sim = SimulatorBuilder::new(&board_source(), "HardwareCompactConsoleTestTop")
+        .build_native()
+        .unwrap();
+    let mut board = Board { sim, cycles: 0 };
+    board.set("pll_locked", 0);
+    board.set("jtag_rst_n", 0);
+    for pin in [
+        "jtag_ce1",
+        "jtag_ce2",
+        "jtag_shift",
+        "jtag_tdi",
+        "jtag_update",
+    ] {
+        board.set(pin, 0);
+    }
+    board.tick("jtag_tck");
+    board.run(10);
+    board.set("pll_locked", 1);
+    board.set("jtag_rst_n", 1);
+    board.run(10);
+    // LUI t0,0x2001; emit J; enable RX IRQ; poll STATUS until RX valid;
+    // snapshot mip before consuming RX; echo the byte; terminal store; spin.
+    let words = [
+        0x020012b7_u32,
+        0x04a00313,
+        0x00628023,
+        0x00100313,
+        0x00628c23,
+        0x0102c383,
+        0x0023fe13,
+        0xfe0e0ce3,
+        0x34402ff3,
+        0x0082d383,
+        0x00728023,
+        0x10000293,
+        0x00100313,
+        0x0062b023,
+        0x0000006f,
+    ];
+    let bytes = words
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect::<Vec<_>>();
+    for _ in 0..2 {
+        board.command(3, 0, 2, 0);
+        for (index, chunk) in bytes.chunks(8).enumerate() {
+            let mut data = [0_u8; 8];
+            data[..chunk.len()].copy_from_slice(chunk);
+            board.command(1, (index * 8) as u32, u64::from_le_bytes(data), 0xff);
+        }
+        board.command(2, 0x100, 0, 0);
+        board.command(3, 0, 1, 0);
+        board.run(1000);
+        assert_eq!(board.read(18, 1), 0);
+        board.command(5, 1, 0, 0);
+        let response = board.read(224, 32);
+        assert_eq!((response >> 16) & 0x1ff, 0x55);
+        assert_eq!(response & 0x3ff, 0x14a);
+        // Reading SELECT repeatedly is observational, not another FIFO pop.
+        assert_eq!(board.read(224, 32), response);
+        board.command(5, 3, u64::from(b'Q'), 0);
+        assert_eq!(board.read(224, 32) & 0x3ff, 0x200);
+        board.run(1000);
+        assert_eq!(board.read(18, 1), 1);
+        assert_eq!(board.read(32, 64), 1);
+        assert_eq!(board.read(96, 64), 0x800, "RX drives the CSR MEIP level");
+        board.command(5, 1, 0, 0);
+        assert_eq!(board.read(224, 32) & 0x3ff, 0x151);
+        for _ in 0..2 {
+            board.command(5, 1, 0, 0);
+            assert_eq!(board.read(224, 32) & 0x3ff, 0);
+        }
+        assert_eq!(board.read(21, 1), 0, "no console command was rejected");
+    }
+}

@@ -70,7 +70,9 @@ def main():
     for path in sorted(p for p in source.rglob("*") if p.is_file()):
         source_fingerprint.update((str(path.relative_to(source)) + "\0" + digest(path) + "\n").encode())
     records, elfs = {}, {}
-    for name, features in [("kernel-tasks", []), ("kernel-access-faults", ["--features", "access-faults"])]:
+    for name, features in [("kernel-tasks", []),
+                           ("kernel-access-faults", ["--features", "access-faults"]),
+                           ("kernel-console", ["--features", "access-faults,console"])]:
         cmd = ["cargo", "+" + TOOLCHAIN, "build", "--release", "--locked", "--offline",
                "-Z", "build-std=core", "--target-dir", "../build/kernel-target"] + features
         # Scope the unstable build-std opt-in to this exact pinned command. No

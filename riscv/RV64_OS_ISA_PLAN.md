@@ -124,6 +124,10 @@ UARTとRAMの配置・起動引数もここで短いプラットフォーム仕�
 その後A、下位特権・PMPへ進む。64-bit上位アドレス、境界を跨ぐaccess、
 誤予測fetch、割り込みとfaultの競合は既存の回帰試験として維持する。
 
+2026-09-11: [USB/JTAGコンソール](RV64_CONSOLE_PLAN.md)のRTL、Rust driverとMEI受信処理を実装。
+起動・8件の例外ログと2タスク完走は3種類のclock評価で合格した。現在は同じ
+124.8/62.4 MHz、setup/hold各200 ps予約で配置配線・実機認定を進めている。
+
 ### 2. A拡張：OSのlockとコンパイラのatomic
 
 `LR.W/D`、`SC.W/D` と全AMO.W/Dを実装し、Zaamo＋Zalrscが揃ってから `misa.A` を立てる。

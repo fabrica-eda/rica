@@ -723,6 +723,7 @@ fn verify_hardware_memory_elf(
     elf: &Path,
     label: &str,
     coincident_order: CoincidentEdgeOrder,
+    kernel_console: bool,
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
     let image = ElfImage::load(elf)?;
@@ -783,12 +784,50 @@ fn verify_hardware_memory_elf(
     simulator.tick(clk_mem)?;
     simulator.modify(|io| io.set(run, 1_u8))?;
 
+    let mut console = kernel_console.then(verify_riscv::console_host::KernelConsole::default);
+    let mut console_pending = false;
+    let mut console_sequence = 0_u8;
+    let mut console_terminal = false;
+    let console_request = simulator.signal("console_host_request_sequence");
+    let console_pop = simulator.signal("console_host_pop");
+    let console_push = simulator.signal("console_host_push");
+    let console_data = simulator.signal("console_host_data");
     let mut trace = std::collections::VecDeque::with_capacity(20);
     let mut mailbox_low = 0_u64;
     let mut commits = 0_usize;
     let mut first_commit_cycle = None;
     let mut reset_entries = 0_usize;
     for cycle in 1..=max_cycles {
+        if let Some(host) = &mut console {
+            if console_pending
+                && value_native(&mut simulator, "console_host_response_sequence")
+                    == u64::from(console_sequence)
+            {
+                let response = value_native(&mut simulator, "console_host_response") as u16;
+                host.accept(response)?;
+                console_pending = false;
+                if console_terminal && response & (1 << 8) == 0 {
+                    host.validate()?;
+                    println!(
+                        "CONSOLE_TRANSCRIPT {}",
+                        serde_json::json!({"elf": elf, "clock_order": coincident_order.label(), "text": host.transcript()?})
+                    );
+                    return Ok(());
+                }
+            }
+            // Deliberately backpressure the 16-byte FIFO and hold each reply.
+            if !console_pending && cycle % 256 == 0 {
+                console_sequence ^= 1;
+                let input = host.input();
+                simulator.modify(|io| {
+                    io.set(console_request, console_sequence);
+                    io.set(console_pop, 1_u8);
+                    io.set(console_push, u8::from(input.is_some()));
+                    io.set(console_data, input.unwrap_or(0));
+                })?;
+                console_pending = true;
+            }
+        }
         // Manual tick handles one event at a time. These two serializations
         // stress request and response ordering; neither measures hardware
         // cycles. Use --timed-clocks for atomic coincident-edge diagnostics.
@@ -894,7 +933,10 @@ fn verify_hardware_memory_elf(
                 coincident_order.label(),
                 cycle - first_commit + 1,
             );
-            return Ok(());
+            if console.is_none() {
+                return Ok(());
+            }
+            console_terminal = true;
         }
     }
     let recent = trace
@@ -932,6 +974,8 @@ struct HardwareModelConfig {
     early_divide: bool,
     machine_interrupts: bool,
     strict_memory: bool,
+    machine_console: bool,
+    kernel_console: bool,
 }
 
 fn verify_hardware_memory_rtl(
@@ -954,6 +998,8 @@ fn verify_hardware_memory_rtl(
         early_divide,
         machine_interrupts,
         strict_memory,
+        machine_console,
+        kernel_console,
     } = config;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
@@ -978,6 +1024,7 @@ fn verify_hardware_memory_rtl(
         .param("EARLY_DIVIDE", u64::from(early_divide))
         .param("ENABLE_INTERRUPTS", u64::from(machine_interrupts))
         .param("STRICT_MEMORY", u64::from(strict_memory))
+        .param("ENABLE_CONSOLE", u64::from(machine_console))
         .compile_native()?
         .into_program_image();
     if requested_elfs.is_empty() {
@@ -1001,6 +1048,7 @@ fn verify_hardware_memory_rtl(
                     &project.join("build/rv64i-subset").join(&label),
                     &label,
                     order,
+                    kernel_console,
                     max_cycles,
                 )?;
             }
@@ -1012,7 +1060,7 @@ fn verify_hardware_memory_rtl(
                 CoincidentEdgeOrder::MemoryThenCpu,
                 CoincidentEdgeOrder::CpuThenMemory,
             ] {
-                verify_hardware_memory_elf(&model, elf, &label, order, max_cycles)?;
+                verify_hardware_memory_elf(&model, elf, &label, order, kernel_console, max_cycles)?;
             }
         }
     }
@@ -1489,6 +1537,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let early_divide = arguments.iter().any(|arg| arg == "--early-divide");
     let machine_interrupts = arguments.iter().any(|arg| arg == "--machine-interrupts");
     let strict_memory = arguments.iter().any(|arg| arg == "--strict-memory");
+    let kernel_console = arguments.iter().any(|arg| arg == "--kernel-console");
+    let machine_console = kernel_console || arguments.iter().any(|arg| arg == "--machine-console");
+    if machine_console && !machine_interrupts {
+        return Err("console options require --machine-interrupts".into());
+    }
     let timed_clocks = arguments.iter().any(|arg| arg == "--timed-clocks");
     let use_dsp = arguments.iter().any(|arg| arg == "--dsp-multiplier");
     let enable_m = use_dsp || arguments.iter().any(|arg| arg == "--m-extension");
@@ -1610,6 +1663,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--early-divide"
                     && argument.as_str() != "--machine-interrupts"
                     && argument.as_str() != "--strict-memory"
+                    && argument.as_str() != "--kernel-console"
+                    && argument.as_str() != "--machine-console"
                     && argument.as_str() != "--dsp-multiplier"
                     && !cycle_option.is_some_and(|option| *index == option || *index == option + 1)
                     && !lsu_option.is_some_and(|option| *index == option || *index == option + 1)
@@ -1646,6 +1701,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         early_divide,
                         machine_interrupts,
                         strict_memory,
+                        machine_console,
+                        kernel_console,
                         trace: timed_trace,
                     },
                     max_cycles,
@@ -1670,6 +1727,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 early_divide,
                 machine_interrupts,
                 strict_memory,
+                machine_console,
+                kernel_console,
             },
             max_cycles,
         );

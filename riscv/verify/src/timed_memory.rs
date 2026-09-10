@@ -54,6 +54,8 @@ pub struct ExecutionConfig<'a> {
     pub early_divide: bool,
     pub machine_interrupts: bool,
     pub strict_memory: bool,
+    pub machine_console: bool,
+    pub kernel_console: bool,
     pub trace: Option<TraceConfig<'a>>,
 }
 
@@ -154,6 +156,7 @@ pub fn run(
         .param("EARLY_DIVIDE", u64::from(execution.early_divide))
         .param("ENABLE_INTERRUPTS", u64::from(execution.machine_interrupts))
         .param("STRICT_MEMORY", u64::from(execution.strict_memory))
+        .param("ENABLE_CONSOLE", u64::from(execution.machine_console))
         .build()?;
     let reset = sim.signal("rst_n");
     let run = sim.signal("run");
@@ -183,12 +186,50 @@ pub fn run(
     sim.modify(|io| io.set(debug_write, 0_u8))?;
     edge(&mut sim, &["clk_mem"])?;
     sim.modify(|io| io.set(run, 1_u8))?;
+    let mut console = execution
+        .kernel_console
+        .then(crate::console_host::KernelConsole::default);
+    let mut console_pending = false;
+    let mut console_sequence = 0_u8;
+    let mut console_terminal = false;
+    let console_request = sim.signal("console_host_request_sequence");
+    let console_pop = sim.signal("console_host_pop");
+    let console_push = sim.signal("console_host_push");
+    let console_data = sim.signal("console_host_data");
     let mut commits = 0;
     let mut memory_wait = 0;
     let mut muldiv_wait = 0;
     let mut mailbox_low = 0;
     let mut trace = std::collections::VecDeque::new();
     for cycle in 1..=max_cycles {
+        if let Some(host) = &mut console {
+            if console_pending
+                && value(&mut sim, "console_host_response_sequence") == u64::from(console_sequence)
+            {
+                let response = value(&mut sim, "console_host_response") as u16;
+                host.accept(response)?;
+                console_pending = false;
+                if console_terminal && response & (1 << 8) == 0 {
+                    host.validate()?;
+                    println!(
+                        "CONSOLE_TRANSCRIPT {}",
+                        serde_json::json!({"elf": elf, "clock_order": "simultaneous", "text": host.transcript()?})
+                    );
+                    return Ok(());
+                }
+            }
+            if !console_pending && cycle % 256 == 0 {
+                console_sequence ^= 1;
+                let input = host.input();
+                sim.modify(|io| {
+                    io.set(console_request, console_sequence);
+                    io.set(console_pop, 1_u8);
+                    io.set(console_push, u8::from(input.is_some()));
+                    io.set(console_data, input.unwrap_or(0));
+                })?;
+                console_pending = true;
+            }
+        }
         if let Some((config, output)) = &mut diagnostic
             && (config.start_cycle..=config.end_cycle).contains(&cycle)
         {
@@ -259,7 +300,10 @@ pub fn run(
             });
             println!("Hardware-memory timed RTL: {} PASS", elf.display());
             println!("TIMED_METRIC {report}");
-            return Ok(());
+            if console.is_none() {
+                return Ok(());
+            }
+            console_terminal = true;
         }
     }
     if let Some((_, output)) = &mut diagnostic {

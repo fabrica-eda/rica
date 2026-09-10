@@ -6,6 +6,7 @@ use std::path::Path;
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
+pub mod console_host;
 pub mod timed_memory;
 
 const CORE_SOURCES: [&str; 24] = [

@@ -8,6 +8,9 @@ use core::ptr::{addr_of_mut, read_volatile, write_volatile};
 
 global_asm!(include_str!("entry.S"));
 
+#[cfg(feature = "console")]
+mod console;
+
 const MTIMECMP: *mut u64 = 0x0200_4000 as *mut u64;
 const MTIME: *const u64 = 0x0200_bff8 as *const u64;
 const SLICE: u64 = 3000; // The platform timer runs at 62.4 MHz.
@@ -85,6 +88,8 @@ fn finish(code: u64) -> ! {
     unsafe {
         asm!("csrci mstatus, 8", "csrw mie, zero", options(nostack));
         write_volatile(MTIMECMP, u64::MAX);
+        #[cfg(feature = "console")]
+        console::finish(code);
         write_volatile(
             addr_of_mut!(tohost),
             if code == 0 { 1 } else { (code << 1) | 1 },
@@ -112,6 +117,8 @@ extern "C" fn kernel_main() -> ! {
     unsafe {
         write_volatile(MTIMECMP, u64::MAX);
     }
+    #[cfg(feature = "console")]
+    console::init();
     #[cfg(feature = "access-faults")]
     access_probes();
     let gp: u64;
@@ -139,7 +146,12 @@ extern "C" fn kernel_main() -> ! {
             frame.write(initial);
             CONTEXTS[id] = frame;
         }
-        asm!("csrw mie, {}", in(reg) 0x80_u64, options(nostack));
+        let enabled = if cfg!(feature = "console") {
+            0x880_u64
+        } else {
+            0x80_u64
+        };
+        asm!("csrw mie, {}", in(reg) enabled, options(nostack));
         arm_timer();
         enter_context(CONTEXTS[0]);
     }
@@ -177,6 +189,10 @@ extern "C" fn task(id: usize) -> ! {
     while unsafe { read_volatile(addr_of_mut!(TASK_TICKS).cast::<u64>().add(id)) } == 0 {
         core::hint::spin_loop();
     }
+    #[cfg(feature = "console")]
+    while !console::done() {
+        core::hint::spin_loop();
+    }
     unsafe {
         asm!("ecall", in("a7") 1_u64, options(nostack));
     }
@@ -195,6 +211,8 @@ unsafe extern "C" fn rust_trap(frame: *mut TrapFrame) -> *mut TrapFrame {
             check(f.pc == PROBE_EXPECTED.pc, 21);
             check(f.value == PROBE_EXPECTED.value, 22);
             check(PROBE_COUNT < 8, 23);
+            #[cfg(feature = "console")]
+            console::fault(f.cause, f.pc, f.value);
             kernel_trap_records[PROBE_COUNT] = TrapRecord {
                 cause: f.cause,
                 pc: f.pc,
@@ -206,6 +224,13 @@ unsafe extern "C" fn rust_trap(frame: *mut TrapFrame) -> *mut TrapFrame {
             return frame;
         }
         check(CURRENT < 2, 24);
+        #[cfg(feature = "console")]
+        if f.cause == 0x8000_0000_0000_000b {
+            check(f.value == 0, 44);
+            console::interrupt();
+            // Device service does not reschedule tasks or postpone MTI.
+            return frame;
+        }
         match f.cause {
             11 => {
                 f.pc += 4; // ECALL has no compressed encoding.

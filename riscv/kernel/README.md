@@ -44,6 +44,10 @@ Outputs are under `riscv/build/rust-kernel/`:
 - `kernel-access-faults.elf`: the same tasks after eight recoverable faults:
   high-address load/store aliases, crossing load/store at the RAM boundary,
   two full-width invalid jump targets, and 16/32-bit fetches at the last parcel.
+- `kernel-console.elf`: access-fault recovery and the same tasks, with live
+  USB/JTAG logs and MEI receive interrupts. The host sends `ping\n`; the kernel
+  verifies the five bytes in the interrupt handler and replies `pong` before
+  either task can finish. Requires the console-enabled platform.
 - `build.json` and disassembly: compiler/source/ELF hashes and an instruction
   allow-list audit. Encoded A/F/D/V instructions are rejected.
 
@@ -61,7 +65,7 @@ Use one command for the CPU/kernel development loop:
 python3 riscv/kernel/check.py
 ```
 
-It builds and audits both kernels, builds the repository's model runner, and
+It builds and audits all three kernels, builds the repository's model runner, and
 runs both serialized clock orders plus simultaneous CPU/memory edges. Reports,
 input hashes and logs are written to `riscv/build/rust-kernel/check.json` and
 `check-*.log`. This checks the current RTL; physical qualification is separate.
@@ -90,6 +94,28 @@ lengths are integration measurements, not fixed-work IPC benchmarks.
 The hardware runner defaults to
 `build/riscv-hardware-compact-access-faults-124p8-20260910.bit`.
 See the [qualification and counters](../../toolchain/measurements/2026-09-10-rv64-access-faults/PERFORMANCE.md).
+
+## Live console
+
+The console variant uses [the USB/JTAG MMIO device](../RV64_CONSOLE_PLAN.md) at
+`0x02001000`; it needs no additional board wiring. Boot and the non-nested trap
+handler own the transmitter, so task preemption cannot interleave two writers.
+The RX handler drains the FIFO and masks its interrupt after the expected input.
+It returns the same task frame and leaves the timer deadline unchanged.
+
+Use the model command above with `--kernel-console` and only
+`riscv/build/rust-kernel/kernel-console.elf`. The host model applies output
+backpressure, sends input while global interrupts are masked during boot, and
+checks all eight 64-bit fault records plus the final success messages.
+`--machine-console` enables the device without this kernel-specific host protocol,
+for regression of ordinary ELFs on the new platform.
+
+The physical runner supports `--kernel-console --xvc 127.0.0.1:3721` with the
+console ELF and an explicitly selected, qualified console bitstream. It streams
+logs while the CPU runs and drains remaining output after `tohost` freezes the
+counters. A disconnected host applies backpressure; console waiting time is
+included in those counters. Compare CPU performance using the unchanged plain
+ELFs, not the host-dependent console run.
 
 The next CPU/kernel pairs are A plus atomics, U/PMP plus syscall and isolation,
 then S/Sv39 plus page tables and process switching. See the

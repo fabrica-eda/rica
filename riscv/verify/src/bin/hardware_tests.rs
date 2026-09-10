@@ -277,6 +277,7 @@ enum Opcode {
     SetTohost = 2,
     Control = 3,
     Select = 4,
+    Exchange = 5,
 }
 
 fn frame(opcode: Opcode, sequence: u8, address: u32, data: u64, mask: u8) -> [u8; 16] {
@@ -366,13 +367,17 @@ struct XvcDirect {
 }
 
 impl XvcDirect {
-    fn new() -> Self {
-        let mut bus = Self {
+    fn continuing() -> Self {
+        Self {
             tms: Vec::new(),
             tdi: Vec::new(),
             checks: Vec::new(),
             observations: Vec::new(),
-        };
+        }
+    }
+
+    fn new() -> Self {
+        let mut bus = Self::continuing();
         // Enter Test-Logic-Reset, return to Run-Test/Idle, and select ER1.
         for _ in 0..5 {
             bus.push(true, false);
@@ -922,16 +927,12 @@ fn push_value_bits(expected: &mut Vec<(u32, bool)>, first: u32, value: u64, widt
     expected.extend((0..width).map(|bit| (first + bit, value & (1_u64 << bit) != 0)));
 }
 
-fn emit_test(
-    bus: &mut impl DirectJtag,
+fn load_and_run(
+    session: &mut DirectSession<'_, impl DirectJtag>,
     image: &ElfImage,
-    run_tck: usize,
     write_bytes: usize,
-    expected_tohost: u64,
-    observe_metrics: bool,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<u8, Box<dyn Error>> {
     let (memory, ranges) = memory_image(image)?;
-    let mut session = DirectSession::new(bus);
 
     // Quiesce a preceding test before replacing its instruction image.
     session.control(2);
@@ -960,7 +961,19 @@ fn emit_test(
     // Reassert reset and clear the previous result only after checking that
     // the complete image and tohost address were accepted without error.
     session.control(2);
-    let run_sequence = session.control(1);
+    Ok(session.control(1))
+}
+
+fn emit_test(
+    bus: &mut impl DirectJtag,
+    image: &ElfImage,
+    run_tck: usize,
+    write_bytes: usize,
+    expected_tohost: u64,
+    observe_metrics: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut session = DirectSession::new(bus);
+    let run_sequence = load_and_run(&mut session, image, write_bytes)?;
     session.bus.run_test(run_tck);
 
     // Each SELECT updates the response mux only after its own scan. Pipeline
@@ -991,6 +1004,114 @@ fn emit_test(
         session.observe_selected_bits(&selectors);
     }
     Ok(())
+}
+
+/// Drain output while the CPU runs, then read the ordinary frozen counters.
+/// Every exchange is acknowledged before issuing another; retrying SELECT is
+/// safe, whereas retransmitting an accepted RX push would duplicate a byte.
+fn run_console(
+    xvc: &mut XvcClient,
+    image: &ElfImage,
+    elf: &Path,
+    write_bytes: usize,
+) -> Result<[u64; 11], Box<dyn Error>> {
+    let mut bus = XvcDirect::new();
+    let mut session = DirectSession::new(&mut bus);
+    load_and_run(&mut session, image, write_bytes)?;
+    let mut next_sequence = session.next_sequence;
+    xvc.shift(&bus)?;
+    let mut host = verify_riscv::console_host::KernelConsole::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut terminal = false;
+    while std::time::Instant::now() < deadline {
+        // Continue in ER1 from Run-Test/Idle. Resetting the TAP here would
+        // clear the transport mailbox toggle while the CPU is running.
+        let mut bus = XvcDirect::continuing();
+        let mut session = DirectSession::new(&mut bus);
+        session.next_sequence = next_sequence;
+        let input = host.input();
+        let sequence = session.issue(
+            Opcode::Exchange,
+            1 | (u32::from(input.is_some()) << 1),
+            u64::from(input.unwrap_or(0)),
+            0,
+        );
+        session.observe_selected_bits(&(224..256).collect::<Vec<_>>());
+        next_sequence = session.next_sequence;
+        let mut response = response_value(&xvc.shift(&bus)?, 0, 32);
+        for _ in 0..4 {
+            if response & (1 << 24) == 0 && (response >> 16) as u8 == sequence {
+                break;
+            }
+            let mut bus = XvcDirect::continuing();
+            let mut session = DirectSession::new(&mut bus);
+            session.next_sequence = next_sequence;
+            session.observe_selected_bits(&(224..256).collect::<Vec<_>>());
+            next_sequence = session.next_sequence;
+            response = response_value(&xvc.shift(&bus)?, 0, 32);
+        }
+        if response & (1 << 24) != 0 || (response >> 16) as u8 != sequence {
+            return Err(
+                format!("console exchange {sequence} did not complete: {response:#x}").into(),
+            );
+        }
+        if response >> 25 != 0 {
+            return Err("console has nonzero reserved response bits".into());
+        }
+        host.accept(response as u16)?;
+        // Stream output immediately so boot/fault logs remain useful if the
+        // kernel subsequently fails or waits indefinitely for input.
+        if response & (1 << 8) != 0 {
+            std::io::stdout().write_all(&[response as u8])?;
+            std::io::stdout().flush()?;
+        }
+        if response & (1 << 8) == 0 {
+            let mut bus = XvcDirect::continuing();
+            let mut session = DirectSession::new(&mut bus);
+            session.next_sequence = next_sequence;
+            session.observe_selected_bits(&[18, 21]);
+            next_sequence = session.next_sequence;
+            let status = xvc.shift(&bus)?;
+            if response_value(&status, 1, 1) != 0 {
+                return Err("JTAG command rejected during console exchange".into());
+            }
+            if terminal {
+                break; // One further empty exchange after observing tohost.
+            }
+            terminal = response_value(&status, 0, 1) != 0;
+        }
+    }
+    if !terminal {
+        return Err(format!("console kernel timed out: {:?}", host.transcript()?).into());
+    }
+    let mut bus = XvcDirect::continuing();
+    let mut session = DirectSession::new(&mut bus);
+    session.next_sequence = next_sequence;
+    let mut expected = vec![
+        (16, true),
+        (17, true),
+        (18, true),
+        (19, false),
+        (20, false),
+        (21, false),
+    ];
+    push_value_bits(&mut expected, 0, 0x52, 8);
+    push_value_bits(&mut expected, 8, 0x05, 8);
+    push_value_bits(&mut expected, 32, 1, 64);
+    session.expect_selected_bits(&expected);
+    let mut selectors = Vec::new();
+    for counter in 0_u32..11 {
+        selectors.extend((0..32).map(|bit| (counter << 8) | (5 << 5) | bit));
+        selectors.extend((0..32).map(|bit| (counter << 8) | (6 << 5) | bit));
+    }
+    session.observe_selected_bits(&selectors);
+    let metrics = metric_values(&xvc.shift(&bus)?)?;
+    host.validate()?;
+    println!(
+        "CONSOLE_TRANSCRIPT {}",
+        serde_json::json!({"elf": elf, "clock_order": "hardware", "text": host.transcript()?})
+    );
+    Ok(metrics)
 }
 
 fn test_svf(
@@ -1031,6 +1152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut write_bytes = 8_usize;
     let mut expected_tohost = 1_u64;
     let mut program = true;
+    let mut kernel_console = false;
     let mut act4 = false;
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
@@ -1065,6 +1187,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 value.parse()?
             };
+        } else if argument == "--kernel-console" {
+            kernel_console = true;
         } else if argument == "--no-program" {
             program = false;
         } else if argument == "--act4" {
@@ -1095,6 +1219,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    if kernel_console
+        && (xvc_address.is_none() || expected_tohost != 1 || act4 || requested_elfs.is_empty())
+    {
+        return Err("--kernel-console requires --xvc, explicit kernel-console ELF paths and expected tohost=1".into());
+    }
     let loader = env::var_os("OPENFPGALOADER")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("openFPGALoader"));
@@ -1133,6 +1262,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(OsStr::to_str)
             .ok_or("ELF has no valid filename")?;
         if let Some(xvc) = &mut xvc {
+            if kernel_console {
+                let metrics = run_console(xvc, &image, elf, write_bytes)?;
+                validate_metrics(name, metrics)?;
+                println!("METRIC {name:<22} {}", format_metrics(metrics));
+                println!("PASS {name:<24} hardware console and tohost=1");
+                continue;
+            }
             let mut bus = XvcDirect::new();
             emit_test(
                 &mut bus,

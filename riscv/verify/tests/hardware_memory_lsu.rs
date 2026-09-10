@@ -3,18 +3,21 @@ use std::{fs, path::Path, sync::OnceLock};
 
 use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 
-fn image(fast: u64, timer: bool) -> &'static NativeProgramImage {
-    static IMAGES: [OnceLock<NativeProgramImage>; 14] = [const { OnceLock::new() }; 14];
-    IMAGES[fast as usize + if timer { 7 } else { 0 }].get_or_init(|| {
-        let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let source = fs::read_to_string(project.join("src/HardwareMemory.veryl")).unwrap();
-        SimulatorBuilder::new(&source, "HardwareMemory")
-            .param("FAST_LSU", fast)
-            .param("ENABLE_TIMER", u64::from(timer))
-            .compile_native()
-            .unwrap()
-            .into_program_image()
-    })
+fn image(fast: u64, timer: bool, console: bool) -> &'static NativeProgramImage {
+    static IMAGES: [OnceLock<NativeProgramImage>; 28] = [const { OnceLock::new() }; 28];
+    IMAGES[fast as usize + if timer { 7 } else { 0 } + if console { 14 } else { 0 }].get_or_init(
+        || {
+            let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            let source = fs::read_to_string(project.join("src/HardwareMemory.veryl")).unwrap();
+            SimulatorBuilder::new(&source, "HardwareMemory")
+                .param("FAST_LSU", fast)
+                .param("ENABLE_TIMER", u64::from(timer))
+                .param("ENABLE_CONSOLE", u64::from(console))
+                .compile_native()
+                .unwrap()
+                .into_program_image()
+        },
+    )
 }
 
 struct Memory {
@@ -28,8 +31,12 @@ impl Memory {
     }
 
     fn with_timer(fast: u64, timer: bool) -> Self {
+        Self::configured(fast, timer, false)
+    }
+
+    fn configured(fast: u64, timer: bool, console: bool) -> Self {
         let sim = SimulatorBuilder::new("", "HardwareMemory")
-            .build_native_from_image(image(fast, timer).clone())
+            .build_native_from_image(image(fast, timer, console).clone())
             .unwrap();
         let mut mem = Self { sim, sequence: 0 };
         for name in [
@@ -46,6 +53,10 @@ impl Memory {
             "debug_write",
             "debug_address",
             "debug_data",
+            "console_host_request_sequence",
+            "console_host_pop",
+            "console_host_push",
+            "console_host_data",
         ] {
             mem.set(name, 0);
         }
@@ -98,6 +109,74 @@ impl Memory {
             }
         }
         panic!("memory request did not complete");
+    }
+
+    fn exchange(&mut self, pop: bool, input: Option<u8>) -> u64 {
+        let sequence = self.get("console_host_response_sequence") ^ 1;
+        self.set("console_host_pop", u64::from(pop));
+        self.set("console_host_push", u64::from(input.is_some()));
+        self.set("console_host_data", u64::from(input.unwrap_or(0)));
+        self.set("console_host_request_sequence", sequence);
+        for _ in 0..8 {
+            self.tick();
+            if self.get("console_host_response_sequence") == sequence {
+                let result = self.get("console_host_response");
+                for _ in 0..8 {
+                    self.tick();
+                    assert_eq!(self.get("console_host_response"), result);
+                }
+                return result;
+            }
+        }
+        panic!("console host request did not complete");
+    }
+}
+
+#[test]
+fn console_mmio_keeps_response_ownership_and_never_writes_its_ram_alias() {
+    const BASE: u32 = 0x0200_1000;
+    const SENTINEL: u64 = 0xa1b2_c3d4_e5f6_7788;
+    for fast in [0, 6] {
+        let mut mem = Memory::configured(fast, true, true);
+        mem.request(0x8000_1000, Some((SENTINEL, 255)));
+        assert_eq!(mem.request(BASE + 0x20, None).1, 0x434f4e01);
+        assert_eq!(mem.request(BASE + 0x10, None).1, 9);
+        mem.request(BASE, Some((0x42, 255)));
+        for _ in 0..12 {
+            mem.tick();
+        }
+        assert_eq!(mem.request(BASE + 0x28, None).1, 1);
+        assert_eq!(mem.request(0x8000_1000, None).1, SENTINEL);
+        assert_eq!(mem.exchange(true, Some(0x9a)) & 0x3ff, 0x342);
+        assert_eq!(mem.get("machine_interrupts"), 0);
+        mem.request(BASE + 0x18, Some((1, 255)));
+        assert_eq!(mem.get("machine_interrupts"), 4);
+        assert_eq!(mem.request(BASE + 9, None).1, 1);
+        assert_eq!(mem.request(BASE + 0x28, None).1, 0x100);
+        assert_eq!(mem.request(BASE + 8, None).1, 0x19a);
+        assert_eq!(mem.get("machine_interrupts"), 0);
+        mem.exchange(false, Some(0xb7));
+        // A new host input cannot change an acknowledged, held CPU response.
+        assert_eq!(mem.get("cpu_data_read"), 0x19a);
+        assert_eq!(mem.get("machine_interrupts"), 4);
+        assert_eq!(mem.request(BASE + 8, None).1, 0x1b7);
+        assert_eq!(mem.request(BASE + 8, None).1, 0);
+        for _ in 0..16 {
+            mem.tick();
+        }
+        assert_eq!(mem.request(BASE + 0x28, None).1, 0);
+        mem.request(BASE + 1, Some((0x11, 1)));
+        mem.request(BASE, Some((0x22, 254)));
+        assert_eq!(mem.request(BASE + 0x28, None).1, 0);
+        mem.exchange(false, Some(0xcc));
+        mem.set("timer_rst_n", 0);
+        mem.set("console_host_request_sequence", 0);
+        mem.tick();
+        mem.set("timer_rst_n", 1);
+        assert_eq!(mem.get("machine_interrupts"), 0);
+        assert_eq!(mem.request(BASE + 0x18, None).1, 0);
+        assert_eq!(mem.request(BASE + 0x28, None).1, 0);
+        assert_eq!(mem.request(0x8000_1000, None).1, SENTINEL);
     }
 }
 

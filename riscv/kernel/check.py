@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build both Rust kernels and run them against the current CPU RTL."""
+"""Build the Rust kernels and run them against the current CPU RTL."""
 import hashlib
 import json
 from pathlib import Path
@@ -38,8 +38,16 @@ def main():
         'inputs': inputs, 'runner_sha256': sha(runner),
         'build_record_sha256': sha(OUT / 'build.json'), 'runs': [],
     }
-    for name, extra in [('serialized', []), ('simultaneous', ['--timed-clocks'])]:
-        command = [str(runner), *flags, *extra, *[str(ROOT / p) for p in build['elfs']]]
+    plain = [p for p in build['elfs'] if Path(p).stem != 'kernel-console']
+    console = [p for p in build['elfs'] if Path(p).stem == 'kernel-console']
+    assert len(plain) == 2 and len(console) == 1
+    for name, extra, elfs, timed in [
+        ('serialized', [], plain, False),
+        ('simultaneous', ['--timed-clocks'], plain, True),
+        ('console-serialized', ['--kernel-console'], console, False),
+        ('console-simultaneous', ['--kernel-console', '--timed-clocks'], console, True),
+    ]:
+        command = [str(runner), *flags, *extra, *[str(ROOT / p) for p in elfs]]
         log = OUT / (f'check-{name}.log')
         start = time.monotonic()
         with log.open('w') as stream:
@@ -47,16 +55,18 @@ def main():
         lines = log.read_text().splitlines()
         metrics = [json.loads(line.removeprefix('TIMED_METRIC '))
                    for line in lines if line.startswith('TIMED_METRIC ')]
-        passes = sum('] PASS;' in line for line in lines) if not extra else len(metrics)
+        passes = sum('] PASS;' in line for line in lines) if not timed else len(metrics)
         record['runs'].append({
             'name': name, 'command': command, 'exit_code': result.returncode,
             'seconds': time.monotonic() - start, 'passes': passes, 'metrics': metrics,
+            'transcripts': [json.loads(line.removeprefix('CONSOLE_TRANSCRIPT '))
+                            for line in lines if line.startswith('CONSOLE_TRANSCRIPT ')],
             'log': str(log.relative_to(ROOT)), 'log_sha256': sha(log),
         })
         record['inputs_unchanged'] = all(sha(ROOT / p) == h for p, h in inputs.items())
         record['runner_unchanged'] = sha(runner) == record['runner_sha256']
         (OUT / 'check.json').write_text(json.dumps(record, indent=2) + '\n')
-        assert result.returncode == 0 and passes == (4 if not extra else 2), log
+        assert result.returncode == 0 and passes == len(elfs) * (1 if timed else 2), log
         assert record['inputs_unchanged'] and record['runner_unchanged']
         print(f'{name}: {passes} PASS', flush=True)
 

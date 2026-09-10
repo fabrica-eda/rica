@@ -17,6 +17,7 @@ module HardwareTestTop #(
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
+    param ENABLE_CONSOLE   : bit = 0,
     param STRICT_MEMORY    : bit = 0,
 ) (
     clk        : input  'reference clock             ,
@@ -164,35 +165,58 @@ module HardwareTestTop #(
         );
     }
 
-    var memory_machine_interrupts: 'memory logic<3>;
-    var core_machine_interrupts  : 'cpu    logic<3>;
+    var memory_machine_interrupts    : 'memory logic<3> ;
+    var core_machine_interrupts      : 'cpu    logic<3> ;
+    var console_request_q            : 'cpu    logic    ;
+    var console_pop_q                : 'cpu    logic    ;
+    var console_push_q               : 'cpu    logic    ;
+    var console_data_q               : 'cpu    logic<8> ;
+    var console_busy_q               : 'cpu    logic    ;
+    var console_sequence_q           : 'cpu    logic<8> ;
+    var console_completed_sequence_q : 'cpu    logic<8> ;
+    var console_response_q           : 'cpu    logic<16>;
+    var console_response_sequence    : 'memory logic    ;
+    var console_response             : 'memory logic<16>;
+    var console_response_sequence_cpu: 'cpu    logic    ;
+    var console_response_cpu         : 'cpu    logic<16>;
+    unsafe (cdc) {
+        assign console_response_sequence_cpu = console_response_sequence;
+        assign console_response_cpu          = console_response;
+    }
     unsafe (cdc) {
         inst hardware_memory: HardwareMemory #(
-            STRICT_MEMORY: STRICT_MEMORY    ,
-            ENABLE_TIMER : ENABLE_INTERRUPTS,
-            FAST_LSU     : FAST_LSU         ,
+            STRICT_MEMORY : STRICT_MEMORY    ,
+            ENABLE_TIMER  : ENABLE_INTERRUPTS,
+            ENABLE_CONSOLE: ENABLE_CONSOLE   ,
+            FAST_LSU      : FAST_LSU         ,
         ) (
-            clk                        : clk_mem                       ,
-            rst_n                      : debug_rst_n                   ,
-            timer_rst_n                : cpu_rst_n                     ,
-            timer_freeze               : result_valid_q                ,
-            machine_interrupts         : memory_machine_interrupts     ,
-            cpu_instr_address          : memory_instr_address          ,
-            cpu_instr_request_sequence : memory_instr_request_sequence ,
-            cpu_instr_response_sequence: memory_instr_response_sequence,
-            cpu_instr_line             : memory_instr_line             ,
-            cpu_instr_response_address : memory_instr_response_address ,
-            cpu_instr_response_valid   : memory_instr_response_valid   ,
-            cpu_data_address           : data_memory_addr[31:0]        ,
-            cpu_data_read              : data_rdata                    ,
-            cpu_data_write             : data_wdata                    ,
-            cpu_data_mask              : data_wmask                    ,
-            cpu_data_we                : data_we                       ,
-            cpu_data_request_sequence  : data_request_sequence         ,
-            cpu_data_response_sequence : data_response_sequence        ,
-            debug_write                : memory_debug_write_q != 2'd0,
-            debug_address              : memory_debug_addr_q           ,
-            debug_data                 : memory_debug_data_q           ,
+            clk                           : clk_mem                       ,
+            rst_n                         : debug_rst_n                   ,
+            timer_rst_n                   : cpu_rst_n                     ,
+            timer_freeze                  : result_valid_q                ,
+            machine_interrupts            : memory_machine_interrupts     ,
+            console_host_request_sequence : console_request_q             ,
+            console_host_pop              : console_pop_q                 ,
+            console_host_push             : console_push_q                ,
+            console_host_data             : console_data_q                ,
+            console_host_response_sequence: console_response_sequence     ,
+            console_host_response         : console_response              ,
+            cpu_instr_address             : memory_instr_address          ,
+            cpu_instr_request_sequence    : memory_instr_request_sequence ,
+            cpu_instr_response_sequence   : memory_instr_response_sequence,
+            cpu_instr_line                : memory_instr_line             ,
+            cpu_instr_response_address    : memory_instr_response_address ,
+            cpu_instr_response_valid      : memory_instr_response_valid   ,
+            cpu_data_address              : data_memory_addr[31:0]        ,
+            cpu_data_read                 : data_rdata                    ,
+            cpu_data_write                : data_wdata                    ,
+            cpu_data_mask                 : data_wmask                    ,
+            cpu_data_we                   : data_we                       ,
+            cpu_data_request_sequence     : data_request_sequence         ,
+            cpu_data_response_sequence    : data_response_sequence        ,
+            debug_write                   : memory_debug_write_q != 2'd0,
+            debug_address                 : memory_debug_addr_q           ,
+            debug_data                    : memory_debug_data_q           ,
         );
     }
 
@@ -323,6 +347,7 @@ module HardwareTestTop #(
             3'd4   : response_bank = debug_x31[63:32];
             3'd5   : response_bank = debug_counter_data[31:0];
             3'd6   : response_bank = debug_counter_data[63:32];
+            3'd7   : response_bank = {7'd0, console_busy_q, console_completed_sequence_q, console_response_q};
             default: {}
         }
         // A static five-level tree avoids the unsupported dynamic packed
@@ -388,24 +413,43 @@ module HardwareTestTop #(
 
     always_ff (clk_cpu, debug_rst_n) {
         if_reset {
-            run_q                = 1'b0;
-            tohost_address_q     = 32'h0000_0000;
-            command_error_q      = 1'b0;
-            last_sequence_q      = 8'h00;
-            response_selector_q  = 8'd0;
-            counter_selector_q   = 4'd0;
-            activity_q           = 24'h000000;
-            memory_debug_write_q = 2'd0;
-            memory_debug_addr_q  = 32'h0000_0000;
-            memory_debug_data_q  = 8'h00;
-            write_busy_q         = 1'b0;
-            write_address_q      = 32'h0000_0000;
-            write_data_q         = 64'h0000_0000_0000_0000;
-            write_mask_q         = 8'h00;
-            write_index_q        = 3'd0;
-            write_sequence_q     = 8'h00;
+            run_q                        = 1'b0;
+            tohost_address_q             = 32'h0000_0000;
+            command_error_q              = 1'b0;
+            last_sequence_q              = 8'h00;
+            response_selector_q          = 8'd0;
+            counter_selector_q           = 4'd0;
+            activity_q                   = 24'h000000;
+            memory_debug_write_q         = 2'd0;
+            memory_debug_addr_q          = 32'h0000_0000;
+            memory_debug_data_q          = 8'h00;
+            write_busy_q                 = 1'b0;
+            write_address_q              = 32'h0000_0000;
+            write_data_q                 = 64'h0000_0000_0000_0000;
+            write_mask_q                 = 8'h00;
+            write_index_q                = 3'd0;
+            write_sequence_q             = 8'h00;
+            console_request_q            = 1'b0;
+            console_pop_q                = 1'b0;
+            console_push_q               = 1'b0;
+            console_data_q               = 8'd0;
+            console_busy_q               = 1'b0;
+            console_sequence_q           = 8'd0;
+            console_completed_sequence_q = 8'd0;
+            console_response_q           = 16'd0;
         } else {
             activity_q = activity_q + 24'd1;
+            if !run_q {
+                console_request_q            = 1'b0;
+                console_busy_q               = 1'b0;
+                console_completed_sequence_q = 8'd0;
+                console_response_q           = 16'd0;
+            } else if console_busy_q && (console_response_sequence_cpu == console_request_q) {
+                console_response_q           = console_response_cpu;
+                console_completed_sequence_q = console_sequence_q;
+                console_busy_q               = 1'b0;
+                last_sequence_q              = console_sequence_q;
+            }
 
             // HardwareMemory is in the divided memory clock domain. Keep each
             // byte's write enable, address, and data stable for three CPU
@@ -483,6 +527,20 @@ module HardwareTestTop #(
                         4'd4: {
                             response_selector_q = command_frame_low[31:24];
                             counter_selector_q  = command_frame_low[35:32];
+                        }
+                        // EXCHANGE: address[0] pops output, address[1] pushes input.
+                        // The memory-domain device snapshots both results once.
+                        4'd5: {
+                            if ENABLE_CONSOLE && ENABLE_INTERRUPTS && run_q && !console_busy_q && !write_busy_q {
+                                console_request_q  = !console_request_q;
+                                console_pop_q      = command_frame_low[24];
+                                console_push_q     = command_frame_low[25];
+                                console_data_q     = command_frame_low[63:56];
+                                console_sequence_q = command_frame_low[23:16];
+                                console_busy_q     = 1'b1;
+                            } else {
+                                command_error_q = 1'b1;
+                            }
                         }
                         default: command_error_q = 1'b1;
                     }

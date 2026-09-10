@@ -19,31 +19,38 @@
 /// Stores retain the registered request bundle and physical-write response edge.
 module HardwareMemory #(
     // 0: original; 1: early store/forwarding; 2: early stores; 3/4: direct load return; 5: read port prefetch.
-    param FAST_LSU     : u32 = 0,
-    param ENABLE_TIMER : bit = 0,
-    param STRICT_MEMORY: bit = 0,
+    param FAST_LSU      : u32 = 0,
+    param ENABLE_TIMER  : bit = 0,
+    param ENABLE_CONSOLE: bit = 0,
+    param STRICT_MEMORY : bit = 0,
 ) (
-    clk                        : input  'memory clock              ,
-    rst_n                      : input  'memory reset_async_low    ,
-    timer_rst_n                : input  'memory reset_async_low    ,
-    timer_freeze               : input  'memory logic              ,
-    machine_interrupts         : output 'memory logic          <3> ,
-    cpu_instr_address          : input  'memory logic          <32>,
-    cpu_instr_line             : output 'memory logic          <64>,
-    cpu_instr_request_sequence : input  'memory logic              ,
-    cpu_instr_response_sequence: output 'memory logic              ,
-    cpu_instr_response_address : output 'memory logic          <32>,
-    cpu_instr_response_valid   : output 'memory logic              ,
-    cpu_data_address           : input  'memory logic          <32>,
-    cpu_data_read              : output 'memory logic          <64>,
-    cpu_data_write             : input  'memory logic          <64>,
-    cpu_data_mask              : input  'memory logic          <8> ,
-    cpu_data_we                : input  'memory logic              ,
-    cpu_data_request_sequence  : input  'memory logic              ,
-    cpu_data_response_sequence : output 'memory logic              ,
-    debug_write                : input  'memory logic              ,
-    debug_address              : input  'memory logic          <32>,
-    debug_data                 : input  'memory logic          <8> ,
+    clk                           : input  'memory clock              ,
+    rst_n                         : input  'memory reset_async_low    ,
+    timer_rst_n                   : input  'memory reset_async_low    ,
+    timer_freeze                  : input  'memory logic              ,
+    machine_interrupts            : output 'memory logic          <3> ,
+    console_host_request_sequence : input  'memory logic              ,
+    console_host_pop              : input  'memory logic              ,
+    console_host_push             : input  'memory logic              ,
+    console_host_data             : input  'memory logic          <8> ,
+    console_host_response_sequence: output 'memory logic              ,
+    console_host_response         : output 'memory logic          <16>,
+    cpu_instr_address             : input  'memory logic          <32>,
+    cpu_instr_line                : output 'memory logic          <64>,
+    cpu_instr_request_sequence    : input  'memory logic              ,
+    cpu_instr_response_sequence   : output 'memory logic              ,
+    cpu_instr_response_address    : output 'memory logic          <32>,
+    cpu_instr_response_valid      : output 'memory logic              ,
+    cpu_data_address              : input  'memory logic          <32>,
+    cpu_data_read                 : output 'memory logic          <64>,
+    cpu_data_write                : input  'memory logic          <64>,
+    cpu_data_mask                 : input  'memory logic          <8> ,
+    cpu_data_we                   : input  'memory logic              ,
+    cpu_data_request_sequence     : input  'memory logic              ,
+    cpu_data_response_sequence    : output 'memory logic              ,
+    debug_write                   : input  'memory logic              ,
+    debug_address                 : input  'memory logic          <32>,
+    debug_data                    : input  'memory logic          <8> ,
 ) {
     const BANK_COUNT: u32 = 8;
 
@@ -101,10 +108,38 @@ module HardwareMemory #(
     var timer_request         : 'memory logic    ;
     var timer_live_address    : 'memory logic    ;
     var ram_store_request     : 'memory logic    ;
-    assign machine_interrupts = {1'b0, timer_pending_irq, timer_software_irq};
+    var console_read          : 'memory logic<64>;
+    var console_request       : 'memory logic    ;
+    var console_interrupt     : 'memory logic    ;
+    assign machine_interrupts = {console_interrupt, timer_pending_irq, timer_software_irq};
     assign timer_request      = ENABLE_TIMER && (data_address_q[31:16] == 16'h0200);
     assign timer_live_address = ENABLE_TIMER && (cpu_data_address[31:16] == 16'h0200);
     assign ram_store_request  = data_request_new && data_we_q && !timer_request;
+    assign console_request    = ENABLE_CONSOLE && timer_request && (data_address_q[15:6] == 10'h040);
+    if ENABLE_CONSOLE && ENABLE_TIMER :g_console {
+        inst console: MachineConsole (
+            clk                                                        ,
+            rst_n                 : timer_rst_n                        ,
+            address               : data_address_q[5:0]                ,
+            request               : data_request_new && console_request,
+            write_enable          : data_we_q                          ,
+            write_data            : data_write_q                       ,
+            write_mask            : data_mask_q                        ,
+            read_data             : console_read                       ,
+            interrupt             : console_interrupt                  ,
+            host_request_sequence : console_host_request_sequence      ,
+            host_pop              : console_host_pop                   ,
+            host_push             : console_host_push                  ,
+            host_data             : console_host_data                  ,
+            host_response_sequence: console_host_response_sequence     ,
+            host_response         : console_host_response              ,
+        );
+    } else {
+        assign console_read                   = 64'd0;
+        assign console_interrupt              = 1'b0;
+        assign console_host_response_sequence = 1'b0;
+        assign console_host_response          = 16'd0;
+    }
     if ENABLE_TIMER :g_timer {
         inst timer: MachineTimer (
             clk               : clk                                           ,
@@ -124,7 +159,7 @@ module HardwareMemory #(
                 timer_response_valid_q = 1'b0;
             } else {
                 if data_request_new {
-                    timer_response_q       = timer_read;
+                    timer_response_q       = if console_request ? console_read : timer_read;
                     timer_response_valid_q = timer_request;
                 }
                 if (FAST_LSU == 6) && !cpu_data_we && !timer_live_address
@@ -479,6 +514,150 @@ module HardwareMemory #(
         }
         for bank in 0..BANK_COUNT {
             data_response_high_q[bank] = data_read_row[bank][14];
+        }
+    }
+}
+
+/// Console queues and registers in one memory-clock domain. Host request
+/// bundles remain held until the matching response sequence is observed.
+module MachineConsole (
+    clk                   : input  clock              ,
+    rst_n                 : input  reset_async_low    ,
+    address               : input  logic          <6> ,
+    request               : input  logic              ,
+    write_enable          : input  logic              ,
+    write_data            : input  logic          <64>,
+    write_mask            : input  logic          <8> ,
+    read_data             : output logic          <64>,
+    interrupt             : output logic              ,
+    host_request_sequence : input  logic              ,
+    host_pop              : input  logic              ,
+    host_push             : input  logic              ,
+    host_data             : input  logic          <8> ,
+    host_response_sequence: output logic              ,
+    host_response         : output logic          <16>,
+) {
+    var tx_bytes       : logic<8>  [16];
+    var rx_bytes       : logic<8>  [16];
+    var tx_head        : logic<4>      ;
+    var tx_tail        : logic<4>      ;
+    var rx_head        : logic<4>      ;
+    var rx_tail        : logic<4>      ;
+    var tx_count       : logic<5>      ;
+    var rx_count       : logic<5>      ;
+    var rx_irq_enable  : logic         ;
+    var errors         : logic<2>      ;
+    var host_sequence_q: logic         ;
+    var host_pop_q     : logic         ;
+    var host_push_q    : logic         ;
+    var host_data_q    : logic<8>      ;
+    var host_new       : logic         ;
+    var tx_front       : logic<8>      ;
+    var rx_front       : logic<8>      ;
+    var tx_push_request: logic         ;
+    var tx_push        : logic         ;
+    var tx_pop         : logic         ;
+    var rx_push        : logic         ;
+    var rx_pop         : logic         ;
+    var low_byte_write : logic         ;
+    var read_word      : logic<64>     ;
+
+    always_comb {
+        host_new        = host_sequence_q != host_response_sequence;
+        tx_front        = tx_bytes[tx_head];
+        rx_front        = rx_bytes[rx_head];
+        low_byte_write  = request && write_enable && (address[2:0] == 3'd0) && write_mask[0];
+        tx_push_request = low_byte_write && (address[5:3] == 3'd0);
+        rx_pop          = request && !write_enable && (address == 6'h08) && (rx_count != 5'd0);
+        tx_pop          = host_new && host_pop_q && (tx_count != 5'd0);
+        tx_push         = tx_push_request && ((tx_count != 5'd16) || tx_pop);
+        rx_push         = host_new && host_push_q && ((rx_count != 5'd16) || rx_pop);
+        interrupt       = rx_irq_enable && (rx_count != 5'd0);
+        read_word       = 64'd0;
+        case address[5:3] {
+            3'd1   : if rx_count != 5'd0 {
+                read_word = {55'd0, 1'b1, rx_front};
+            }
+            3'd2   : read_word = {60'd0, rx_count != 5'd16, tx_count != 5'd0, rx_count != 5'd0, tx_count != 5'd16};
+            3'd3   : read_word = {63'd0, rx_irq_enable};
+            3'd4   : read_word = 64'h0000_0000_434f_4e01;
+            3'd5   : read_word = {51'd0, rx_count, 3'd0, tx_count};
+            3'd6   : read_word = {62'd0, errors};
+            default: {}
+        }
+        read_data = read_word >> {address[2:0], 3'b000};
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            tx_head                = 4'd0;
+            tx_tail                = 4'd0;
+            rx_head                = 4'd0;
+            rx_tail                = 4'd0;
+            tx_count               = 5'd0;
+            rx_count               = 5'd0;
+            rx_irq_enable          = 1'b0;
+            errors                 = 2'd0;
+            host_sequence_q        = 1'b0;
+            host_pop_q             = 1'b0;
+            host_push_q            = 1'b0;
+            host_data_q            = 8'd0;
+            host_response_sequence = 1'b0;
+            host_response          = 16'd0;
+            for index in 0..16 {
+                tx_bytes[index] = 8'd0;
+                rx_bytes[index] = 8'd0;
+            }
+        } else {
+            host_sequence_q = host_request_sequence;
+            host_pop_q      = host_pop;
+            host_push_q     = host_push;
+            host_data_q     = host_data;
+            if host_new {
+                host_response_sequence = host_sequence_q;
+                host_response          = {4'd0, (rx_count != 5'd16) || rx_pop, tx_count != 5'd0, rx_push, tx_pop, 8'd0};
+                if tx_pop {
+                    host_response[7:0]     = tx_front;
+                }
+            }
+            if tx_push {
+                tx_bytes[tx_tail] = write_data[7:0];
+                tx_tail           = tx_tail + 4'd1;
+            }
+            if tx_pop {
+                tx_head           = tx_head + 4'd1;
+            }
+            if tx_push && !tx_pop {
+                tx_count          = tx_count + 5'd1;
+            }
+            if tx_pop && !tx_push {
+                tx_count          = tx_count - 5'd1;
+            }
+            if rx_push {
+                rx_bytes[rx_tail] = host_data_q;
+                rx_tail           = rx_tail + 4'd1;
+            }
+            if rx_pop {
+                rx_head           = rx_head + 4'd1;
+            }
+            if rx_push && !rx_pop {
+                rx_count          = rx_count + 5'd1;
+            }
+            if rx_pop && !rx_push {
+                rx_count          = rx_count - 5'd1;
+            }
+            if low_byte_write && (address[5:3] == 3'd3) {
+                rx_irq_enable     = write_data[0];
+            }
+            if low_byte_write && (address[5:3] == 3'd6) {
+                errors            = errors & ~write_data[1:0];
+            }
+            if tx_push_request && !tx_push {
+                errors[0]         = 1'b1;
+            }
+            if host_new && host_push_q && !rx_push {
+                errors[1]         = 1'b1;
+            }
         }
     }
 }
