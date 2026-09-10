@@ -51,12 +51,13 @@ bit11=RX空きあり（同時CPU popを含む）、bits23:16=完了したcommand
 - `python3 riscv/kernel/check.py` は3 variantの計9実行に対応し、全件合格。
 
 計測・入力SHAは[2026-09-11の記録](../toolchain/measurements/2026-09-11-rv64-console/)。
-実機認定は配置配線・STA完了後に行う。trial 28時点ではsetup −54 ps／hold +90 ps、
-setup違反12件で未達。trial 20の−313 ps・98件から改善したが、コンソール版の
+実機認定は配置配線・STA完了後に行う。trial 32時点ではsetup −32 ps／hold +90 ps、
+setup違反6件で未達。trial 20の−313 ps・98件から改善したが、コンソール版の
 bitstreamは生成・書込みしていない。LSUアドレス加算器→RAMの元の最悪経路を直し、
 その際に遅くなった周辺経路も修復してから全体のSTAで採否を決めるようにした。
 中間状態を実装として保存せず、最後に元の結果を改善した場合だけ採用する。
-現在はbitmanip・例外処理などの残る違反を、改善済み配置配線から詰めている。
+bitmanipの違反は解消し、現在はLSU要求トークン・演算結果・fetch・例外値などの
+残る違反を、改善済み配置配線から詰めている。
 条件は124.8/62.4 MHz、JTCK 6 MHz、setup/hold各200 ps予約のまま。
 
 ## 順序と合格条件
