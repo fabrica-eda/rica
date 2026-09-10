@@ -29,6 +29,9 @@ module Top (
     var commit_count_q              : 'cpu logic          <25>;
     var led_count_q                 : 'cpu logic          <6> ;
 
+    var unused_load_size    : 'cpu logic<2>;
+    var unused_load_unsigned: 'cpu logic   ;
+
     var unused_instruction_flush: 'cpu logic;
 
     inst core: Core #(
@@ -53,6 +56,8 @@ module Top (
         data_wmask            : unused_data_wmask           ,
         data_we               : unused_data_we              ,
         data_request_sequence : unused_data_request_sequence,
+        data_load_size        : unused_load_size            ,
+        data_load_unsigned    : unused_load_unsigned        ,
         halted                : unused_halted               ,
         commit_valid          : unused_commit_valid         ,
         commit_pc             : unused_commit_pc            ,

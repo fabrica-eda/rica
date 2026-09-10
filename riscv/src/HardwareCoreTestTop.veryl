@@ -137,11 +137,21 @@ module HardwareCoreTestTop #(
         }
     }
 
+    var data_load_size             : 'cpu logic<2> ;
+    var data_load_unsigned         : 'cpu logic    ;
     var core_data_rdata            : 'cpu logic<64>;
     var core_data_response_sequence: 'cpu logic    ;
     if (FAST_LSU == 4) || (FAST_LSU == 6) :g_load_return {
-        // Split byte-bank selection from Core's load formatting and bypass.
-        // One CPU edge replaces the previous full memory-domain output cycle.
+        // CM holds the load descriptor until its response sequence matches.
+        // Format before this existing response register: load extension no
+        // longer precedes Core's forwarding mux, without another wait cycle.
+        var formatted_load: 'cpu logic<64>;
+        inst load_format: LoadFormat (
+            value        : data_rdata        ,
+            size         : data_load_size    ,
+            unsigned_load: data_load_unsigned,
+            formatted    : formatted_load    ,
+        );
         var load_sequence_q: 'cpu logic;
         assign core_data_response_sequence = if data_we ? data_response_sequence : load_sequence_q;
         always_ff (clk_cpu, cpu_rst_n) {
@@ -149,7 +159,7 @@ module HardwareCoreTestTop #(
                 core_data_rdata = 64'd0;
                 load_sequence_q = 1'b0;
             } else {
-                core_data_rdata = data_rdata;
+                core_data_rdata = formatted_load;
                 load_sequence_q = data_response_sequence;
             }
         }
@@ -159,19 +169,20 @@ module HardwareCoreTestTop #(
     }
 
     inst core: Core #(
-        STRICT_MEMORY          : STRICT_MEMORY         ,
-        ENABLE_INTERRUPTS      : ENABLE_INTERRUPTS     ,
-        ENABLE_ZBA             : ENABLE_ZBA            ,
-        ENABLE_ZBB             : ENABLE_ZBB            ,
-        ENABLE_ZBS             : ENABLE_ZBS            ,
-        EARLY_BITMANIP         : EARLY_BITMANIP        ,
-        EARLY_TAKEN_FETCH      : EARLY_TAKEN_FETCH     ,
-        ENABLE_M               : ENABLE_M              ,
-        M_USE_DSP              : M_USE_DSP             ,
-        EARLY_DIVIDE           : EARLY_DIVIDE          ,
-        COMMIT_PAYLOAD         : 1                     ,
-        SYNC_DATA_MEMORY       : 1                     ,
-        RELOCATE_LOW_DATA      : 1                     ,
+        FORMATTED_LOAD_DATA    : (FAST_LSU == 4) || (FAST_LSU == 6),
+        STRICT_MEMORY          : STRICT_MEMORY                     ,
+        ENABLE_INTERRUPTS      : ENABLE_INTERRUPTS                 ,
+        ENABLE_ZBA             : ENABLE_ZBA                        ,
+        ENABLE_ZBB             : ENABLE_ZBB                        ,
+        ENABLE_ZBS             : ENABLE_ZBS                        ,
+        EARLY_BITMANIP         : EARLY_BITMANIP                    ,
+        EARLY_TAKEN_FETCH      : EARLY_TAKEN_FETCH                 ,
+        ENABLE_M               : ENABLE_M                          ,
+        M_USE_DSP              : M_USE_DSP                         ,
+        EARLY_DIVIDE           : EARLY_DIVIDE                      ,
+        COMMIT_PAYLOAD         : 1                                 ,
+        SYNC_DATA_MEMORY       : 1                                 ,
+        RELOCATE_LOW_DATA      : 1                                 ,
         BRANCH_PREDICTOR_CONFIG: 1 + 2 * PREDICTOR_MODE,
     ) (
         clk                   : clk_cpu                    ,
@@ -192,6 +203,8 @@ module HardwareCoreTestTop #(
         data_wmask            : data_wmask                 ,
         data_we               : data_we                    ,
         data_request_sequence : data_request_sequence      ,
+        data_load_size        : data_load_size             ,
+        data_load_unsigned    : data_load_unsigned         ,
         halted                : halted                     ,
         commit_valid          : commit_valid               ,
         commit_pc             : commit_pc                  ,

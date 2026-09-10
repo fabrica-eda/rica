@@ -8,7 +8,7 @@ use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
 pub mod timed_memory;
 
-const CORE_SOURCES: [&str; 23] = [
+const CORE_SOURCES: [&str; 24] = [
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -26,6 +26,7 @@ const CORE_SOURCES: [&str; 23] = [
     "DspMultiply64.veryl",
     "ShiftUnit.veryl",
     "ShiftHighUnit.veryl",
+    "LoadFormat.veryl",
     "CompletionUnit.veryl",
     "PhysicalAccessCheck.veryl",
     "PhysicalOffsetAccessCheck.veryl",

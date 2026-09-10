@@ -143,6 +143,14 @@ its cause; trap entry follows one edge later. The frontend stays held during thi
 handoff even if the external level changes. CSR/MRET redirects keep successors
 from executing before the new interrupt predicate is checked. This adds bounded
 interrupt recognition latency without changing ordinary instruction scheduling.
+
+The development board wrappers also format load width/sign before their existing
+CPU response register for `FAST_LSU=4/6`. Core exposes the CM load descriptor,
+which stays held until the matching response sequence arrives. `LoadFormat`
+applies the same byte/halfword/word extension used by the raw Core interface;
+the registered return can then enter forwarding without another width/sign
+selection. This moves logic across the existing boundary without adding a
+load wait cycle. The direct Core interface still accepts raw load data by default.
 The qualified interrupt bitstream predates this timing refinement.
 
 Predictor tags/targets and physical memory ports remain 32 bits because permitted

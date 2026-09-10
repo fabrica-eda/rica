@@ -12,6 +12,13 @@ module CompletionUnit (
     var compare_unsigned   : logic    ;
     var completed_logic    : logic<64>;
 
+    inst load_format: LoadFormat (
+        value        : completion.load_data    ,
+        size         : completion.load_size    ,
+        unsigned_load: completion.load_unsigned,
+        formatted    : load_result             ,
+    );
+
     inst shift_high_bus : ShiftHighBus;
     inst shift_high_unit: ShiftHighUnit (
         shift: shift_high_bus,
@@ -51,31 +58,6 @@ module CompletionUnit (
             }
         } else {
             shift_architectural = shift_high_bus.result;
-        }
-
-        case completion.load_size {
-            2'b00: {
-                if completion.load_unsigned {
-                    load_result = {56'd0, completion.load_data[7:0]};
-                } else {
-                    load_result = {completion.load_data[7] repeat 56, completion.load_data[7:0]};
-                }
-            }
-            2'b01: {
-                if completion.load_unsigned {
-                    load_result = {48'd0, completion.load_data[15:0]};
-                } else {
-                    load_result = {completion.load_data[15] repeat 48, completion.load_data[15:0]};
-                }
-            }
-            2'b10: {
-                if completion.load_unsigned {
-                    load_result = {32'd0, completion.load_data[31:0]};
-                } else {
-                    load_result = {completion.load_data[31] repeat 32, completion.load_data[31:0]};
-                }
-            }
-            default: load_result = completion.load_data;
         }
 
         if completion.use_load {

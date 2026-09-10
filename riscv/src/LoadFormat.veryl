@@ -1,0 +1,34 @@
+/// Architectural byte/halfword/word sign extension after byte-bank alignment.
+module LoadFormat (
+    value        : input  logic<64>,
+    size         : input  logic<2> ,
+    unsigned_load: input  logic    ,
+    formatted    : output logic<64>,
+) {
+    always_comb {
+        case size {
+            2'b00: {
+                if unsigned_load {
+                    formatted = {56'd0, value[7:0]};
+                } else {
+                    formatted = {value[7] repeat 56, value[7:0]};
+                }
+            }
+            2'b01: {
+                if unsigned_load {
+                    formatted = {48'd0, value[15:0]};
+                } else {
+                    formatted = {value[15] repeat 48, value[15:0]};
+                }
+            }
+            2'b10: {
+                if unsigned_load {
+                    formatted = {32'd0, value[31:0]};
+                } else {
+                    formatted = {value[31] repeat 32, value[31:0]};
+                }
+            }
+            default: formatted = value;
+        }
+    }
+}

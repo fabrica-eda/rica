@@ -16,8 +16,11 @@ module Core #(
     param EARLY_DIVIDE     : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
     param STRICT_MEMORY    : bit = 0,
-    param SYNC_DATA_MEMORY : bit = 0,
-    param RELOCATE_LOW_DATA: bit = 0,
+    // The board can format a load before its existing CPU response register.
+    // Raw asynchronous/direct model ports keep formatting in CompletionUnit.
+    param FORMATTED_LOAD_DATA: bit = 0,
+    param SYNC_DATA_MEMORY   : bit = 0,
+    param RELOCATE_LOW_DATA  : bit = 0,
     // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
     // its 32-entry variant, bit 5 disables RAS, bit 6 disables direction prediction.
     param BRANCH_PREDICTOR_CONFIG: u32 = 0,
@@ -37,6 +40,8 @@ module Core #(
     data_wmask            : output logic<8> ,
     data_we               : output logic    ,
     data_request_sequence : output logic    ,
+    data_load_size        : output logic<2> ,
+    data_load_unsigned    : output logic    ,
     halted                : output logic    ,
     commit_valid          : output logic    ,
     commit_pc             : output logic<64>,
@@ -854,9 +859,13 @@ module Core #(
         completion_bus.load_data        = data_rdata;
         completion_bus.load_size        = cm_load_size_q;
         completion_bus.load_unsigned    = cm_load_unsigned_q;
-        completion_bus.use_load         = cm_is_load_q;
-        completion_bus.store_size       = cm_store_size_q;
-        cm_forward_data                 = completion_bus.result;
+        if FORMATTED_LOAD_DATA {
+            completion_bus.load_size     = 2'b11;
+            completion_bus.load_unsigned = 1'b0;
+        }
+        completion_bus.use_load   = cm_is_load_q;
+        completion_bus.store_size = cm_store_size_q;
+        cm_forward_data           = completion_bus.result;
         if rx_stalled_q {
             forwarded_rs1 = rx_stall_data_a_q;
         } else {
@@ -1422,6 +1431,8 @@ module Core #(
         // the request sequence changes, so this cannot duplicate the write.
         data_we               = cm_valid_q && cm_is_store_q && !cm_exception_q && !redirect_discards_cm;
         data_request_sequence = data_request_sequence_q;
+        data_load_size        = cm_load_size_q;
+        data_load_unsigned    = cm_load_unsigned_q;
         // There is no architectural halt instruction. This output remains for
         // the board debug ABI and will be used by a future debug halt request.
         halted    = 1'b0;
