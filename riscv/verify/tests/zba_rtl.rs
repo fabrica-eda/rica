@@ -54,7 +54,8 @@ fn source() -> String {
         "ShiftUnit",
         "ShiftHighUnit",
     ] {
-        source.push_str(&fs::read_to_string(root.join(format!("src/{name}.veryl"))).unwrap());
+        source
+            .push_str(&fs::read_to_string(root.join(format!("src/{name}.veryl"))).unwrap());
     }
     source.push_str(TOP);
     source
@@ -114,7 +115,8 @@ fn mapped_zba_operations_match_the_same_independent_integer_oracle() {
                 &format!("param PREDECODED_ZBA: bit = {}", u8::from(predecoded)),
             );
         let rtl =
-            struo_frontend_veryl::analyze_and_lower(&source, "zba_mapped", "ZbaTestTop").unwrap();
+            struo_frontend_veryl::analyze_and_lower(&source, "zba_mapped", "ZbaTestTop")
+                .unwrap();
         let synthesized = struo_synth::synthesize(&rtl).unwrap();
         let mapped = struo_target_ecp5::map_to_ecp5_with_options(
             &synthesized.netlist,
@@ -201,8 +203,12 @@ fn zba_enable_and_neighboring_encodings_have_exact_legality() {
             for opcode in [0x33, 0x3b, 0x13, 0x1b] {
                 for funct7 in [4, 5, 16, 17] {
                     for funct3 in 0..8 {
-                        let instruction =
-                            funct7 << 25 | 2 << 20 | 1 << 15 | funct3 << 12 | 3 << 7 | opcode;
+                        let instruction = funct7 << 25
+                            | 2 << 20
+                            | 1 << 15
+                            | funct3 << 12
+                            | 3 << 7
+                            | opcode;
                         let base_legal = (opcode == 0x13 && funct3 != 1 && funct3 != 5)
                             || (opcode == 0x1b && funct3 == 0);
                         let zba_legal = (opcode == 0x3b && funct7 == 4 && funct3 == 0)
@@ -284,4 +290,99 @@ fn native_and_mapped_redirect_upper_zero_match_wrapping_integer_arithmetic() {
             }
         }
     }
+}
+
+#[test]
+fn native_and_mapped_jalr_middle_match_full_integer_addition() {
+    let source = source();
+    let native = SimulatorBuilder::new(&source, "JalrMiddleMatch")
+        .build_native()
+        .unwrap();
+    let rtl = struo_frontend_veryl::analyze_and_lower(
+        &source,
+        "jalr_middle_test",
+        "JalrMiddleMatch",
+    )
+    .unwrap();
+    let mapped = struo_target_ecp5::map_to_ecp5_with_options(
+        &struo_synth::synthesize(&rtl).unwrap().netlist,
+        struo_target_ecp5::MappingOptions {
+            timing_goal_mhz: 175,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mapped = struo_celox::ecp5_simulator(&mapped)
+        .unwrap()
+        .build_native()
+        .unwrap();
+    let mut bases = vec![
+        0_u32,
+        1,
+        0x7ff,
+        0x800,
+        0xf800,
+        0xfffe,
+        0xffff,
+        0x10000,
+        0x10001,
+        0x7fff_ffff,
+        0x8000_0000,
+        0xffff_0000,
+        0xffff_07ff,
+        0xffff_0800,
+        0xffff_fffe,
+        0xffff_ffff,
+    ];
+    let mut random = 0x5269_6361_u32;
+    for _ in 0..1024 {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        bases.push(random);
+    }
+    let mut cases = 0;
+    for mut sim in [native, mapped] {
+        let ports = [
+            "base",
+            "predicted",
+            "predicted_m1",
+            "predicted_p1",
+            "decrement",
+            "carry",
+        ]
+        .map(|name| sim.signal(name));
+        for &base in &bases {
+            for offset in [-2048_i32, -1024, -1, 0, 1, 1024, 2047] {
+                // The oracle uses a complete 32-bit signed-offset addition,
+                // independently of the three-candidate implementation.
+                let target = base.wrapping_add_signed(offset) & !1;
+                let middle = (target >> 16) as u16;
+                for predicted in [
+                    middle,
+                    middle.wrapping_sub(1),
+                    middle.wrapping_add(1),
+                    base as u16,
+                ] {
+                    let lower_sum = u32::from(base as u16) + u32::from(offset as u16);
+                    sim.modify(|io| {
+                        io.set(ports[0], (base >> 16) as u16);
+                        io.set(ports[1], predicted);
+                        io.set(ports[2], predicted.wrapping_sub(1));
+                        io.set(ports[3], predicted.wrapping_add(1));
+                        io.set(ports[4], u8::from(offset < 0));
+                        io.set(ports[5], u8::from(lower_sum > 0xffff));
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        value(&mut sim, "matched") != 0,
+                        predicted == middle,
+                        "base={base:08x} offset={offset} predicted={predicted:04x}"
+                    );
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 58_240);
 }

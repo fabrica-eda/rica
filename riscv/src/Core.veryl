@@ -200,6 +200,8 @@ module Core #(
     var ex_predicted_kind_q     : logic<3>           ;
     var ex_predicted_taken_q    : logic              ;
     var ex_predicted_next_pc_q  : logic<32>          ;
+    var ex_predicted_mid_m1_q   : logic<16>          ;
+    var ex_predicted_mid_p1_q   : logic<16>          ;
     var ex_fallthrough_pc_q     : logic<ADDRESS_BITS>;
     var ex_operand_a_q          : logic<64>          ;
     var ex_operand_b_q          : logic<64>          ;
@@ -313,6 +315,8 @@ module Core #(
     var redirect_sum            : logic<64>              ;
     var fallthrough_upper_zero  : logic                  ;
     var redirect_upper_zero     : logic                  ;
+    var jalr_middle_match       : logic                  ;
+    var redirect_middle_match   : logic                  ;
     var ex_branch_equal         : logic                  ;
     var ex_compare_less_high    : logic                  ;
     var ex_compare_less_low     : logic                  ;
@@ -532,6 +536,16 @@ module Core #(
         decrement: ex_redirect_offset_q[63],
         carry    : redirect_high[16]       ,
         is_zero  : redirect_upper_zero     ,
+    );
+
+    inst jalr_middle: JalrMiddleMatch (
+        base        : redirect_addend_a[31:16]     ,
+        predicted   : ex_predicted_next_pc_q[31:16],
+        predicted_m1: ex_predicted_mid_m1_q        ,
+        predicted_p1: ex_predicted_mid_p1_q        ,
+        decrement   : ex_redirect_offset_q[63]     ,
+        carry       : redirect_low[16]             ,
+        matched     : jalr_middle_match            ,
     );
 
     if STRICT_MEMORY && ((BRANCH_PREDICTOR_CONFIG & 8) != 0) :g_redirect_upper_completion {
@@ -1184,6 +1198,12 @@ module Core #(
             ex_redirect_target = redirect_sum & 64'hffff_ffff_ffff_fffe;
         } else {
             ex_redirect_target = redirect_sum;
+        }
+        // JALR's signed 12-bit immediate has a uniform middle slice.
+        // Compare its three possible bases before the lower carry arrives.
+        redirect_middle_match = ex_predicted_next_pc_q[31:16] == ex_redirect_target[31:16];
+        if ex_redirect_clear_lsb_q {
+            redirect_middle_match = jalr_middle_match;
         }
         ex_predicted_address   = ex_predicted_next_pc_q;
         fallthrough_upper_zero = ex_fallthrough_pc_q == {32'd0, ex_fallthrough_pc_q[31:0]};
@@ -1869,6 +1889,8 @@ module Core #(
             ex_predicted_kind_q      = 3'd0;
             ex_predicted_taken_q     = 1'b0;
             ex_predicted_next_pc_q   = 32'h0000_0004;
+            ex_predicted_mid_m1_q    = 16'hffff;
+            ex_predicted_mid_p1_q    = 16'd1;
             ex_fallthrough_pc_q      = 32'h0000_0004;
             ex_operand_a_q           = 64'h0000_0000_0000_0000;
             ex_operand_b_q           = 64'h0000_0000_0000_0000;
@@ -2091,7 +2113,12 @@ module Core #(
                 cm_linear_match_q  = 1'b0;
                 if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
                     for i in 0..TARGET_MATCH_SLICES {
-                        if i <: 2 {
+                        if i == 1 {
+                            cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q && redirect_middle_match;
+                            cm_linear_match_q[i] = ex_kind_match_q
+                                && ((ex_link_q && redirect_middle_match)
+                                    || (!ex_link_q && (ex_predicted_address[31:16] == ex_fallthrough_pc_q[31:16])));
+                        } else if i <: 2 {
                             cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q
                                 && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]);
                             cm_linear_match_q[i] = ex_kind_match_q
@@ -2234,6 +2261,8 @@ module Core #(
                 ex_predicted_kind_q      = rx_predicted_kind_q;
                 ex_predicted_taken_q     = rx_predicted_taken_q;
                 ex_predicted_next_pc_q   = rx_predicted_next_pc_q;
+                ex_predicted_mid_m1_q    = rx_predicted_next_pc_q[31:16] - 16'd1;
+                ex_predicted_mid_p1_q    = rx_predicted_next_pc_q[31:16] + 16'd1;
                 ex_kind_match_q          = 1'b0;
                 if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
                     ex_kind_match_q = rx_predicted_kind_q == rx_control_kind;

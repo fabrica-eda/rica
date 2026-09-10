@@ -118,3 +118,20 @@ module RedirectUpperZero (
             || ((upper == 32'd1) && decrement && !carry);
     }
 }
+
+/// Match JALR bits 31:16 using prediction candidates prepared in RX.
+/// The 12-bit signed immediate contributes only -1, 0 or +1 to this slice.
+module JalrMiddleMatch (
+    base        : input  logic<16>,
+    predicted   : input  logic<16>,
+    predicted_m1: input  logic<16>,
+    predicted_p1: input  logic<16>,
+    decrement   : input  logic    ,
+    carry       : input  logic    ,
+    matched     : output logic    ,
+) {
+    always_comb {
+        matched = ((decrement == carry) && (base == predicted)) || (!decrement && carry && (base == predicted_m1))
+            || (decrement && !carry && (base == predicted_p1));
+    }
+}

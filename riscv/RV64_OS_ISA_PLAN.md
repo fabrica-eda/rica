@@ -36,7 +36,7 @@ BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
 3回実機確認した。範囲外load/store、64-bit fetch先、RAM末尾の命令境界から復帰する
 kernel variantを、新しいCPU構成の試験に用いる。
 
-現在のCPUソースは、通常のload/storeやfaultに追加サイクルを入れず、
+CPU側の機能検証済みの親構成は、通常のload/storeやfaultに追加サイクルを入れず、
 64-bit PC・転送先・例外値を保持する `free-logic` 構成。
 ALUは32 bitごとのcarry selectを使い、JALR上位加算を既存のEX/CM境界で分け、
 待機中に使わない論理結果レジスタのenableを除いた。
@@ -44,12 +44,12 @@ CPU試験61件（64-bit JALR境界・待機の66組を含む）、厳密構成47
 無効構成468実行が合格し、通常診断35本の命令数・サイクル数も基準と一致する。
 Rust kernelの同時edgeモデルはtasksが86,653 cycles／30,725 instructions、
 access-faultsが92,235 cycles／31,949 instructions。
-現在の37 RTLファイルと既存の機能検証記録の一致、新しい境界試験の結果は
+親構成の37 RTLファイルと既存の機能検証記録の一致、新しい境界試験の結果は
 [free-logic-return-validation.json](../toolchain/measurements/2026-09-10-rv64-access-faults/free-logic-return-validation.json)
 に保存している。これは新bitstreamの実機認定ではない。
 
 **新構成の124.8 MHz STAは未達。** 現在のCPUソースの最良結果はsetup −882 ps、
-別の `target-slices` 構成の最良結果は−508 psで、いずれもholdは+90 ps。
+別の `target-slices` 構成の最良確定結果は−476 psで、いずれもholdは+90 ps。
 CPU 124.8 MHz／メモリ62.4 MHzとsetup・hold各200 ps予約を維持し、
 認定済みimageの置き換えは行っていない。
 
@@ -60,8 +60,20 @@ CPU 124.8 MHz／メモリ62.4 MHzとsetup・hold各200 ps予約を維持し、
 setup違反端点を411から405へ減らしたが、最悪slackは−508 psのままだった。
 次に、互換性のある配置単位を丸ごと交換できる候補を追加した。
 固定配置・共有資源・carry chainの制約を確認する試験を含め、配置器217件が合格した。
-この候補の配線後STAを測定し、改善がなければ採用しない。
+交換候補を含めた探索で10回の配置改善を受理し、最終STAの最悪slackは−476 psへ改善した。
+同じRTLとツールで追加探索を続けている。
 配置候補の受理条件、STAモデル、予約値は変更しない。
+
+次の判断点は、結果転送→加算→分岐先比較を一度の段で通す経路の短縮。
+既存EX/CM境界での上位加算の分離は試しているため、追加の段境界やJALR専用の待機を
+候補に含め、分岐・依存処理のサイクル増加を同一ELFで測る。
+従来35診断のサイクル維持だけを条件にせず、必要なアドレス検査を保ち、
+124.8 MHzでSTAを通すことと、同じ処理の実行時間を合わせて判断する。
+新たに遅延を加える場合は、変わった診断の命令数・cycles・原因を個別に記録する。
+現在の作業ソースでは、JALRの予測先の中位16 bitについて±1の候補をRXで保持し、
+EXでは転送元との比較を選ぶ試作を追加した。追加サイクルはなく、native／mappedの
+58,240ケース、CPU 61件とZba／redirect 5件、厳密476／無効468実行に合格した。
+通常35診断とRust kernelのカウンタ値も一致した。配置後STAを検証中。
 [実装・検証と配置配線の全記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
 
 ## 実装順と合格条件
