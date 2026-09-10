@@ -69,8 +69,10 @@ retains the legacy comparison configuration. The default hardware image is
 
 The custom OS target is **M/S/U modes and Sv39**. The [OS/ISA plan](RV64_OS_ISA_PLAN.md)
 continues from the qualified interrupt/access-fault foundation to external I/O,
-A, U-mode/PMP and supervisor virtual memory. The placement/routing fixes and
-incremental checkpoint should be retained for that work.
+A, U-mode/PMP and supervisor virtual memory. The placement/routing fixes now run
+through the normal `texo pnr` CLI and flow API in Texo `2639484`. They retain the
+qualified image byte-for-byte, with another eight hardware checks passing.
+See the [integration, CLI options and source bundle](../toolchain/measurements/2026-09-10-texo-closure-integration/README.md).
 
 See [current qualification and tool changes](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md),
 [current hardware IPC/clock](../toolchain/measurements/2026-09-10-rv64-access-faults/PERFORMANCE.md),

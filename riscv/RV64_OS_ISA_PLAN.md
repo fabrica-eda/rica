@@ -45,7 +45,7 @@ access-faultsが92,235 cycles／31,949 instructionsで、現在の同時edgeモ�
 タイマーで処理量が変わるkernelは固定処理のIPC比較から分けて記録する。
 [機能検証の対応](../toolchain/measurements/2026-09-10-rv64-access-faults/carry-match-functional-validation.json)。
 
-### 配置配線の改善と次の整理
+### 配置配線の改善と通常フローへの統合
 
 部分配置で未指定セルを最初の空きBELへ置く処理を、接続先を考慮した配置補完に分けた。
 新しいLUTが遠くへ配置される問題を解消し、同じRTLの初期setup不足を12,205 psから120 psへ縮めた。
@@ -54,7 +54,16 @@ access-faultsが92,235 cycles／31,949 instructionsで、現在の同時edgeモ�
 同じ優先度なら改善対象を先に配線し、元の所有者が直ちに経路を取り返す問題も修正した。
 最終的にtrial 98がsetup +2 psへ到達し、通常Texoのtrial 99が全体を再現した。
 
-次は試作ツールの配置補完・詳細配置・配線修正を、回帰試験とともに通常フローへ整理する。
+試作ツールの配置補完・詳細配置・配線修正を、通常の `texo pnr` とflow APIへ統合した。
+Texo `2639484` にコミットし、459件の回帰、Clippy、整形に合格した。
+部分配線は `--initial-placement`＋`--initial-routes`、setup探索時間は
+`--setup-optimization-budget-seconds` で指定できる。時間制限は呼び出しごとに独立し、
+打切り時にも実際のslackを報告する。0秒の未達対照ではbitgenを拒否した。
+通常CLIの再現checkpoint・bitstreamは前回の認定済みSHAと一致し、追加の実機8実行も合格した。
+setup −27 psのcheckpointからも通常CLIで+2 psへ収束し、同じ認定済みcheckpointを得た。
+[統合の検証記録・再現手順・パッチ](../toolchain/measurements/2026-09-10-texo-closure-integration/README.md)。
+
+次は外部I/Oを追加し、Rust kernelから起動・例外情報を観測する。その後A、U/PMP、S/Sv39へ進む。
 今回の良好な配置・配線を次のRTL変更の初期候補として使い、変更後の全資源とSTAを検査し直す。
 大域配置の目的関数の改良は複数設計で比較する。このCPUでの成立を汎用的な性能保証とは扱わない。
 局所配置のタイル分散をさらに広げる `local-diversity` は224＋75件の試験に合格したが、
