@@ -7,84 +7,59 @@
 
 ## 現在地
 
-認定済み基準は `HardwareCompactInterruptTestTop`。
-CPU 124.8 MHz、メモリ62.4 MHz、setup・hold各200 ps予約、実機326実行合格。
-タイマーで2タスクの全整数contextを16回切り替える試験も3回成功した。
-既存35診断は同一ELF・同一命令数で±1 cycle以内、通常処理の性能を維持している。
-[実測記録](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/PERFORMANCE.md)。
+認定済み基準を **`HardwareCompactAccessFaultTestTop`** に更新した。
+CPU **124.8 MHz**、メモリ62.4 MHz、JTCK 6 MHz。
+setup・hold各200 ps予約後で **setup +2 ps／hold +90 ps**、各19,032検査に合格した。
+通常Texoが試作ツールの配置・配線・STAを含むチェックポイントをバイト単位で再現し、
+JTCKも別構築グラフの各515検査と一致した。STAモデル・例外・予約値は変更していない。
+
+同じbitstreamで **238 ELF＋反復78回＝316実機実行が合格**した。
+標準起動設定に切り替えた後の16実行も合格し、合計332実行を確認した。
+通常診断35本は従来の認定済み実機と同一ELF・同一命令数で、中央値の差は最大±1 cycle。
+64-bitアドレス検査を追加しても通常処理の性能を維持している。
+Rust kernelも8種類のfaultから復帰して2タスクを完了し、両variantが各3回合格した。
+[認定記録](../toolchain/measurements/2026-09-10-rv64-access-faults/qualification.json)・
+[実機IPCとクロック](../toolchain/measurements/2026-09-10-rv64-access-faults/PERFORMANCE.md)。
 
 | 分類 | 認定済み基準 | OS向けに必要な差分 |
 | --- | --- | --- |
 | 整数ISA | RV64 I/M/B、整数圧縮Zca、Zicsr、Zifencei | A（Zaamo＋Zalrsc）。F/D/Vは後工程 |
-| 特権 | M-modeのみ。ECALL/EBREAK/不正命令、MRET | M/S/Uの実行権限、CSRアクセス権、例外委譲 |
-| CSR | 従来のM-mode CSRに加え、割り込み構成ではmie/mipとmcause[63] | S-mode CSR、権限と委譲、time alias |
+| 特権 | M-mode、ECALL/EBREAK/不正命令、MRET | M/S/Uの実行権限、CSRアクセス権、例外委譲 |
+| CSR | mie/mip、64-bit mepc/mtvalと割り込み原因 | S-mode CSR、権限と委譲、time alias |
 | 割り込み | MSI/MTI/MEI受付、MMIO timer/MSIP。MSI/MTIとプリエンプションは実機認定、MEIはCPU試験 | 外部デバイス/controllerの接続 |
-| アドレス | PC・分岐先・EPC・mtvalは内部32 bit。メモリ要求も32 bit | 仮想アドレスを切り捨てず保持し、変換後に実装物理幅を検査 |
-| メモリ | 256 KiB BRAM中252 KiB RAM＋4 KiB reset領域。範囲外は別名になる | RAM/MMIOの厳密なdecode、access fault、PMP、ページfault |
+| アドレス | PC・分岐先・EPC・mtvalは64 bit。物理要求は範囲検査後の32 bit | 仮想アドレス変換と変換後の物理幅検査 |
+| メモリ | 252 KiB RAM＋4 KiB reset領域、厳密なRAM/MMIO decodeとaccess fault | PMP、ページfault |
 | 保護・仮想記憶 | PMP/MMU/TLBなし | U-mode隔離、S-mode、Sv39、SFENCE.VMA |
-| I/O | 停止中のJTAG loaderと試験終了用観測 | UART、時刻源、IRQ制御、必要に応じ外部RAM |
+| I/O | 停止中のJTAG loader、試験結果観測、MMIO timer | UART、IRQ制御、必要に応じ外部RAM |
 
-根拠は `src/Core.veryl`、`CsrFile.veryl`、`Decoder.veryl`、
-`PipelineInterfaces.veryl`、`HardwareMemory.veryl`。
-特に認定済み構成の32-bit PC/EPCのまま `satp` を追加してもSv39にはならない。
-BRAMの範囲外aliasも、保護があるOSのfault処理には使えない。
+`STRICT_MEMORY=1` は上位アドレスの別名、範囲を跨ぐ部分store、誤予測fetchによる
+誤ったtrapを防ぐ。通常load/storeの待ち段は増やしていない。
+今回採用した `carry-match` は、分岐先加算のcarry両候補を先に比較し、最後に1 bitの
+一致結果を選ぶ。既存のEX/CM境界を保ち、追加サイクルなし、比較変更による増加は10セル。
+最終構成は33,474セル、8,991 FF、16 DSP、150 EBRである。
 
-開発中の `HardwareCompactAccessFaultTestTop` は `STRICT_MEMORY=1` を追加し、
-64-bit PC・分岐先・trap値と、RAM/MMIOの厳密な範囲検査を実装した。
-この構成の配置配線・実機認定は別途行う。通常load/storeに待ち段は追加していない。
-[Rust kernel](kernel/README.md) も実装し、認定済み基準で2タスクのyieldとタイマ切り替えを
-3回実機確認した。範囲外load/store、64-bit fetch先、RAM末尾の命令境界から復帰する
-kernel variantを、新しいCPU構成の試験に用いる。
+このRTLでCPU 61件、Veryl check、厳密構成476実行・無効構成468実行が合格した。
+同時edgeモデルの通常35本は基準モデルと命令数・サイクル数が一致する。
+実機のkernel中央値はtasksが86,653 cycles／30,725 instructions、
+access-faultsが92,235 cycles／31,949 instructionsで、現在の同時edgeモデルとも一致した。
+タイマーで処理量が変わるkernelは固定処理のIPC比較から分けて記録する。
+[機能検証の対応](../toolchain/measurements/2026-09-10-rv64-access-faults/carry-match-functional-validation.json)。
 
-現在の開発基準は、`target-slices` の命令応答を改良した `instruction-select` 構成。
-通常のload/storeやfaultに追加サイクルを入れず、64-bit PC・転送先・例外値を保持し、
-分岐予測先との16 bitごとの比較を既存EX/CM境界でまとめる。
-命令応答のbank選択と範囲検査を既存のメモリ応答edgeの前でまとめ、
-BRAM出力の後にあった許可判定のゲートを取り除いた。命令応答の待ち時間は変えない。
-同じ構成で実装セル数は33,525から33,464へ61セル減った。
+### 配置配線の改善と次の整理
 
-このRTLで厳密構成476実行・無効構成468実行を新しく実行し、すべて合格した。
-通常診断35本の命令数・サイクル数も認定済み基準モデルと一致する。
-Rust kernelの同時edgeモデルはtasksが86,653 cycles／30,725 instructions、
-access-faultsが92,235 cycles／31,949 instructions。
-連続fetchのbank・許可・アドレス・tokenを、native/WASM、厳密／旧設定、FAST_LSU=0/6の
-8構成・2,056応答で検査した。メモリ／cache 18件、Veryl check、Zbb/Zbs各6件も合格した。
-既存の64-bit JALR境界・待機66組を含むCPU試験は保持している。
-[instruction-select-functional-validation.json](../toolchain/measurements/2026-09-10-rv64-access-faults/instruction-select-functional-validation.json)
-と補足のbitmanip記録に、入力・ログ・カウンタ値を保存している。
+部分配置で未指定セルを最初の空きBELへ置く処理を、接続先を考慮した配置補完に分けた。
+新しいLUTが遠くへ配置される問題を解消し、同じRTLの初期setup不足を12,205 psから120 psへ縮めた。
+詳細配置では同じタイルの候補だけで探索枠を使い切らず、実配線遅延を基準に移動を評価する。
+配線では1 ps単位のコストを使い、共有経路の所有者を最大32本まで合法に引き直す。
+同じ優先度なら改善対象を先に配線し、元の所有者が直ちに経路を取り返す問題も修正した。
+最終的にtrial 98がsetup +2 psへ到達し、通常Texoのtrial 99が全体を再現した。
 
-**新構成の124.8 MHz STAは未達。** 確定した最良結果はtrial 82のsetup −265 ps／hold +90 ps、setup違反は216端点。
-今回の開始時点の−356 psから91 ps、違反端点は290から216へ改善した。
-CPU 124.8 MHz／メモリ62.4 MHzとsetup・hold各200 ps予約を維持し、
-認定済みimageの置き換えは行っていない。
-通常Texoで探索を無効にして再確認したtrial 83も、チェックポイント全体がバイト単位で一致した。
-RTLと回帰試験は `dc86bee` にコミットした。新構成の実機検証はSTA未達のため未実施。
-
-ページ許可の並行化、除算減算器の分割、順次PC計算の短縮、fault時だけの待機追加は、
-機能検証後のSTAが悪化したため採用しない。回路変更で良い配置・配線が失われる問題に対し、
-変更のない論理と接続を対応付け、既存のBELと配線を初期候補として再利用する仕組みを追加した。
-変更後の全sink・配線資源を通常のTexo validatorで検査し、STAを計算し直す。
-partial placementで省かれていた3個のclock bufferの位置も引き継ぐ。
-配置候補の交換、1半径あたり8候補の探索と合わせ、従来の回路で−296 ps、
-命令応答を改良した回路で−283 ps、さらに同じ配置からの探索で−265 psまで進んだ。
-STAモデル・受理条件・予約値は変更しない。
-試作ツールの合格だけでbitを認定せず、通常のTexoでのchecked resumeとJTCK照合を通す。
-
-最良結果の違反端点は、LSUの要求token（−265 ps）、bit操作の中間値と分岐先比較
-（各−250 ps）へ移った。次はこの配置を引き継ぎ、許可判定→LSU要求と、
-結果転送→bit操作・分岐先比較の短縮を検討する。LUT段数と長い配線を分けて調べ、
-変更のない配置・配線を引き継いだ試作で比較する。伝播slackの追跡は独立STAではない。
-既存EX/CM境界での上位加算の分離は試しているため、追加の段境界やLSU・JALR専用の待機を
-候補に含め、分岐・依存処理のサイクル増加を同一ELFで測る。
-従来35診断のサイクル維持だけを条件にせず、必要なアドレス検査を保ち、
-124.8 MHzでSTAを通すことと、同じ処理の実行時間を合わせて判断する。
-新たに遅延を加える場合は、変わった診断の命令数・cycles・原因を個別に記録する。
-JALRの予測先の中位16 bitについて±1の候補をRXで保持し、EXでは転送元との比較を
-選ぶ試作は、native／mapped 58,240ケース、CPU 61件とZba／redirect 5件、
-厳密476／無効468実行に合格し、通常35診断とRust kernelのカウンタ値も一致した。
-ただし最終STAが−1,626 psで改善しなかったため、開発基準には採用しない。
-
-[実装・検証と配置配線の全記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)。
+次は試作ツールの配置補完・詳細配置・配線修正を、回帰試験とともに通常フローへ整理する。
+今回の良好な配置・配線を次のRTL変更の初期候補として使い、変更後の全資源とSTAを検査し直す。
+大域配置の目的関数の改良は複数設計で比較する。このCPUでの成立を汎用的な性能保証とは扱わない。
+局所配置のタイル分散をさらに広げる `local-diversity` は224＋75件の試験に合格したが、
+今回の認定bitstreamには使っていない。試作の不採用理由・再現手順・ソースは
+[配置配線の全記録](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)に残した。
 
 ## 実装順と合格条件
 
@@ -96,8 +71,8 @@ M-mode固有のCSR・timer操作はアーキテクチャ層へ置き、後のS-m
 初版は固定メモリと少数タスクを用い、起動・例外記録・yield・タイマー切り替えを持つ。
 Rustの`core`もAを含まないターゲットでビルドし、生成ELFを命令単位で検査する。
 
-今回のCPU側はアドレス検査とaccess fault、kernel側は元のPC・原因・アドレスの記録、
-意図的なfaultからの復帰、タスク継続を実装する。以降はAとatomic操作、U/PMPとsyscall・隔離、
+CPU側のアドレス検査とaccess fault、kernel側の元PC・原因・アドレスの記録、
+意図的なfaultからの復帰、タスク継続まで実機認定した。以降はAとatomic操作、U/PMPとsyscall・隔離、
 S/Sv39とページ表・プロセス切り替えを対応させる。
 頻繁な検証はモデルで回し、RTL更新時は124.8 MHzのSTA・checked bitgen・実機まで確認する。
 OSだけの変更は認定済みbitstreamを再利用する。固定処理のIPCに加え、固定回数のyieldや
@@ -119,7 +94,8 @@ OSだけの変更は認定済みbitstreamを再利用する。固定処理のIPC
 2タスクの全整数contextを16回切り替える試験は、両方のシミュレーションclock順序、
 同時edgeモデルと実機3回で合格した。124.8 MHz、setup・hold各200 ps予約を維持した。
 [STA・実機の認定記録](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md)。
-この工程の残りは厳密なメモリdecode/access faultと外部I/O。S/U/PMP/Sv39は後工程のまま。
+厳密なメモリdecode/access faultとRust kernelの例外復帰も実機認定した。
+この工程の残りは外部I/O。S/U/PMP/Sv39は後工程のまま。
 
 - `mie/mip` のMSI/MTI/MEI、`mcause[63]`、MIE/MPIEの正しい更新。
   pendingはsourceに従うlevel入力とし、CSRで読める状態と割り込み判定を一致させる。
@@ -135,11 +111,9 @@ OSだけの変更は認定済みbitstreamを再利用する。固定処理のIPC
 MIEを外している間の保留、MRET直後の再受付、長いload/divide中、誤予測、例外競合を通ること。
 UARTとRAMの配置・起動引数もここで短いプラットフォーム仕様として固定する。
 
-次の実装単位はRAM/MMIOの厳密なアドレス検査とaccess faultとする。
-RV64の有効アドレスを検査前に32 bitへ切り捨てず、上位bitによる別名も拒否する。
-fetch/load/storeそれぞれで元アドレスを例外情報へ残し、faultしたstoreは一度も書き込まない。
-境界を跨ぐaccess、誤予測で破棄されるfetch、割り込みとfaultの競合を負試験に含める。
-この検査を確立してから外部I/O、A、下位特権・PMPへ進む。
+次は外部I/Oを小さな単位で追加し、Rust kernelから起動・例外情報を観測できるようにする。
+その後A、下位特権・PMPへ進む。64-bit上位アドレス、境界を跨ぐaccess、
+誤予測fetch、割り込みとfaultの競合は既存の回帰試験として維持する。
 
 ### 2. A拡張：OSのlockとコンパイラのatomic
 

@@ -13,7 +13,8 @@ ISAの認定履歴は本書の各段階に、最新の構成・性能は [README
 仕様は [RISC-V B v1.0](https://docs.riscv.org/reference/isa/unpriv/b-st-ext.html)。
 
 現在の圧縮命令は整数Zca。M-modeの限定したCSR／同期例外も実装している。
-2026-09-10の自作OS方針を受け、次はM-mode割り込み → A → U-mode/PMP → S-mode/Sv39を優先する。
+2026-09-10にM-mode割り込み、64-bitアドレス検査とaccess fault、Rust kernelの例外復帰を実機認定した。
+次は外部I/O → A → U-mode/PMP → S-mode/Sv39を優先する。
 [自作OS向けのISA・プラットフォーム計画](RV64_OS_ISA_PLAN.md)に対応差分と合格条件をまとめた。
 F/D/Vは実際のOSの要求に合わせて後工程とする。
 LSU・MDUの追加高速化は、整数拡張後のコンパイラ生成コードで効果を判断する。

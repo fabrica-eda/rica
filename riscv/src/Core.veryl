@@ -325,6 +325,9 @@ module Core #(
     var redirect_valid          : logic                  ;
     var ex_redirect_target      : logic<ADDRESS_BITS>    ;
     var ex_predicted_address    : logic<ADDRESS_BITS>    ;
+    var redirect_match_predicted: logic<64>              ;
+    var redirect_match_low      : logic<16>              ;
+    var redirect_target_match   : logic<4>               ;
     var redirect_target         : logic<ADDRESS_BITS>    ;
     var redirect_pending_q      : logic                  ;
     var redirect_preserve_cm    : logic                  ;
@@ -1138,7 +1141,26 @@ module Core #(
             ex_redirect_target = redirect_sum;
         }
         ex_predicted_address = ex_predicted_next_pc_q;
-        ex_actual_next_pc    = ex_fallthrough_pc_q;
+        // Compare both carry candidates before selecting a single match bit.
+        // The late low-half carry must not traverse a wide target mux and
+        // then another 16-bit equality reduction on its way to CM.
+        redirect_match_predicted = ex_predicted_address as u64;
+        redirect_match_low       = redirect_low[15:0];
+        redirect_match_low[0]    = redirect_low[0] && !ex_redirect_clear_lsb_q;
+        redirect_target_match[0] = redirect_match_predicted[15:0] == redirect_match_low;
+        if redirect_low[16] {
+            redirect_target_match[1] = redirect_match_predicted[31:16] == redirect_high_c1[15:0];
+        } else {
+            redirect_target_match[1] = redirect_match_predicted[31:16] == redirect_high_c0[15:0];
+        }
+        if redirect_high[16] {
+            redirect_target_match[2] = redirect_match_predicted[47:32] == redirect_upper_c1[15:0];
+            redirect_target_match[3] = redirect_match_predicted[63:48] == redirect_upper_c1[31:16];
+        } else {
+            redirect_target_match[2] = redirect_match_predicted[47:32] == redirect_upper_c0[15:0];
+            redirect_target_match[3] = redirect_match_predicted[63:48] == redirect_upper_c0[31:16];
+        }
+        ex_actual_next_pc = ex_fallthrough_pc_q;
         if ex_link_q {
             ex_actual_next_pc = ex_redirect_target;
         }
@@ -2024,10 +2046,9 @@ module Core #(
                 cm_linear_match_q  = 1'b0;
                 if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
                     for i in 0..TARGET_MATCH_SLICES {
-                        cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q
-                            && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]);
+                        cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q && redirect_target_match[i];
                         cm_linear_match_q[i] = ex_kind_match_q
-                            && ((ex_link_q && (ex_predicted_address[i * 16+:16] == ex_redirect_target[i * 16+:16]))
+                            && ((ex_link_q && redirect_target_match[i])
                                 || (!ex_link_q
                                     && (ex_predicted_address[i * 16+:16] == ex_fallthrough_pc_q[i * 16+:16])));
                     }

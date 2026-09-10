@@ -1,13 +1,13 @@
-# Machine interrupt platform
+# Machine interrupt and physical access platform
 
-`HardwareCompactInterruptTestTop` enables `ENABLE_INTERRUPTS=1` with the existing
+`HardwareCompactAccessFaultTestTop` enables `ENABLE_INTERRUPTS=1` and `STRICT_MEMORY=1` with the existing
 compact predictor, 4 KiB instruction cache, `FAST_LSU=6`, DSP M, B and early division.
 The qualification status and exact bitstream are recorded in
-[the interrupt measurement record](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md).
+[the access-fault measurement record](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md).
 The default hardware runner selects
-`build/riscv-hardware-compact-interrupt-124p8-20260910.bit`, qualified at
-124.8 MHz with 200 ps setup/hold reserves and 326 physical executions.
-Its SHA-256 is `48f9939da65666197fc5f70ede7690ea1d7515bea00bacb017b87f5087861466`.
+`build/riscv-hardware-compact-access-faults-124p8-20260910.bit`, qualified at
+124.8 MHz with 200 ps setup/hold reserves and 332 physical executions.
+Its SHA-256 is `e100548bbb96f8739d2126c560c4789cd6679a62a6fdf198d33aba6b04996912`.
 
 ## Interrupt interface and architectural boundary
 
@@ -89,17 +89,17 @@ RAM. There are no required boot arguments or UART protocol yet; the self-check
 ELFs report via the loader-selected `tohost` address.
 
 This is an **M-mode platform**, without A, S/U privilege, PMP or virtual memory.
-Internal PC/EPC/address truncation and out-of-range aliases outside the timer
-window remain. Strict RAM/MMIO bounds and access faults are the next step,
-before exposing memory protection or Sv39. This map does not claim complete
+The qualified strict configuration preserves 64-bit PC/EPC/trap values and
+rejects out-of-range aliases before issuing physical requests. Memory protection
+and Sv39 remain subsequent work. This map does not claim complete
 CLINT/ACLINT, PLIC, SBI, OpenSBI or Linux compatibility. A CSR `time` alias is not
 implemented; software reads MMIO MTIME and the frequency register.
 
 ## Strict physical access configuration
 
-`HardwareCompactAccessFaultTestTop` additionally selects `STRICT_MEMORY=1`.
-The qualified interrupt image described above keeps the original setting until
-the new image completes its own timing and hardware qualification.
+`HardwareCompactAccessFaultTestTop` selects `STRICT_MEMORY=1` and is the qualified
+default. `HardwareCompactInterruptTestTop` retains the legacy physical-address
+behavior as a comparison configuration.
 
 | Architectural range (inclusive) | Data | Fetch |
 | --- | --- | --- |
@@ -157,7 +157,9 @@ and reduces those matches in CM, at the existing recovery edge. This separates
 the late dependent JALR sum from the full-width equality reduction. Predictions
 remain physical 32-bit targets, explicitly zero-extended for the comparison;
 every architectural target bit participates, including invalid upper bits.
-The qualified interrupt bitstream predates this timing refinement.
+The selected implementation compares both carry candidates in parallel before
+selecting each one-bit match. The qualified access-fault bitstream includes
+these refinements without adding a pipeline stage.
 
 Predictor tags/targets and physical memory ports remain 32 bits because permitted
 execution is in the physical regions above. Sv39 will require translation and a

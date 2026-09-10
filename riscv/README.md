@@ -1,95 +1,84 @@
 # RISC-V implementation
 
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
-architecture study, measured results, and implementation plan.
-The current board build is **scalar RV64 with full M and B (Zba/Zbb/Zbs)
-integer extensions**, integer compressed instructions (Zca), Zicsr and Zifencei.
-`HardwareCompactInterruptTestTop` uses a compact 64-entry BTB, 2-bit direction
+architecture study. The current board is **scalar RV64 with full M and B
+(Zba/Zbb/Zbs)**, integer compressed instructions (Zca), Zicsr and Zifencei.
+`HardwareCompactAccessFaultTestTop` combines a compact 64-entry BTB, 2-bit
 prediction, an eight-entry RAS and a 4 KiB synchronous instruction cache.
-It enables `FAST_LSU=6`, `EARLY_BITMANIP=1`, `EARLY_TAKEN_FETCH=1` and
-`EARLY_DIVIDE=1`, with DSP multiplication and `ENABLE_INTERRUPTS=1`.
+It enables `FAST_LSU=6`, early bit manipulation, taken fetch and division,
+DSP multiplication, machine interrupts and strict physical memory checks.
 
-Division skips unnecessary iterations for zero divisors, zero quotients, large
-divisors and leading zero dividend bytes. Native and mapped tests preserve all
-signed/word results and cancellation behavior. Worst MDU latency remains at most
-67 cycles for 64-bit division and 35 for W instructions; early completion takes
-four cycles, measured from acceptance of start to done. The instruction cache
-computes adjacent line carries in parallel, preserving its existing cycle behavior.
+The qualified configuration preserves **64-bit PC, control targets, MEPC and
+MTVAL**, rejects upper-address aliases and checks every byte before memory
+side effects. Out-of-range loads/stores and demanded instruction fetches trap;
+wrong-path speculative fetches do not produce architectural traps. Ordinary
+load/store latency is unchanged. Carry-select prediction comparisons run in
+parallel before choosing a one-bit match, without adding a pipeline stage.
 
-The core implements precise M-mode interrupt entry, `mie/mip`, full interrupt
-causes, and MMIO MSIP/MTIME/MTIMECMP. Interrupt-control CSR writes and MRET
-evaluate the resulting interrupt state before a successor executes. On hardware,
-two tasks switch 16 times under timer interrupts while preserving every integer
-register and MEPC; this program passes three runs. The board connects software
-and timer interrupts; external interrupt levels are tested in CPU simulation.
-See the [machine platform contract](RV64_MACHINE_PLATFORM.md) for the memory map,
-62.4 MHz timebase, reset behavior and current limits.
+The platform implements precise M-mode interrupts, `mie/mip`, MSIP/MTIME/MTIMECMP,
+ECALL/MRET and legal NOP `WFI`. Both Rust `no_std` kernels pass three hardware
+runs: two timer-preempted tasks preserve all integer context, and the fault
+variant recovers from eight access faults before completing those tasks.
+External interrupt levels have CPU tests; the board connects software and timer
+interrupts. **A, U/S modes, PMP and Sv39 remain future work.**
+See the [platform contract](RV64_MACHINE_PLATFORM.md) and [Rust kernel](kernel/README.md).
 
-The core remains M-mode only. `WFI` is a legal NOP and fixed WARL `misa` writes
-are accepted and ignored. Boot tests also cover MSCRATCH stack exchange,
-trap frames, ECALL and MRET. A, U/S modes, PMP and Sv39 are subsequent steps.
+CPU **124.8 MHz / memory 62.4 MHz** is retained. With **200 ps reserved for both
+setup and hold**, STA gives **+2 ps setup / +90 ps hold** (nominal +202/+290 ps).
+All **19,032 setup and 19,032 hold checks** pass. The independent JTCK graph
+matches all 515 setup/hold endpoints at 6 MHz; the four reviewed exceptions
+and uncharacterized JTAGG external boundaries are unchanged. Normal Texo
+reproduces the helper checkpoint byte-for-byte and generates the tested image.
+The design uses **33,474 cells, 8,991 FFs, 16 DSPs and 150 EBRs**.
 
-CPU **124.8 MHz / memory 62.4 MHz** is retained. After reserving **200 ps each
-for setup and hold**, STA gives **0 ps setup / +90 ps hold** (nominal +200/+290 ps).
-All **17,741 setup and 17,741 hold checks** pass, including 515 JTCK paths at 6 MHz,
-with the same four reviewed external/CDC exceptions. The design uses **30,857
-cells, 8,336 FFs, 16 DSPs and 150 EBRs**, adding 1,496 cells to the early-division image.
-Two normal-tool synthesis/import/STA/bitgen runs reproduce identical checkpoint
-and bitstream bytes from the final RTL.
+The exact bitstream passes **238 distinct physical ELFs, 78 repetitions and
+16 runs through the updated default runner: 332 PASS**, using Windows D2XX/XVC.
+The following are medians of three identical-ELF runs, including startup and
+checks. MHz is the PLL configuration, not an independent frequency measurement;
+MIPS is derived from the hardware counters and that configured clock.
 
-The exact bitstream passed **236 distinct physical ELFs, 70 diagnostic repetitions,
-four extra OS runs and 16 executions through the updated default runner:
-326 PASS** using Windows D2XX/XVC.
-The following are medians of three runs of identical ELFs, including startup and checks:
-
-| Diagnostic | Early division → current cycles | Current IPC | IPC × 124.8 MHz (MIPS) |
+| Diagnostic | Previous interrupt image → current cycles | Current IPC | IPC × 124.8 MHz (MIPS) |
 | --- | ---: | ---: | ---: |
-| alu_chain | 5,992 → 5,993 | 0.770232 | 96.124946 |
-| load_store | 4,424 → 4,425 | 0.291525 | 36.382373 |
+| alu_chain | 5,993 → 5,993 | 0.770232 | 96.124946 |
+| load_store | 4,425 → 4,424 | 0.291591 | 36.390597 |
 | m_divide | 21,445 → 21,445 | 0.120308 | 15.014409 |
-| small | 15,389 → 15,389 | 0.151667 | 18.928014 |
-| wide | 17,333 → 17,332 | 0.134664 | 16.806093 |
-| words | 17,834 → 17,835 | 0.130866 | 16.332111 |
+| small | 15,389 → 15,388 | 0.151677 | 18.929244 |
+| wide | 17,332 → 17,333 | 0.134656 | 16.805123 |
+| words | 17,835 → 17,835 | 0.130866 | 16.332111 |
 
-All 35 fixed-work diagnostics retain identical ELF bytes and retired counts.
-Cycle differences are within ±1, with a geometric-mean speed ratio of 0.999982×.
-Interrupt support preserves ordinary throughput at the same clock. The timer
-preemption program is recorded separately because its work is timer driven.
+All 35 fixed workloads retain identical ELF bytes and retired counts, with
+median cycle differences within ±1 and a geometric-mean speed ratio of
+**1.000008×**. Ordinary throughput is preserved. Timer-driven kernels are
+reported separately: tasks takes 86,653 cycles / 30,725 instructions and
+access-faults takes a median 92,235 cycles / 31,949 instructions.
 
-The enabled CPU/memory model passes 236 ELFs in both serialized clock orders
-(**472 PASS**); the disabled comparison passes all previous 234 ELFs twice
-(**468 PASS**). All 37 coincident-edge programs pass. The 35 fixed-work programs
-match physical retired counts and differ by zero or one cycle. Workspace and
-updated test-target runs cover **229 tests with one existing ignored mapped-board
-test**. Timer and CSR tests include ECP5 mapping, and core tests inject interrupts
-at 180 arrival placements across three predictor configurations.
+Fresh checks of this RTL pass **61 CPU tests**, Veryl check, **476 strict /
+468 disabled serialized model runs**, 35 unchanged fixed-work timed diagnostics,
+two IRQ diagnostics and both timed kernels. The unchanged memory module also
+has 18 memory/cache tests and 2,056 continuous-fetch response checks across
+native/WASM, strict/legacy and FAST_LSU=0/6 configurations from its last change.
+[Source-to-test correspondence](../toolchain/measurements/2026-09-10-rv64-access-faults/carry-match-functional-validation.json).
 
 Select the current model with `--hardware-memory-rtl --compact-predictor --icache-kib 4
 --fast-lsu 6 --dsp-multiplier --zba-extension --zbb-extension --zbs-extension
---early-bitmanip --early-taken-fetch --early-divide --machine-interrupts`. Add `--timed-clocks` for
-coincident CPU/memory edges. The no-flag Core/model retains the legacy comparison
-configuration. The default hardware image is
-`build/riscv-hardware-compact-interrupt-124p8-20260910.bit`.
+--early-bitmanip --early-taken-fetch --early-divide --machine-interrupts --strict-memory`.
+Add `--timed-clocks` for coincident CPU/memory edges. The no-flag Core/model
+retains the legacy comparison configuration. The default hardware image is
+`build/riscv-hardware-compact-access-faults-124p8-20260910.bit`, SHA-256
+`e100548bbb96f8739d2126c560c4789cd6679a62a6fdf198d33aba6b04996912`.
 
-The next ISA target is a custom OS with **M/S/U modes and Sv39**. The
-[OS ISA/platform plan](RV64_OS_ISA_PLAN.md) proceeds from the qualified interrupt
-foundation to strict memory decode/access faults and external I/O, then A,
-U-mode/PMP and supervisor virtual memory.
+The custom OS target is **M/S/U modes and Sv39**. The [OS/ISA plan](RV64_OS_ISA_PLAN.md)
+continues from the qualified interrupt/access-fault foundation to external I/O,
+A, U-mode/PMP and supervisor virtual memory. The placement/routing fixes and
+incremental checkpoint should be retained for that work.
 
-See the [integer ISA implementation and next steps](RV64_INTEGER_ISA_PLAN.md),
-[current implementation and qualification record](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/README.md),
-[all current IPC/clock measurements](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/PERFORMANCE.md),
-[previous early-division measurements](../toolchain/measurements/2026-09-10-rv64-early-divide/README.md),
-[previous target-preview measurements](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md),
-[previous early-forwarding measurements](../toolchain/measurements/2026-09-09-rv64-early-bitmanip/README.md),
-[previous Zbs measurements](../toolchain/measurements/2026-09-09-rv64-zbs/README.md),
-[previous Zbb measurements](../toolchain/measurements/2026-09-09-rv64-zbb/README.md),
-[previous Zba measurements](../toolchain/measurements/2026-09-08-rv64-zba/README.md),
-[previous hold repair and timing record](RV64_HOLD_MARGIN_PLAN.md),
-[DSP implementation and performance comparison](RV64_DSP_PLAN.md), and
-[earlier JTAG cause and repair](RV64_JTAG_FIX.md). New placements require the
-checked bitgen flow and physical tests of the exact resulting hash.
-The [compact predictor study](RV64_COMPACT_PREDICTOR.md),
+See [current qualification and tool changes](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md),
+[current hardware IPC/clock](../toolchain/measurements/2026-09-10-rv64-access-faults/PERFORMANCE.md),
+[previous interrupt measurements](../toolchain/measurements/2026-09-10-rv64-machine-interrupts/PERFORMANCE.md),
+[integer ISA history](RV64_INTEGER_ISA_PLAN.md), [DSP evidence](RV64_DSP_PLAN.md),
+and [earlier JTAG repair](RV64_JTAG_FIX.md). New placements require checked
+bitgen and physical tests of the exact resulting hash. The
+[compact predictor study](RV64_COMPACT_PREDICTOR.md),
 [static 4 KiB timing record](RV64_124P8_TIMING.md), and
 [earlier L1I comparison](RV64_L1I_IMPLEMENTATION.md) remain historical baselines.
 
@@ -439,7 +428,7 @@ Zbs for external ELFs. `misa.B` is set only when all three B subsets are enabled
 `tools/build_rv64_zbs_c.py` retains paired C builds for bit updates, extraction,
 and immediate forms. Zbs has passed RTL/mapped and complete functional-model
 regressions, 124.8 MHz setup/hold timing and byte-exact bitstream reproduction.
-The same image passed 310 physical executions and is now the default hardware build.
+That Zbs-stage image passed 310 physical executions; the current image is qualified above.
 
 For cycle comparisons, `verify-riscv --hardware-memory-rtl --timed-clocks` uses
 Celox's timed scheduler to evaluate coincident CPU/memory edges together. Explicit
@@ -487,9 +476,9 @@ serves rising-edge 64-bit instruction-line fetches or debug writes while reset;
 the second serves rising-edge LSU reads and writes. Both ports run at 62.4 MHz;
 the CPU-side instruction frontend exposes a halfword-aligned window spanning
 up to two adjacent lines. The hardware runner defaults to the physically
-verified `riscv/build/riscv-hardware-compact-taken-fetch-124p8-20260909.bit`,
+verified `riscv/build/riscv-hardware-compact-access-faults-124p8-20260910.bit`,
 with eight-byte masked writes. Its build command, hash and checked bitgen flow
-are in the [current image report](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md). Program it and run the eight
+are in the [current image report](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md). Program it and run the eight
 bundled RV64 ELFs on the EVN with:
 
 ```sh
@@ -534,11 +523,11 @@ networking, bind to the Windows-side WSL virtual interface and use that
 address from WSL. Keep the listener on loopback or the WSL virtual interface.
 
 The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
-`riscv-hardware-compact-taken-fetch-124p8-20260909.bit`.
+`riscv-hardware-compact-access-faults-124p8-20260910.bit`.
 `--write-bytes 1` retains compatibility with older qualified images; `2` and `4`
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
-CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](../toolchain/measurements/2026-09-09-rv64-load-dependency/README.md)
+CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)
 and [historical failure reproducer](../toolchain/mre/rv64-jtag-write64/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;

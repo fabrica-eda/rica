@@ -8,12 +8,17 @@
 配置配線後のsetup/holdが成立しない構成は、サイクル数が少なくても採用しない。
 目標周波数を下げて採用条件を満たしたことにはしない。
 
-2026-09-06の採用構成は**単発行インオーダーRV64＋64行BTB・2-bit方向予測・8段RAS＋4 KiB L1I**。
-現在は`HardwareCompactStore4KTestTop`でstore応答を短縮し、補充時のPC+16先読みを加えた。
+2026-09-10の基準は `HardwareCompactAccessFaultTestTop`。
+RV64 I/M/B/Zca、M-mode割り込み、64-bitアドレス検査とRust kernelのfault復帰まで実機認定した。
+124.8 MHzを維持し、setup・hold各200 ps予約後で+2／+90 ps、実機332実行合格。
+[現在の構成・IPC](README.md)と[OS向けの次の工程](RV64_OS_ISA_PLAN.md)を参照。
+
+2026-09-06時点の採用構成は**単発行インオーダーRV64＋64行BTB・2-bit方向予測・8段RAS＋4 KiB L1I**。
+`HardwareCompactStore4KTestTop`でstore応答を短縮し、補充時のPC+16先読みを加えた。
 CPU 124.8 MHz／メモリ62.4 MHz、通常STAのsetup **+6 ps**／hold **+290 ps**。
 **実機100/100 ELFs・118実行が合格**し、直前版に対してload/store処理率が10.4%、
 ネストした呼出しが5.6%向上した。
-[現在の実装・IPC・再現手順](RV64_LSU_REFILL.md)、
+[当時の実装・IPC・再現手順](RV64_LSU_REFILL.md)、
 [小型予測器の評価](RV64_COMPACT_PREDICTOR.md)、[以前のJTAG修正](RV64_JTAG_FIX.md)を参照。
 
 次の改良でも124.8 MHzを維持し、CPU／メモリSTA、JTAG追加ゲート、実機回帰を通す。

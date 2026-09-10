@@ -77,15 +77,19 @@ target/release/verify-riscv --hardware-memory-rtl \
   riscv/build/rust-kernel/kernel-access-faults.elf
 ```
 
-Add `--timed-clocks` for atomic coincident CPU/memory edges. The task ELF also
-runs on the qualified interrupt image without strict access faults; it passed
-three physical runs at **124.8 MHz** with **30,725 retired instructions** in
-**86,644 cycles** in each run. The initial strict-RTL model recorded 86,645 cycles;
-the currently selected strict RTL records 86,653 cycles after interrupt-claim
-changes. These model counts do not qualify a new hardware image. The access-fault ELF requires
-`HardwareCompactAccessFaultTestTop`; its physical qualification is recorded
-separately. Timer-driven run lengths are integration measurements, not fixed-work
-IPC benchmarks.
+Add `--timed-clocks` for atomic coincident CPU/memory edges. Both ELFs now pass
+three hardware runs on the qualified **124.8 MHz** strict-memory image,
+`HardwareCompactAccessFaultTestTop`. Tasks retires **30,725 instructions in
+86,653 cycles** in every run; access-faults retires **31,949 instructions in
+92,234 / 92,235 / 92,235 cycles**, recovering from all eight faults before
+completing both tasks. The medians match the current simultaneous-edge model.
+The previous interrupt image ran the same task ELF in 86,644 cycles; this
+comparison includes the revised interrupt-claim behavior. Timer-driven run
+lengths are integration measurements, not fixed-work IPC benchmarks.
+
+The hardware runner defaults to
+`build/riscv-hardware-compact-access-faults-124p8-20260910.bit`.
+See the [qualification and counters](../../toolchain/measurements/2026-09-10-rv64-access-faults/PERFORMANCE.md).
 
 The next CPU/kernel pairs are A plus atomics, U/PMP plus syscall and isolation,
 then S/Sv39 plus page tables and process switching. See the
