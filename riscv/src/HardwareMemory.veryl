@@ -66,7 +66,7 @@ module HardwareMemory #(
     var data_read_mux             : 'memory logic<64>             ;
     var instr_port_row            : 'memory logic<14>             ;
     var instr_port_high           : 'memory logic                 ;
-    var instr_response_high_q     : 'memory logic                 ;
+    var instr_response_bank_q     : 'memory logic<2>              ;
     var instr_request_address_q   : 'memory logic<32>             ;
     var instr_request_sequence_q  : 'memory logic                 ;
     var instr_response_sequence_q : 'memory logic                 ;
@@ -293,18 +293,10 @@ module HardwareMemory #(
             };
         }
 
-        cpu_instr_line = {
+        cpu_instr_line              = {
             instr_read[7], instr_read[6], instr_read[5], instr_read[4], instr_read[3], instr_read[2], instr_read[1],
             instr_read[0]
         };
-        // Speculative fills outside instruction RAM return inert data. Core
-        // attaches a precise fault to the demanded PC, including a straddling
-        // instruction's second parcel; a discarded prefetch never traps.
-        if STRICT_MEMORY
-            && !((instr_response_address_q[31:12] == 20'd0)
-                || ((instr_response_address_q[31:18] == 14'h2000) && (instr_response_address_q[17:12] != 6'h3f))) {
-            cpu_instr_line = 64'd0;
-        }
         cpu_instr_response_address  = instr_response_address_q;
         cpu_instr_response_valid    = instr_response_valid_q;
         cpu_instr_response_sequence = instr_response_sequence_q;
@@ -335,10 +327,8 @@ module HardwareMemory #(
         var data_read_high : 'memory logic<8>;
 
         always_comb {
-            instr_read[bank] = instr_read_low;
-            if instr_response_high_q {
-                instr_read[bank] = instr_read_high;
-            }
+            instr_read[bank]     = (instr_read_low & {instr_response_bank_q[0] repeat 8})
+                | (instr_read_high & {instr_response_bank_q[1] repeat 8});
             data_bank_read[bank] = data_read_low;
             if data_response_high_q[bank] {
                 data_bank_read[bank] = data_read_high;
@@ -473,7 +463,16 @@ module HardwareMemory #(
     }
 
     always_ff (clk) {
-        instr_response_high_q  = instr_port_physical[17];
+        // Decode permission and bank together before the response edge.
+        // Each returned bit then needs only a four-input AND/OR selection;
+        // no address decoder follows the BRAM output or its bank selector.
+        // Speculative invalid fills remain inert; Core faults only demanded PCs.
+        instr_response_bank_q = {instr_port_physical[17], !instr_port_physical[17]};
+        if STRICT_MEMORY
+            && !((instr_request_address_q[31:12] == 20'd0)
+                || ((instr_request_address_q[31:18] == 14'h2000) && (instr_request_address_q[17:12] != 6'h3f))) {
+            instr_response_bank_q = 2'b00;
+        }
         data_response_offset_q = data_address_q[2:0];
         if (FAST_LSU == 5) || (FAST_LSU == 6) {
             data_response_offset_q = cpu_data_address[2:0];
