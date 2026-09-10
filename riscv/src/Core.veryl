@@ -170,6 +170,7 @@ module Core #(
     var ex_raw_instr_q          : logic<32>          ;
     var ex_rd_q                 : logic<5>           ;
     var ex_alu_op_q             : logic<6>           ;
+    var ex_zba_control_q        : logic<3>           ;
     var ex_subtract_q           : logic              ;
     var ex_write_enable_q       : logic              ;
     var ex_can_bypass_q         : logic              ;
@@ -525,7 +526,8 @@ module Core #(
 
     inst execute_bus : ExecuteBus;
     inst execute_unit: ExecuteUnit #(
-        ENABLE_ZBA: ENABLE_ZBA,
+        ENABLE_ZBA    : ENABLE_ZBA,
+        PREDECODED_ZBA: 1         ,
     ) (
         execute: execute_bus,
     );
@@ -921,13 +923,14 @@ module Core #(
             alu_operand_b = ex_operand_b_q;
         }
 
-        execute_bus.alu_op    = ex_alu_op_q;
-        execute_bus.subtract  = ex_subtract_q;
-        execute_bus.link      = ex_link_q;
-        execute_bus.word_op   = ex_word_op_q;
-        execute_bus.operand_a = alu_operand_a;
-        execute_bus.operand_b = alu_operand_b;
-        lsu_address           = alu_operand_a[31:0] + alu_operand_b[31:0];
+        execute_bus.alu_op      = ex_alu_op_q;
+        execute_bus.zba_control = ex_zba_control_q;
+        execute_bus.subtract    = ex_subtract_q;
+        execute_bus.link        = ex_link_q;
+        execute_bus.word_op     = ex_word_op_q;
+        execute_bus.operand_a   = alu_operand_a;
+        execute_bus.operand_b   = alu_operand_b;
+        lsu_address             = alu_operand_a[31:0] + alu_operand_b[31:0];
         // Loads/stores only add a base and offset. Do not route address
         // permission checks through the ALU's Zba/subtract/word selectors.
         // Four short carry-select slices also keep a dependent address's
@@ -1769,6 +1772,7 @@ module Core #(
             ex_raw_instr_q           = 32'h0000_0013;
             ex_rd_q                  = 5'd0;
             ex_alu_op_q              = 4'd0;
+            ex_zba_control_q         = 3'd0;
             ex_subtract_q            = 1'b0;
             ex_write_enable_q        = 1'b0;
             ex_can_bypass_q          = 1'b0;
@@ -2119,6 +2123,12 @@ module Core #(
                 ex_raw_instr_q = rx_raw_instr_q;
                 ex_rd_q        = rx_rd_q;
                 ex_alu_op_q    = rx_alu_op_q;
+                // Decode the Zba input selects before EX's shift-and-add
+                // carry chain. The controls stall with their instruction.
+                ex_zba_control_q = 3'd0;
+                if ENABLE_ZBA && !rx_alu_op_q[5] && rx_alu_op_q[4] {
+                    ex_zba_control_q = rx_alu_op_q[2:0];
+                }
                 // Decode subtraction before EX so the carry-chain input does
                 // not start behind a four-bit opcode equality comparator.
                 ex_subtract_q            = rx_alu_op_q == 4'd1;

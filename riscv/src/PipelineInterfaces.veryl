@@ -149,7 +149,9 @@ interface CsrBus {
 /// Registered operands enter the execution unit; arithmetic and logical
 /// candidates leave separately so the pipeline can preserve a short bypass.
 interface ExecuteBus {
-    var alu_op            : logic<6> ;
+    var alu_op: logic<6>;
+    // Arithmetic input selects: [2] zero-extend word, [1:0] left shift.
+    var zba_control       : logic<3> ;
     var subtract          : logic    ;
     var link              : logic    ;
     var word_op           : logic    ;
@@ -167,22 +169,24 @@ interface ExecuteBus {
     var result_use_compare: logic    ;
 
     modport pipeline {
-        alu_op   : output,
-        subtract : output,
-        link     : output,
-        word_op  : output,
-        operand_a: output,
-        operand_b: output,
+        alu_op     : output,
+        zba_control: output,
+        subtract   : output,
+        link       : output,
+        word_op    : output,
+        operand_a  : output,
+        operand_b  : output,
         ..input
     }
 
     modport execute {
-        alu_op   : input,
-        subtract : input,
-        link     : input,
-        word_op  : input,
-        operand_a: input,
-        operand_b: input,
+        alu_op     : input,
+        zba_control: input,
+        subtract   : input,
+        link       : input,
+        word_op    : input,
+        operand_a  : input,
+        operand_b  : input,
         ..output
     }
 }

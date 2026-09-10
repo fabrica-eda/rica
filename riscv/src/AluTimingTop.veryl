@@ -16,13 +16,14 @@ module AddTimingTop (
     );
 
     always_comb {
-        execute_bus.alu_op    = 4'd0;
-        execute_bus.subtract  = 1'b0;
-        execute_bus.link      = 1'b0;
-        execute_bus.word_op   = 1'b0;
-        execute_bus.operand_a = operand_a_q;
-        execute_bus.operand_b = operand_b_q;
-        result                = result_q;
+        execute_bus.zba_control = 3'd0;
+        execute_bus.alu_op      = 4'd0;
+        execute_bus.subtract    = 1'b0;
+        execute_bus.link        = 1'b0;
+        execute_bus.word_op     = 1'b0;
+        execute_bus.operand_a   = operand_a_q;
+        execute_bus.operand_b   = operand_b_q;
+        result                  = result_q;
     }
 
     always_ff (clk) {
@@ -53,12 +54,13 @@ module MergedAluTimingTop (
     );
 
     always_comb {
-        execute_bus.alu_op    = alu_op_q;
-        execute_bus.subtract  = alu_op_q == 4'd1;
-        execute_bus.link      = 1'b0;
-        execute_bus.word_op   = word_op_q;
-        execute_bus.operand_a = operand_a_q;
-        execute_bus.operand_b = operand_b_q;
+        execute_bus.zba_control = 3'd0;
+        execute_bus.alu_op      = alu_op_q;
+        execute_bus.subtract    = alu_op_q == 4'd1;
+        execute_bus.link        = 1'b0;
+        execute_bus.word_op     = word_op_q;
+        execute_bus.operand_a   = operand_a_q;
+        execute_bus.operand_b   = operand_b_q;
         if execute_bus.result_use_logic {
             selected_result = execute_bus.logic_result;
         } else {
@@ -106,17 +108,18 @@ module AluTimingTop (
     );
 
     always_comb {
-        execute_bus.alu_op    = alu_op_q;
-        execute_bus.subtract  = alu_op_q == 4'd1;
-        execute_bus.link      = 1'b0;
-        execute_bus.word_op   = word_op_q;
-        execute_bus.operand_a = operand_a_q;
-        execute_bus.operand_b = operand_b_q;
-        arithmetic            = arithmetic_q;
-        logic_result          = logic_result_q;
-        shift_result          = shift_result_q;
-        use_logic             = use_logic_q;
-        use_shift             = use_shift_q;
+        execute_bus.zba_control = 3'd0;
+        execute_bus.alu_op      = alu_op_q;
+        execute_bus.subtract    = alu_op_q == 4'd1;
+        execute_bus.link        = 1'b0;
+        execute_bus.word_op     = word_op_q;
+        execute_bus.operand_a   = operand_a_q;
+        execute_bus.operand_b   = operand_b_q;
+        arithmetic              = arithmetic_q;
+        logic_result            = logic_result_q;
+        shift_result            = shift_result_q;
+        use_logic               = use_logic_q;
+        use_shift               = use_shift_q;
     }
 
     always_ff (clk) {
@@ -176,12 +179,13 @@ module FullAluTimingTop (
     );
 
     always_comb {
-        execute_bus.alu_op    = alu_op_q;
-        execute_bus.subtract  = alu_op_q == 4'd1;
-        execute_bus.link      = 1'b0;
-        execute_bus.word_op   = word_op_q;
-        execute_bus.operand_a = operand_a_q;
-        execute_bus.operand_b = operand_b_q;
+        execute_bus.zba_control = 3'd0;
+        execute_bus.alu_op      = alu_op_q;
+        execute_bus.subtract    = alu_op_q == 4'd1;
+        execute_bus.link        = 1'b0;
+        execute_bus.word_op     = word_op_q;
+        execute_bus.operand_a   = operand_a_q;
+        execute_bus.operand_b   = operand_b_q;
 
         if word_op_q {
             amount      = {1'b0, operand_b_q[4:0]};

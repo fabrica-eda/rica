@@ -12,31 +12,30 @@ module PhysicalOffsetAccessCheck #(
     boot_region  : output logic    ,
     timer_region : output logic    ,
 ) {
-    var low_sum       : logic<13>;
-    var boot_current  : logic    ;
-    var boot_next     : logic    ;
-    var boot_previous : logic    ;
-    var ram_current   : logic    ;
-    var ram_next      : logic    ;
-    var ram_previous  : logic    ;
-    var end_current   : logic    ;
-    var end_next      : logic    ;
-    var end_previous  : logic    ;
-    var timer_current : logic    ;
-    var timer_next    : logic    ;
-    var timer_previous: logic    ;
-    var ram           : logic    ;
-    var boot          : logic    ;
-    var end_page      : logic    ;
-    var timer         : logic    ;
-    var aligned       : logic    ;
-    var byte_last     : logic<3> ;
-    var end_lane      : logic<4> ;
-    var crossing      : logic    ;
-    var upper_zero    : logic    ;
-    var wrapped_boot  : logic    ;
-    var boot_crossing : logic    ;
-    var ram_crossing  : logic    ;
+    var low_sum          : logic<13>;
+    var boot_current     : logic    ;
+    var boot_next        : logic    ;
+    var boot_previous    : logic    ;
+    var ram_current      : logic    ;
+    var ram_next         : logic    ;
+    var ram_previous     : logic    ;
+    var end_current      : logic    ;
+    var end_next         : logic    ;
+    var end_previous     : logic    ;
+    var timer_current    : logic    ;
+    var timer_next       : logic    ;
+    var timer_previous   : logic    ;
+    var ram              : logic    ;
+    var boot             : logic    ;
+    var end_page         : logic    ;
+    var timer            : logic    ;
+    var aligned          : logic    ;
+    var end_lane_crossing: logic    ;
+    var crossing         : logic    ;
+    var upper_zero       : logic    ;
+    var wrapped_boot     : logic    ;
+    var boot_crossing    : logic    ;
+    var ram_crossing     : logic    ;
 
     always_comb {
         low_sum = {1'b0, base[11:0]} + {1'b0, offset};
@@ -76,25 +75,26 @@ module PhysicalOffsetAccessCheck #(
             end_page = end_previous;
             timer    = timer_previous;
         }
-        byte_last = 3'd0;
-        aligned   = 1'b1;
+        end_lane_crossing = 1'b0;
+        aligned           = 1'b1;
         case size {
             2'd1: {
-                byte_last = 3'd1;
-                aligned   = low_sum[0] == 1'b0;
+                end_lane_crossing = low_sum[2:0] == 3'd7;
+                aligned           = low_sum[0] == 1'b0;
             }
             2'd2: {
-                byte_last = 3'd3;
-                aligned   = low_sum[1:0] == 2'd0;
+                end_lane_crossing = low_sum[2] && (low_sum[1] || low_sum[0]);
+                aligned           = low_sum[1:0] == 2'd0;
             }
             2'd3: {
-                byte_last = 3'd7;
-                aligned   = low_sum[2:0] == 3'd0;
+                end_lane_crossing = low_sum[2:0] != 3'd0;
+                aligned           = low_sum[2:0] == 3'd0;
             }
             default: {}
         }
-        end_lane      = {1'b0, low_sum[2:0]} + {1'b0, byte_last};
-        crossing      = (low_sum[11:3] == 9'h1ff) && end_lane[3];
+        // Decode the last-byte carry directly. Do not chain another adder
+        // after the base-plus-offset sum on the request permission path.
+        crossing      = (low_sum[11:3] == 9'h1ff) && end_lane_crossing;
         boot_crossing = boot && crossing;
         ram_crossing  = end_page && crossing;
         boot_boundary = upper_zero && boot_crossing;

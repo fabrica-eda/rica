@@ -37,6 +37,7 @@ module ZbsTestTop #(param ENABLE_ZBS: bit = 0, param EARLY_SIMPLE: bit = 0) (
         operand_b = b;
         if d.use_immediate { operand_b = d.immediate; }
         e.alu_op = d.alu_op;
+        e.zba_control = 3'd0;
         e.subtract = 1'b0;
         e.word_op = d.word_op;
         e.link = 1'b0;
