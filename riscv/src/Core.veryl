@@ -369,6 +369,10 @@ module Core #(
     var lsu_timer_regions       : logic               [3];
     var lsu_fault_address       : logic<64>              ;
     var lsu_access_size         : logic<2>               ;
+    var rx_access_size          : logic<2>               ;
+    var rx_access_last_byte     : logic<3>               ;
+    var rx_access_end_offset    : logic<13>              ;
+    var ex_access_end_offset_q  : logic<13>              ;
     var lsu_access_fault        : logic                  ;
     var rx_fetch_fault_q        : logic                  ;
     var rx_fault_boundary_q     : logic                  ;
@@ -729,6 +733,7 @@ module Core #(
         ) (
             base         : lsu_access_bases[source]      ,
             offset       : ex_redirect_offset_q[11:0]    ,
+            end_offset   : ex_access_end_offset_q        ,
             size         : lsu_access_size               ,
             allowed      : lsu_allowed_candidates[source],
             boot_boundary: lsu_boot_candidates[source]   ,
@@ -956,7 +961,19 @@ module Core #(
                 }
             }
         }
-        lsu_access_size = ex_load_size_q;
+        rx_access_size      = rx_load_size_q;
+        if rx_is_store_q {
+            rx_access_size      = rx_store_size_q;
+        }
+        rx_access_last_byte = 3'd0;
+        case rx_access_size {
+            2'd1   : rx_access_last_byte = 3'd1;
+            2'd2   : rx_access_last_byte = 3'd3;
+            2'd3   : rx_access_last_byte = 3'd7;
+            default: {}
+        }
+        rx_access_end_offset = {rx_immediate_q[11], rx_immediate_q[11:0]} + {10'd0, rx_access_last_byte};
+        lsu_access_size      = ex_load_size_q;
         if ex_is_store_q {
             lsu_access_size = ex_store_size_q;
         }
@@ -1781,6 +1798,7 @@ module Core #(
             ex_load_unsigned_q       = 1'b0;
             ex_is_store_q            = 1'b0;
             ex_store_size_q          = 2'b11;
+            ex_access_end_offset_q   = 13'd0;
             ex_word_op_q             = 1'b0;
             ex_is_branch_q           = 1'b0;
             ex_branch_op_q           = 3'b000;
@@ -2193,6 +2211,9 @@ module Core #(
                 } else {
                     ex_redirect_base_q = rx_pc_q;
                 }
+                // Hold the last-byte offset with the same EX descriptor;
+                // permission checking adds base to start/end in parallel.
+                ex_access_end_offset_q  = rx_access_end_offset;
                 ex_redirect_offset_q    = rx_immediate_q;
                 ex_redirect_clear_lsb_q = rx_is_jalr_q;
 

@@ -2107,7 +2107,7 @@ fn append_constant(program: &mut BTreeMap<u32, u32>, pc: &mut u32, rd: u32, valu
 fn access_faulting_loads_and_stores_never_issue_or_commit() {
     for config in [ACCESS_CONFIG, 98_432, 98_436] {
         for (address, fault_address, sizes) in [
-            (0x1000, 0x1000, 0..4),
+            (0x1000_u64, 0x1000, 0..4),
             (0x8003_f000, 0x8003_f000, 0..4),
             (0x0000_0001_0000_0300, 0x0000_0001_0000_0300, 0..4),
             (0xffff_ffff_8000_0300, 0xffff_ffff_8000_0300, 0..4),
@@ -2115,62 +2115,71 @@ fn access_faulting_loads_and_stores_never_issue_or_commit() {
             (0x8003_efff, 0x8003_f000, 1..4),
             (0x0200_4001, 0x0200_4001, 1..4),
         ] {
-            for size in sizes {
-                for store in [false, true] {
-                    let mut program = access_program();
-                    let mut pc = 8;
-                    append_constant(&mut program, &mut pc, 2, address);
-                    program.insert(pc, encode_addi(31, 0, 77));
-                    let fault_pc = pc + 4;
-                    let instruction = if store {
-                        (encode_sd(31, 2, 0) & !(7 << 12)) | size << 12
-                    } else {
-                        (encode_ld(31, 2, 0) & !(7 << 12)) | size << 12
-                    };
-                    program.insert(fault_pc, instruction);
-                    // Both are younger than the exception, including the store
-                    // immediately following a fault first detected in EX.
-                    program.insert(fault_pc + 4, encode_sd(31, 0, 0x300));
-                    program.insert(fault_pc + 8, encode_addi(31, 0, 99));
-                    let mut driver = CoreDriver::with_config(program, config);
-                    let mut done = false;
-                    let mut trace = Vec::new();
-                    for _ in 0..300 {
-                        if trace.len() < 32 && driver.value("ex_pc_q") >= u64::from(fault_pc) {
-                            trace.push([
-                                driver.value("pc"),
-                                driver.value("ex_pc_q"),
-                                driver.value("lsu_address"),
-                                driver.value("lsu_access_fault"),
-                                driver.value("cm_pc_q"),
-                                driver.value("cm_exception_q"),
-                                driver.value("cm_trap_event"),
-                                driver.value("redirect_pending_q"),
-                            ]);
-                        }
-                        assert_eq!(
-                            driver.value("data_request_sequence"),
-                            0,
-                            "fault issued memory request: {address:x}, size {size}, store {store}"
+            // Exercise the separately registered last-byte offset across
+            // its sign change and beyond the signed 12-bit positive limit.
+            for offset in [-2048_i32, -1, 0, 2047] {
+                for size in sizes.clone() {
+                    for store in [false, true] {
+                        let mut program = access_program();
+                        let mut pc = 8;
+                        append_constant(
+                            &mut program,
+                            &mut pc,
+                            2,
+                            address.wrapping_sub(offset as u64),
                         );
-                        let cycle = driver.step();
-                        assert!(!cycle.data_we && !cycle.commit_mem_we);
-                        if cycle.commit_valid {
-                            assert!(!(fault_pc..fault_pc + 12).contains(&cycle.commit_pc));
-                            if cycle.commit_pc == 0x408 {
-                                done = true;
-                                break;
+                        program.insert(pc, encode_addi(31, 0, 77));
+                        let fault_pc = pc + 4;
+                        let instruction = if store {
+                            (encode_sd(31, 2, offset) & !(7 << 12)) | size << 12
+                        } else {
+                            (encode_ld(31, 2, offset) & !(7 << 12)) | size << 12
+                        };
+                        program.insert(fault_pc, instruction);
+                        // Both are younger than the exception, including the store
+                        // immediately following a fault first detected in EX.
+                        program.insert(fault_pc + 4, encode_sd(31, 0, 0x300));
+                        program.insert(fault_pc + 8, encode_addi(31, 0, 99));
+                        let mut driver = CoreDriver::with_config(program, config);
+                        let mut done = false;
+                        let mut trace = Vec::new();
+                        for _ in 0..300 {
+                            if trace.len() < 32 && driver.value("ex_pc_q") >= u64::from(fault_pc) {
+                                trace.push([
+                                    driver.value("pc"),
+                                    driver.value("ex_pc_q"),
+                                    driver.value("lsu_address"),
+                                    driver.value("lsu_access_fault"),
+                                    driver.value("cm_pc_q"),
+                                    driver.value("cm_exception_q"),
+                                    driver.value("cm_trap_event"),
+                                    driver.value("redirect_pending_q"),
+                                ]);
+                            }
+                            assert_eq!(
+                                driver.value("data_request_sequence"),
+                                0,
+                                "fault issued memory request: {address:x}, offset {offset}, size {size}, store {store}"
+                            );
+                            let cycle = driver.step();
+                            assert!(!cycle.data_we && !cycle.commit_mem_we);
+                            if cycle.commit_valid {
+                                assert!(!(fault_pc..fault_pc + 12).contains(&cycle.commit_pc));
+                                if cycle.commit_pc == 0x408 {
+                                    done = true;
+                                    break;
+                                }
                             }
                         }
+                        assert!(
+                            done,
+                            "no trap: config {config}, {address:x}, offset {offset}, size {size}, store {store}; {trace:x?}"
+                        );
+                        assert_eq!(driver.csr_value("mcause_q"), if store { 7 } else { 5 });
+                        assert_eq!(driver.csr_value("mepc_q") << 1, u64::from(fault_pc));
+                        assert_eq!(driver.csr_value("mtval_q"), fault_address);
+                        assert_eq!(driver.value("debug_x31"), 77);
                     }
-                    assert!(
-                        done,
-                        "no trap: config {config}, {address:x}, size {size}, store {store}; {trace:x?}"
-                    );
-                    assert_eq!(driver.csr_value("mcause_q"), if store { 7 } else { 5 });
-                    assert_eq!(driver.csr_value("mepc_q") << 1, u64::from(fault_pc));
-                    assert_eq!(driver.csr_value("mtval_q"), fault_address);
-                    assert_eq!(driver.value("debug_x31"), 77);
                 }
             }
         }
