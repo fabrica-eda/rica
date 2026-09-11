@@ -193,7 +193,7 @@ Coreの設定bit 0はscrub、bit 1はbimodal、bit 2は静的予測を指定す�
 - **評価系**: ELFランナーは構成ごとにモデルを1回コンパイルし、ELFごとに新しい状態を作る。
   前のELFの学習結果が次の測定に残らない。4本の自己検査付きRV64ループを追加した。
 - **物理比較**: 同じデバイス、LPF、PLL、placer、router、seedを使う
-  [比較スクリプト](../toolchain/measurements/run_rv64_architecture_ab.py)を追加した。
+  [比較スクリプト](tools/run_rv64_architecture_ab.py)を追加した。
   ボードwrapperの階層をCSRのCE制約・クロック判定にも適用する。
   nextpnr 0.6のpacked CLKピン名ではなく、clk-to-qのQ側から発信レジスタのドメインを判定する。
 
@@ -335,7 +335,7 @@ cargo build --locked --offline --release -p verify-riscv --bin nextpnr-riscv
 target/release/nextpnr-riscv HardwareTestTop
 target/release/nextpnr-riscv HardwareBimodalTestTop
 target/release/nextpnr-riscv HardwareStaticTestTop
-python3 toolchain/measurements/run_rv64_architecture_ab.py \
+python3 riscv/tools/run_rv64_architecture_ab.py \
   --tage riscv/build/riscv-hardware-test-125.nextpnr.json \
   --bimodal riscv/build/riscv-hardware-bimodal-test-125.nextpnr.json \
   --static riscv/build/riscv-hardware-static-test-125.nextpnr.json \

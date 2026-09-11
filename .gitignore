@@ -2,6 +2,9 @@
 /toolchain/worktrees/
 /.agent-artifacts/
 /i2c/build/
+/i2c/.build/
+/i2c/jtag-*-probe.svf
+/toolchain/measurements/
 /riscv/build/
 /riscv/.build/
 /riscv/dependencies/

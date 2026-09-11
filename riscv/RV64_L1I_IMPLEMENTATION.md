@@ -181,7 +181,7 @@ target/release/nextpnr-riscv HardwareStaticTestTop
 target/release/nextpnr-riscv HardwareCached2KTestTop
 target/release/nextpnr-riscv HardwareCached4KTestTop
 target/release/nextpnr-riscv HardwareCached8KTestTop
-python3 toolchain/measurements/run_rv64_architecture_ab.py \
+python3 riscv/tools/run_rv64_architecture_ab.py \
   --static riscv/build/riscv-hardware-static-test-125.nextpnr.json \
   --cache2k riscv/build/riscv-hardware-cached-2k-test-125.nextpnr.json \
   --cache4k riscv/build/riscv-hardware-cached-4k-test-125.nextpnr.json \

@@ -3,6 +3,12 @@
 This workspace now contains the RISC-V implementation under `riscv/` and
 the I2C block used to establish host-driven hardware debug under `i2c/`.
 
+Historical measurement logs, trial scripts, machine-specific records and binary
+artifacts under `toolchain/measurements/` are local archives excluded from Git.
+Links and commands pointing into that directory in older reports require the
+local archive; those files are not included in a fresh checkout. Maintained
+comparison tools and their portable input data live under `riscv/tools/`.
+
 The ECP5 RV64 architecture comparison, measurements, and implementation plan
 are recorded in [the architecture plan](riscv/RV64_ARCHITECTURE_PLAN.md).
 The current development build is scalar RV64 with a **64-entry BTB, two-bit

@@ -1,9 +1,0 @@
-! ER2 must return the fabric's constant-one JTDO2 value.
-TRST OFF;
-ENDIR IDLE;
-ENDDR IDLE;
-STATE RESET;
-STATE IDLE;
-SIR 8 TDI (38);
-SDR 8 TDI (00) TDO (FF) MASK (FF);
-STATE IDLE;

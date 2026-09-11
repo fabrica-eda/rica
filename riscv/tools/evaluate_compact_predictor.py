@@ -22,7 +22,7 @@ def main():
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    baseline = json.loads((ROOT / "toolchain/measurements/2026-09-05-rv64-124p8-hardware/elf-sha256.json").read_text())
+    baseline = json.loads((Path(__file__).with_name("compact-predictor-baseline-sha256.json")).read_text())
     for name, expected in baseline.items():
         if sha(ROOT / name) != expected:
             raise RuntimeError(f"baseline ELF changed: {name}")
