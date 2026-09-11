@@ -34,7 +34,7 @@ Zba無効時は該当命令を不正命令として扱う。
   登録済みredirectでPREPARE中にcancelする。実際の開始とcancelを通る回帰試験を追加した。
   system例外はEXで後続をflushするため、後続M命令が開始しないことも確認した。
 - RASの定数slot計算をgenerate内の定数にし、不要なarithmetic cellsを16個除いた。
-  [小さな再現](../toolchain/mre/struo-constant-loop/README.md)ではmapped cellsが144→8になり、
+  [小さな再現](../toolchain/measurements/2026-09-11-constant-arithmetic/README.md)ではmapped cellsが144→8になり、
   全入力で値が一致する。依存ライブラリは変更していない。
 
 ## Zbaの物理条件と検証結果

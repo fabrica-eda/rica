@@ -115,5 +115,5 @@ simulation, STA, P&R, and bitgen defects are tracked separately in
 [TOOLCHAIN_ISSUES.md](TOOLCHAIN_ISSUES.md).
 
 Veryl native testbenches run on Celox with `cargo test --locked --offline -p rica-tb`;
-see [test instructions](riscv/tests/README.md). [Active MREs](toolchain/mre/README.md)
-are isolated from the verification crates; fixed reproducers have been removed.
+see [test instructions](riscv/tests/README.md). The [MRE inventory](toolchain/mre/README.md)
+currently has no active reproducers; fixed cases are covered by upstream regressions.

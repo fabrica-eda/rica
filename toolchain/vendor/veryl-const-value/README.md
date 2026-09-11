@@ -33,7 +33,7 @@ in a temporary directory and does not modify either source tree.
 
 This is narrower than the initial withdrawn analyzer experiment: it does not
 reinterpret incorrectly typed caller overrides. The separate
-[Celox patch](../celox-parameter-width/README.md) fixes that caller convention.
+[upstream Celox fix](https://github.com/celox-sim/celox/pull/787) fixes that caller convention.
 [Diagnosis and verification](../../measurements/2026-09-09-celox-parameter-width/README.md).
 
 [Staged source audit](STAGED_REVIEW.json) compares the exact proposed commit with

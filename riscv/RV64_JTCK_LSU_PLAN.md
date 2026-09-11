@@ -114,7 +114,7 @@ nativeで再現した。この失敗からIPCは算出していない。
 3. nativeのO0でも行う後段最適化が、1 bit要素をまとめて書く際にメモリ上の要素間隔を
    無視していた。配列要素の境界でアクセスを分割するよう修正した。
 
-修正は[依存パッチ](../toolchain/vendor/celox/README.md)として取り込み、元のメモリと
+修正は[依存パッチ](../toolchain/measurements/2026-09-06-celox-upstream/README.md)として取り込み、元のメモリと
 パラメータ追加版を4 backend × 3最適化段階で比較する**24ケースが合格**した。
 通常CPUと隔離コピーのLSU無効CPUは、それぞれ固定100 ELFs × 2 clock実行順、
 **合計400回のモデル実行が合格**。両者のコミット数・総cycles・最初のcommit・実行区間は

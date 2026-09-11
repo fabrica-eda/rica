@@ -350,7 +350,7 @@ dependencies = [
 [[package]]
 name = "texo-model"
 version = "0.1.6"
-source = "git+https://github.com/fabrica-eda/texo?rev=6baf4626b17d6373c973755336460c9bc32ed458#6baf4626b17d6373c973755336460c9bc32ed458"
+source = "git+https://github.com/fabrica-eda/texo?rev=c48afcd6485055b868321904d5d780f1a14412c7#c48afcd6485055b868321904d5d780f1a14412c7"
 dependencies = [
  "serde",
 ]
@@ -358,7 +358,7 @@ dependencies = [
 [[package]]
 name = "texo-pnr"
 version = "0.1.6"
-source = "git+https://github.com/fabrica-eda/texo?rev=6baf4626b17d6373c973755336460c9bc32ed458#6baf4626b17d6373c973755336460c9bc32ed458"
+source = "git+https://github.com/fabrica-eda/texo?rev=c48afcd6485055b868321904d5d780f1a14412c7#c48afcd6485055b868321904d5d780f1a14412c7"
 dependencies = [
  "libm",
  "rayon",
@@ -369,7 +369,7 @@ dependencies = [
 [[package]]
 name = "texo-target-ecp5"
 version = "0.1.6"
-source = "git+https://github.com/fabrica-eda/texo?rev=6baf4626b17d6373c973755336460c9bc32ed458#6baf4626b17d6373c973755336460c9bc32ed458"
+source = "git+https://github.com/fabrica-eda/texo?rev=c48afcd6485055b868321904d5d780f1a14412c7#c48afcd6485055b868321904d5d780f1a14412c7"
 dependencies = [
  "postcard",
  "serde",
@@ -381,7 +381,7 @@ dependencies = [
 [[package]]
 name = "texo-timing"
 version = "0.1.6"
-source = "git+https://github.com/fabrica-eda/texo?rev=6baf4626b17d6373c973755336460c9bc32ed458#6baf4626b17d6373c973755336460c9bc32ed458"
+source = "git+https://github.com/fabrica-eda/texo?rev=c48afcd6485055b868321904d5d780f1a14412c7#c48afcd6485055b868321904d5d780f1a14412c7"
 dependencies = [
  "texo-model",
  "texo-pnr",

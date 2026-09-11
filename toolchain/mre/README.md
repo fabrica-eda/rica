@@ -1,17 +1,21 @@
-# Active toolchain reproducers
+# Toolchain reproducer inventory
 
 Only unresolved reproducers belong here. Fixed reproducers and obsolete board
 experiments were removed; their sources remain in Git history and historical
 results remain in `toolchain/measurements`. Historical links to removed MREs
 point here intentionally.
 
-The current workspace pins Celox `7ff0dd2` and Struo `4e9de73`. The Celox facade
-parameter-width patch and Veryl constant-metadata patch in `toolchain/vendor`
-are still required; deleting their old reproducers does not remove these fixes.
-Celox is shared by the RTL runner and Struo adapter through the workspace patch.
+The workspace pins upstream Celox 0.4.7 at `ab63d6c`, Struo at `70058b6`,
+and Texo at `c48afcd`, with one revision of each across direct and transitive
+dependencies. Both Celox vendor directories and the Celox Cargo override have
+been removed. The separate Veryl constant-metadata patch remains required.
+See the [Celox adoption record](../measurements/2026-09-11-celox-047/README.md).
 
-- `struo-constant-loop`: unresolved constant arithmetic QoR issue. Run
-  `cargo run --locked --offline -p rica-mre --bin struo-constant-loop`.
+There are currently no active MREs in this directory. The final constant-loop
+MRE was fixed by [Struo PR #90](https://github.com/fabrica-eda/struo/pull/90)
+and removed with its dedicated Cargo crate. The fixture and regression now live
+upstream. See the [adoption record](../measurements/2026-09-11-constant-arithmetic/README.md).
+
 - Current JTAG STA release checking lives in `riscv/tools/jtag-sta`; the bitgen
   wrapper uses it directly. Old JTAG corruption and ECO probes were removed.
 - Hardware-memory, parameter API, mapped DSP and predictor regressions remain

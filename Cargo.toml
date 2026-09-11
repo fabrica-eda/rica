@@ -1,5 +1,5 @@
 [workspace]
-members = ["i2c/verify", "riscv/verify", "toolchain/mre", "toolchain/tb"]
+members = ["i2c/verify", "riscv/verify", "toolchain/tb"]
 default-members = ["riscv/verify", "toolchain/tb"]
 resolver = "3"
 
@@ -10,18 +10,15 @@ rust-version = "1.98.1"
 [workspace.dependencies]
 serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
-# Shared-clock FF correctness and SplitCoalescedStores access-order fix (PR #762).
-celox = { git = "https://github.com/celox-sim/celox.git", rev = "7ff0dd2b8c4a92efd9a1aabe376240c6dff3f9c9" }
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "4e9de737d1ad0b1e619d8887505a6ba0ad13c74b" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
-
-[patch."https://github.com/celox-sim/celox.git"]
-# Type top-level parameter overrides before passing them to Veryl's IR API.
-celox = { path = "toolchain/vendor/celox-parameter-width/celox" }
+# Celox 0.4.7 after the release tag, including upstream parameter typing fix #787.
+celox = { version = "=0.4.7", git = "https://github.com/celox-sim/celox.git", rev = "ab63d6cf16ce702be7feed1c197808c30aad690d" }
+# Keep direct and Texo-transitive dependencies aligned (Struo #91 / Texo #73).
+struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
+struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
+struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
+struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
 
 [patch.crates-io]
 # Keep constant-folding metadata consistent with fitted constant storage.

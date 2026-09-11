@@ -8,9 +8,9 @@ publish = false
 
 [dependencies]
 serde_json = "1"
-texo-model = { git = "https://github.com/fabrica-eda/texo", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
-texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
-texo-timing = { git = "https://github.com/fabrica-eda/texo", rev = "6baf4626b17d6373c973755336460c9bc32ed458" }
+texo-model = { git = "https://github.com/fabrica-eda/texo", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
+texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
+texo-timing = { git = "https://github.com/fabrica-eda/texo", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
 
 [[bin]]
 name = "jtag-sta"

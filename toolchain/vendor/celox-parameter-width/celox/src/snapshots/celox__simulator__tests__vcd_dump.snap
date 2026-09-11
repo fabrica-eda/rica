@@ -1,6 +1,0 @@
----
-source: crates/celox/src/simulator.rs
-expression: bytes
-extension: vcd
-snapshot_kind: binary
----

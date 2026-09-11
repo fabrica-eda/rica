@@ -36,12 +36,18 @@ tool. Unconfirmed observations remain excluded until a reproducer is retained.
 | RICA-001 | Rica nextpnr report validator | Fixed locally | before this work | Assuming exactly two global clocks rejected current reports containing two JTAG clocks |
 
 **Current cleanup (2026-09-11).** The table above and detailed entries below
-include historical integration states. Current Struo `4e9de73` contains the
-case-mux and associative-Boolean fixes; Celox `7ff0dd2` plus the workspace
-patches fixes the retained Celox reproductions. Fixed MREs and obsolete probes
+include historical integration states. Current Struo `70058b6` contains the
+case-mux and associative-Boolean fixes; Celox 0.4.7 `ab63d6c` plus the remaining Veryl constant-metadata patch
+fixes the retained Celox reproductions; no Celox vendor override remains. Fixed MREs and obsolete probes
 have been deleted; historical commands require checking out their original Git
 revision. See the [active MRE inventory](toolchain/mre/README.md) and
 [current regressions](riscv/tests/README.md).
+The last active constant-loop MRE is also fixed by
+[Struo PR #90](https://github.com/fabrica-eda/struo/pull/90); its arithmetic
+cell count drops from 8 to 0 and ECP5 cell count from 144 to 8, with all
+eight inputs checked. The dedicated local MRE crate is removed.
+[Texo PR #72](https://github.com/fabrica-eda/texo/pull/72) aligns the transitive
+Struo dependency. See the [adoption record](toolchain/measurements/2026-09-11-constant-arithmetic/README.md).
 
 ## STR-001 — Wide-cover selection can cause discontinuous area growth
 
@@ -602,7 +608,7 @@ baseline, independent negative controls failed when each corresponding fix
 was removed.
 
 The initial local fix used 0.4.5 `9aa2457` with four
-[vendored crate patches](toolchain/vendor/celox/README.md). Original and
+[vendored crate patches](toolchain/measurements/2026-09-06-celox-upstream/README.md). Original and
 parameterized memories pass native, Cranelift, interpreter and WASM at all
 three optimization levels (24 cases). The active regression covers both
 source forms at O0/O1/O2 on native and WASM. Struo's separate 0.3.1 dependency

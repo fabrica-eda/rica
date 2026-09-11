@@ -261,7 +261,7 @@ cargo run --locked --offline -p rica-tb -- native performance_counter
 cargo test --locked --offline -p rica-tb
 ```
 
-`rica-tb` depends only on the workspace's patched Celox, without Struo, Texo or
+`rica-tb` depends only on the workspace's pinned Celox 0.4.7, without Struo, Texo or
 `verify-riscv`. `suite.txt` lists each test top and its source files. The runner
 reads these files at runtime, so HDL/testbench edits require no Rust rebuild.
 The native backend executes the DUT and Celox executes the Veryl native TB.
