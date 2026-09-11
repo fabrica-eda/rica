@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
-MANIFEST = ROOT / "toolchain/mre/rv64-jtag-zero/route-probe/Cargo.toml"
+MANIFEST = ROOT / "riscv/tools/jtag-sta/Cargo.toml"
 
 
 def require(condition, message):

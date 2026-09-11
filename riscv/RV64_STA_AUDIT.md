@@ -82,7 +82,7 @@ nextpnrへ置き換えた結果が一致しても、共有する遅延データ�
 論理マッピングの等価性検査は、生成した物理配線・設定bitの完全な機能検証を代替しない。
 ボードのpost-map JTAG回帰も、既存の `NonScalarControl` によりignoreされている。
 [既存回帰](verify/tests/hardware_jtag_write.rs)と
-[WRITE64の別件](../toolchain/mre/rv64-jtag-write64/README.md)を参照。
+[WRITE64の別件](../toolchain/mre/README.md)を参照。
 別件での低TCK試験結果を、今回の全ゼロ不良の試験結果に転用しない。
 
 ## 切り分けの順序

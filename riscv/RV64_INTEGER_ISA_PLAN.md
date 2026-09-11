@@ -364,7 +364,7 @@ minstretが一致し、cycle差は−1〜0だった。
 - [設計・試作・再現・実機記録](../toolchain/measurements/2026-09-09-rv64-early-bitmanip/README.md)
 
 初稿で見つかったCeloxのパラメータoverride/repeatの幅問題は、明示的な1 bit比較値で回避した。
-FF・clockを含まない[独立MRE](../toolchain/mre/celox-parameter-repeat/README.md)を保存し、
+FF・clockを含まない[独立MRE](../toolchain/mre/README.md)を保存し、
 失敗モデルから性能を算出していない。依存ライブラリへの試験的変更も加えていない。
 
 ### 次の改良計画

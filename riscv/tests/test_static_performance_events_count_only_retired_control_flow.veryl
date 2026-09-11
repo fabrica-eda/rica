@@ -1,0 +1,58 @@
+#[test(test_static_performance_events_count_only_retired_control_flow)]
+module test_static_performance_events_count_only_retired_control_flow {
+    inst clk: $tb::clock_gen;
+    var rst_n: reset;
+    var ready: logic;
+    var request_ready: logic;
+    var request_valid: logic;
+    var request_accept: logic;
+    var request_fallthrough: logic<32>;
+    var response_accept: logic;
+    var response_valid: logic;
+    var response_token: logic<3>;
+    var response_kind: logic<3>;
+    var response_taken: logic;
+    var response_next_pc: logic<32>;
+    var response_btb_hit: logic;
+    var response_tage_hit: logic;
+    var response_ras_fallback: logic;
+    var retire_valid: logic;
+    var retire_kind: logic<3>;
+    var retire_taken: logic;
+    var recover_valid: logic;
+    var discard_all: logic;
+    var conditional_resolved_event: logic;
+    var direction_wrong_event: logic;
+    var btb_miss_event: logic;
+    var ras_fallback_event: logic;
+    inst dut: StaticBranchPredictor (clk, rst_n, ready, request_ready, request_valid, request_accept, request_fallthrough, response_accept, response_valid, response_token, response_kind, response_taken, response_next_pc, response_btb_hit, response_tage_hit, response_ras_fallback, retire_valid, retire_kind, retire_taken, recover_valid, discard_all, conditional_resolved_event, direction_wrong_event, btb_miss_event, ras_fallback_event);
+    initial {
+        rst_n = 0;
+        request_valid = 0;
+        request_fallthrough = 0;
+        response_accept = 0;
+        retire_valid = 0;
+        retire_kind = 0;
+        retire_taken = 0;
+        recover_valid = 0;
+        discard_all = 0;
+        clk.next();
+        rst_n = 1;
+        retire_kind = 1;
+        retire_taken = 1;
+        $assert(conditional_resolved_event == 0);
+        $assert(direction_wrong_event == 0);
+        $assert(btb_miss_event == 0);
+        retire_valid = 1;
+        $assert(conditional_resolved_event == 1);
+        $assert(direction_wrong_event == 1);
+        $assert(btb_miss_event == 1);
+        retire_taken = 0;
+        $assert(direction_wrong_event == 0);
+        retire_kind = 4;
+        $assert(conditional_resolved_event == 0);
+        $assert(btb_miss_event == 1);
+        $assert(ras_fallback_event == 0);
+        $finish();
+    }
+}

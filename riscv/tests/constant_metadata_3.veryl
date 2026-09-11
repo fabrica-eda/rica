@@ -1,0 +1,26 @@
+module ConstantChild3 #(param P: bit = 0) (a: input logic<64>, o: output logic<64>) { assign o = a & {P repeat 64}; } module ConstantTop3 (a: input logic<64>, o: output logic<64>) { inst child: ConstantChild3 #(P: 64'd1) (a: a, o: o); }
+#[test(test_constant_metadata_3)]
+module test_constant_metadata_3 {
+    inst clk: $tb::clock_gen;
+    var a: logic<64>;
+    var o: logic<64>;
+    inst dut: ConstantTop3 (a, o);
+    initial {
+        a = 64'd0;
+        clk.next();
+        $assert(o == a);
+        a = 64'd1;
+        clk.next();
+        $assert(o == a);
+        a = 64'hffff_ffff_ffff_ffff;
+        clk.next();
+        $assert(o == a);
+        a = 64'h0123_4567_89ab_cdef;
+        clk.next();
+        $assert(o == a);
+        a = 64'h8000_0000_0000_0000;
+        clk.next();
+        $assert(o == a);
+        $finish();
+    }
+}

@@ -113,3 +113,7 @@ See [riscv/README.md](riscv/README.md) for the CPU plan and
 [i2c/README.md](i2c/README.md) for the debug protocol. Confirmed synthesis,
 simulation, STA, P&R, and bitgen defects are tracked separately in
 [TOOLCHAIN_ISSUES.md](TOOLCHAIN_ISSUES.md).
+
+Veryl native testbenches run on Celox with `cargo test --locked --offline -p rica-tb`;
+see [test instructions](riscv/tests/README.md). [Active MREs](toolchain/mre/README.md)
+are isolated from the verification crates; fixed reproducers have been removed.

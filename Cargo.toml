@@ -1,6 +1,6 @@
 [workspace]
-members = ["i2c/verify", "riscv/verify"]
-default-members = ["riscv/verify"]
+members = ["i2c/verify", "riscv/verify", "toolchain/mre", "toolchain/tb"]
+default-members = ["riscv/verify", "toolchain/tb"]
 resolver = "3"
 
 [workspace.package]

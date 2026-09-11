@@ -1,7 +1,0 @@
-[project]
-name = "constant_metadata_repro"
-version = "0.1.0"
-
-[build]
-sources = ["src"]
-target = { type = "directory", path = "build" }

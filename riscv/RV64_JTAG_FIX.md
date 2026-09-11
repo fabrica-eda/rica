@@ -119,7 +119,7 @@ SHA-256: `73418831502025fb155a71760eab3365e7d5cddfa3e56e7661757e077c61921c`
 合成・配置配線の全オプションとRTL SHAは
 [pnr記録](../toolchain/measurements/2026-09-06-rv64-jtag-zero/jtag-falling-pnr.json)、
 測定値・全試験一覧は[summary.json](../toolchain/measurements/2026-09-06-rv64-jtag-zero/summary.json)。
-実験ECOと追加STAの再現は[MRE手順](../toolchain/mre/rv64-jtag-zero/README.md)を参照。
+追加STAは [現行チェッカー](tools/jtag-sta/README.md)を参照。修正済みの実験ECO・MREは削除済み。
 
 ```sh
 cargo test --locked --offline -p verify-riscv --test jtag_transport_edges

@@ -530,7 +530,7 @@ The hardware runner defaults to **eight bytes per masked WRITE64 frame** on
 remain selectable. The falling-edge receiver passed the former 48 corruption
 probes and all 100 ELFs with eight-byte writes. This reduces loading frames;
 CPU/memory clocks remain 124.8/62.4 MHz. See the [current image record](../toolchain/measurements/2026-09-10-rv64-access-faults/README.md)
-and [historical failure reproducer](../toolchain/mre/rv64-jtag-write64/README.md).
+and [historical failure reproducer](../toolchain/mre/README.md).
 
 `--act4` selects all 51 pinned ACT4 RV64I ELFs;
 `--act4 --act4-suite Zca` selects previously generated Zca ELFs, and

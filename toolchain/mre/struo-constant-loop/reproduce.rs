@@ -9,8 +9,7 @@ use struo_synth::synthesize;
 use struo_target_ecp5::{MappingOptions, map_to_ecp5_with_options};
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let root =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../toolchain/mre/struo-constant-loop");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("struo-constant-loop");
     for top in ["Procedural", "Elaborated"] {
         let source = fs::read_to_string(root.join(format!("{top}.veryl")))?;
         let rtl = analyze_and_lower(&source, "constant_loop", top)?;

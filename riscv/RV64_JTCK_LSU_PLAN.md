@@ -119,7 +119,7 @@ nativeで再現した。この失敗からIPCは算出していない。
 通常CPUと隔離コピーのLSU無効CPUは、それぞれ固定100 ELFs × 2 clock実行順、
 **合計400回のモデル実行が合格**。両者のコミット数・総cycles・最初のcommit・実行区間は
 全件一致した。以前の起動失敗は解消した。
-[再現コード](../toolchain/mre/celox-parameterized-memory/README.md)と
+[再現コード](../toolchain/mre/README.md)と
 [原因・検証記録](../toolchain/measurements/2026-09-06-celox-memory-fix/README.md)を参照。
 
 通常RTLを元の31ファイルへ戻した後、連続debug byteの回帰テストと、固定100 ELFsを

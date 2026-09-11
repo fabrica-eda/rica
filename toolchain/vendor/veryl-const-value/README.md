@@ -25,7 +25,7 @@ The value of `P` is one bit (`1`), so `o` must equal `a`. A second control passe
 `64'd1` to a child's `param P: bit`. Signed constants additionally verify that
 subsequent uses do not retain the initializer's unsigned expression context.
 
-The [regressions](../../../riscv/verify/tests/constant_metadata_width.rs) exercise
+The [regressions](../../../riscv/tests/README.md) exercise
 four HDL programs and five inputs on native, Cranelift, WASM, and interpreter.
 [sources.json](sources.json) records copied source hashes. To reproduce from an
 unmodified registry source directory, run `refresh.py SOURCE`; `--check` compares

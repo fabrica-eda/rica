@@ -2656,6 +2656,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rica-mre"
+version = "0.1.0"
+dependencies = [
+ "struo-celox",
+ "struo-frontend-veryl",
+ "struo-synth",
+ "struo-target-ecp5",
+]
+
+[[package]]
+name = "rica-tb"
+version = "0.1.0"
+dependencies = [
+ "celox",
+]
+
+[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

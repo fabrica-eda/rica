@@ -250,3 +250,34 @@ cargo test --locked --offline -p verify-riscv --test jtag_transport_edges
 
 [Physical results and the checked bitgen flow](../RV64_JTAG_FIX.md) include
 100 ELFs, 134 executions and the 48 former WRITE64 corruption probes.
+
+## Veryl native testbenches on Celox
+
+From the repository root:
+
+```sh
+cargo run --locked --offline -p rica-tb -- native
+cargo run --locked --offline -p rica-tb -- native performance_counter
+cargo test --locked --offline -p rica-tb
+```
+
+`rica-tb` depends only on the workspace's patched Celox, without Struo, Texo or
+`verify-riscv`. `suite.txt` lists each test top and its source files. The runner
+reads these files at runtime, so HDL/testbench edits require no Rust rebuild.
+The native backend executes the DUT and Celox executes the Veryl native TB.
+An assertion failure, missing TB, unmatched filter or tick limit exits nonzero.
+Run the already built `target/debug/rica-tb native` to skip Cargo entirely.
+
+The counter's freeze/write/wrap trace, all static predictor scenarios, and the
+four constant-metadata programs with five inputs each replace the corresponding
+Rust test drivers. `cargo test -p rica-tb` runs all nine TBs on native and repeats
+constant metadata on Cranelift, WASM and interpreter, retaining backend coverage.
+The parameter-override regression remains Rust in `toolchain/tb/tests` because
+it specifically tests `SimulatorBuilder::param`, including call order; replacing
+it with HDL instantiation would bypass the API under test.
+
+Other Rust suites in `riscv/verify/tests` retain mapped-netlist equivalence,
+software reference models, ELF/host interactions, and larger stateful drivers.
+Run them with `cargo test --locked --offline -p verify-riscv`. The migration does
+not claim a measured clean-build speedup; it removes three separately linked
+Rust test targets and isolates this path from synthesis dependencies.

@@ -171,7 +171,7 @@ JTAGクロックだけを1 MHzに下げても現版の8-byte書込みは改善�
 このモデル検査を合格やCPU命令の不合格として数えない。
 
 [実機ログ・コマンド・ハッシュ](../toolchain/measurements/2026-09-05-rv64-124p8-hardware/README.md)と
-[書込み不具合の再現手順](../toolchain/mre/rv64-jtag-write64/README.md)を保存した。
+[書込み不具合の再現手順](../toolchain/mre/README.md)を保存した。
 
 ## 検証、成果物、再現
 

@@ -1,0 +1,26 @@
+module ConstantTop0 (a: input logic<64>, o: output logic<64>) { const P: bit = 64'd3; assign o = a & {P repeat 64}; }
+#[test(test_constant_metadata_0)]
+module test_constant_metadata_0 {
+    inst clk: $tb::clock_gen;
+    var a: logic<64>;
+    var o: logic<64>;
+    inst dut: ConstantTop0 (a, o);
+    initial {
+        a = 64'd0;
+        clk.next();
+        $assert(o == a);
+        a = 64'd1;
+        clk.next();
+        $assert(o == a);
+        a = 64'hffff_ffff_ffff_ffff;
+        clk.next();
+        $assert(o == a);
+        a = 64'h0123_4567_89ab_cdef;
+        clk.next();
+        $assert(o == a);
+        a = 64'h8000_0000_0000_0000;
+        clk.next();
+        $assert(o == a);
+        $finish();
+    }
+}

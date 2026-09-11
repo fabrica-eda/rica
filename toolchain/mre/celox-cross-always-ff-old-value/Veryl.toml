@@ -1,6 +1,0 @@
-[project]
-name = "celox_cross_always_ff_old_value"
-version = "0.1.0"
-
-[build]
-target = { type = "directory", path = "build" }

@@ -35,6 +35,14 @@ tool. Unconfirmed observations remain excluded until a reproducer is retained.
 | NPNR-001 | nextpnr timing reports | Local one-CPU-period setup-budget guard; generated-clock STA still missing | historically observed with 0.6; locally reproduced with official 0.11.1 | Related divided-clock crossings are absent from the ordinary per-domain pass/fail result |
 | RICA-001 | Rica nextpnr report validator | Fixed locally | before this work | Assuming exactly two global clocks rejected current reports containing two JTAG clocks |
 
+**Current cleanup (2026-09-11).** The table above and detailed entries below
+include historical integration states. Current Struo `4e9de73` contains the
+case-mux and associative-Boolean fixes; Celox `7ff0dd2` plus the workspace
+patches fixes the retained Celox reproductions. Fixed MREs and obsolete probes
+have been deleted; historical commands require checking out their original Git
+revision. See the [active MRE inventory](toolchain/mre/README.md) and
+[current regressions](riscv/tests/README.md).
+
 ## STR-001 — Wide-cover selection can cause discontinuous area growth
 
 **Observed.** With the same `BranchPredictor` RTL and fourteen inferred BRAMs,
@@ -172,8 +180,8 @@ estimate as the last known-good lowerer.
 
 Changing only the mapper goal from 125 to 250 MHz did not alter the result.
 The former Core CSR path exhibited the same shape: nineteen LUT4s followed by
-one PFUMX. The source and analyzer are retained in
-[`toolchain/mre/struo-case-mux`](toolchain/mre/struo-case-mux).
+one PFUMX. The source and analyzer were removed after integration of the fix; see the
+[MRE inventory](toolchain/mre/README.md).
 
 **Root cause.** `struo-frontend-veryl/src/lower.rs::lower_case` folds reversed
 arms one at a time into nested `rtl.mux` expressions. Serialization therefore
@@ -315,8 +323,8 @@ explicitly balanced equivalent:
 | Explicit balanced tree | 4 | 2 | 1.820 ns | 22 |
 
 Both forms use the same mapped cell count, so the 1.500 ns difference is not
-an area-for-speed tradeoff. The retained source and analyzer are in
-[`toolchain/mre/struo-associative-bool`](toolchain/mre/struo-associative-bool).
+an area-for-speed tradeoff. The fixed reproducer has been removed; see the
+[MRE inventory](toolchain/mre/README.md).
 
 **Isolation.** Veryl lowering preserves the parser's left association as a
 chain of binary Boolean nodes. General Struo synthesis does not canonicalize
@@ -536,9 +544,8 @@ Celox reported:
 JIT Code generation error: native merged-chain optimization: during native jump inlining: SIR verify [TYPE.CONCAT_WIDTH] at b0/i66: after single-predecessor inlining: concat operands total 69 bits, r644 has width 644
 ```
 
-**Isolation/ownership.** The independent public-API MRE in
-[`toolchain/mre/celox-native-concat-width`](toolchain/mre/celox-native-concat-width)
-constructs one 132-bit atomic FF bank directly as 129 input bits, two selector
+**Isolation/ownership.** The independent public-API MRE (since
+[removed after the fix](toolchain/mre/README.md)) constructs one 132-bit atomic FF bank directly as 129 input bits, two selector
 bits, and one current-state XOR bit. `FrontendArtifact::validate()` and
 `build_wasm()` both pass, as does native compilation of the otherwise identical
 131-bit control. Native compilation of the 132-bit artifact fails with:
@@ -574,7 +581,7 @@ width fix.
 
 ## CEL-003 — Unused module parameter changes memory behavior
 
-The [retained source/harness](toolchain/mre/celox-parameterized-memory/README.md)
+The historical source/harness ([removed after the fix](toolchain/mre/README.md))
 adds one unused parameter to the original `HardwareMemory`, with no other RTL
 change. Native simulation passes the original consecutive-byte stream but
 returns the following write's byte at each address in the parameterized form.

@@ -4,8 +4,8 @@ Struo `4e9de737d1ad0b1e619d8887505a6ba0ad13c74b`、Ricaの固定依存で確認�
 3-bit pointerから8個のslotをdecodeする、機能が同じ2種類のVerylを比較する。
 
 ```sh
-cargo +1.98.1 run --offline --locked --release -p verify-riscv \
-  --example struo-constant-loop
+cargo +1.98.1 run --offline --locked --release -p rica-mre \
+  --bin struo-constant-loop
 ```
 
 | 書き方 | 合成IRのarithmetic cells | mapped ECP5 cells | mappedモデル |
