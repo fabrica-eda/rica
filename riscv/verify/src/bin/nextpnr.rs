@@ -15,6 +15,11 @@ use struo_target_ecp5::{
 
 fn validated_pll(path: &Path) -> Result<PllBinding, Box<dyn Error>> {
     let pll: PllBinding = serde_json::from_str(&fs::read_to_string(path)?)?;
+    validate_pll_phase_detector(&pll)?;
+    Ok(pll)
+}
+
+fn validate_pll_phase_detector(pll: &PllBinding) -> Result<(), Box<dyn Error>> {
     let input_mhz = pll
         .attributes
         .get("FREQUENCY_PIN_CLKI")
@@ -35,7 +40,7 @@ fn validated_pll(path: &Path) -> Result<PllBinding, Box<dyn Error>> {
         )
         .into());
     }
-    Ok(pll)
+    Ok(())
 }
 
 fn board_pll(project: &Path) -> Result<PllBinding, Box<dyn Error>> {
@@ -554,8 +559,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::{
         BoardClockDomain, BoardClockRelation, board_pll, csr_register_enable_limit,
-        mapped_cell_domain, validate_board_report_value, validated_board_clock_relation,
-        validated_pll,
+        mapped_cell_domain, validate_board_report_value, validate_pll_phase_detector,
+        validated_board_clock_relation,
     };
     use serde_json::{Value, json};
     use std::path::Path;
@@ -637,7 +642,10 @@ mod tests {
         let relation = validated_board_clock_relation(&board_pll(project).unwrap()).unwrap();
         assert_eq!(relation.cpu_mhz, 124.8);
         assert_eq!(relation.memory_mhz, 62.4);
-        assert!(validated_pll(&project.join("pll-12-to-126.json")).is_err());
+        let mut pll = board_pll(project).unwrap();
+        pll.parameters.insert("CLKI_DIV".to_owned(), "2".to_owned());
+        let error = validate_pll_phase_detector(&pll).unwrap_err();
+        assert!(error.to_string().contains("phase detector is 6 MHz"));
     }
 
     #[test]
