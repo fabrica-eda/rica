@@ -11,3 +11,8 @@
 /riscv/rica_riscv.f
 /riscv/verify/target/
 __pycache__/
+
+# Local Nix/direnv environment
+/.direnv/
+/result
+/result-*/
