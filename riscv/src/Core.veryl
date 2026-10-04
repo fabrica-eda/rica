@@ -890,8 +890,10 @@ module Core #(
     var ex_pmp_write_q: logic;
     var pmp_write: logic;
     // One-entry fetch and data permission caches hold the R/W/X result of a
-    // uniform 4 KiB page for one privilege. FD looks up the fetch entry and
-    // RX resolves a miss from dedicated endpoint registers in one held cycle.
+    // uniform 4 KiB page for one privilege. FD looks up the fetch entry. A
+    // held RX miss registers the exact check and page classification from
+    // dedicated endpoint registers, then resolves and fills on the next edge.
+    // A data miss likewise registers its classification before filling.
     // EX matches each possible forwarded base against the data entry beside the
     // address adder; a hit registers its permission on the first held edge and
     // ends the wait one cycle early. PMP CSR writes invalidate both entries,
@@ -911,7 +913,19 @@ module Core #(
     var ipc_lookup_hit: logic;
     var ipc_lookup_allow: logic;
     var ipc_miss_hold: logic;
+    var ipc_evaluate: logic;
     var ipc_resolve: logic;
+    var ipc_eval_valid_q: logic;
+    var ipc_eval_allowed_q: logic;
+    var ipc_eval_first_q: logic;
+    var ipc_eval_fill_q: logic;
+    var ipc_eval_user_q: logic;
+    var ipc_eval_execute_q: logic;
+    var dpc_fill_pending_q: logic;
+    var dpc_fill_user_q: logic;
+    var dpc_fill_tag_q: logic<20>;
+    var dpc_fill_read_q: logic;
+    var dpc_fill_write_q: logic;
     var ipc_allowed: logic;
     var ipc_first_allowed: logic;
     var ipc_page_uniform: logic;
@@ -1059,7 +1073,8 @@ module Core #(
                     && !((fd_q.raw_instruction[1:0] == 2'b11) && (fd_q.pc[11:1] == 11'h7ff))));
         ipc_lookup_allow = (pmp_none_active && !csr_bus.user_mode) || ipc_execute_q;
         ipc_miss_hold = ENABLE_U && rx_valid_q && !rx_ipc_ready_q;
-        ipc_resolve = ipc_miss_hold && !pmp_cache_invalidate && (pmp_settle_q == 2'd0);
+        ipc_evaluate = ipc_miss_hold && !ipc_eval_valid_q && !pmp_cache_invalidate && (pmp_settle_q == 2'd0);
+        ipc_resolve = ipc_miss_hold && ipc_eval_valid_q && !pmp_cache_invalidate && (pmp_settle_q == 2'd0);
         dpc_entry_ready = dpc_valid_q && (dpc_user_q == csr_bus.data_user);
         dpc_hit = !pmp_cache_invalidate && (pmp_settle_q == 2'd0)
             && ((pmp_none_active && !csr_bus.data_user) || dpc_entry_hit);
@@ -1089,20 +1104,57 @@ module Core #(
                 if pmp_settle_q != 2'd0 {
                     pmp_settle_q = pmp_settle_q - 2'd1;
                 }
-                if ipc_resolve && ipc_page_uniform && !rx_pmp_high_q {
+                if ipc_resolve && ipc_eval_fill_q {
                     ipc_valid_q = 1'b1;
-                    ipc_user_q = csr_bus.user_mode;
+                    ipc_user_q = ipc_eval_user_q;
                     ipc_tag_q = rx_pmp_address_q[31:12];
-                    ipc_execute_q = ipc_page_execute;
+                    ipc_execute_q = ipc_eval_execute_q;
                 }
-                if pmp_data_wait && (pmp_data_stage_q == 2'd2) && (pmp_settle_q == 2'd0)
-                    && dpc_page_uniform && !pmp_data_high_q {
+                // The next data lookup is evaluated after this edge at the
+                // earliest, so a registered fill costs no hit.
+                if dpc_fill_pending_q {
                     dpc_valid_q = 1'b1;
-                    dpc_user_q = csr_bus.data_user;
-                    dpc_tag_q = pmp_data_address_q[31:12];
-                    dpc_read_q = dpc_page_read;
-                    dpc_write_q = dpc_page_write;
+                    dpc_user_q = dpc_fill_user_q;
+                    dpc_tag_q = dpc_fill_tag_q;
+                    dpc_read_q = dpc_fill_read_q;
+                    dpc_write_q = dpc_fill_write_q;
                 }
+            }
+        }
+    }
+
+    // Register the comparator results before they reach RX or a cache entry.
+    // An RX instruction's evaluation is discarded whenever it is not a held
+    // miss, and every PMP CSR write discards evaluations and pending fills.
+    always_ff (clk, rst_n) {
+        if_reset {
+            ipc_eval_valid_q = 1'b0;
+            ipc_eval_allowed_q = 1'b0;
+            ipc_eval_first_q = 1'b0;
+            ipc_eval_fill_q = 1'b0;
+            ipc_eval_user_q = 1'b0;
+            ipc_eval_execute_q = 1'b0;
+            dpc_fill_pending_q = 1'b0;
+            dpc_fill_user_q = 1'b0;
+            dpc_fill_tag_q = 20'd0;
+            dpc_fill_read_q = 1'b0;
+            dpc_fill_write_q = 1'b0;
+        } else if ENABLE_U {
+            ipc_eval_valid_q = ipc_evaluate;
+            if ipc_evaluate {
+                ipc_eval_allowed_q = ipc_allowed;
+                ipc_eval_first_q = ipc_first_allowed;
+                ipc_eval_fill_q = ipc_page_uniform && !rx_pmp_high_q;
+                ipc_eval_user_q = csr_bus.user_mode;
+                ipc_eval_execute_q = ipc_page_execute;
+            }
+            dpc_fill_pending_q = pmp_data_wait && (pmp_data_stage_q == 2'd2) && !pmp_cache_invalidate
+                && (pmp_settle_q == 2'd0) && dpc_page_uniform && !pmp_data_high_q;
+            if pmp_data_stage_q == 2'd2 {
+                dpc_fill_user_q = csr_bus.data_user;
+                dpc_fill_tag_q = pmp_data_address_q[31:12];
+                dpc_fill_read_q = dpc_page_read;
+                dpc_fill_write_q = dpc_page_write;
             }
         }
     }
@@ -2504,8 +2556,8 @@ module Core #(
             // snapshot is current. A later FD capture replaces this result.
             if ipc_resolve {
                 rx_ipc_ready_q = 1'b1;
-                rx_ipc_allow_q = ipc_allowed;
-                rx_ipc_first_q = ipc_first_allowed;
+                rx_ipc_allow_q = ipc_eval_allowed_q;
+                rx_ipc_first_q = ipc_eval_first_q;
             }
             // An EX-owned memory repair keeps its redirect transaction live
             // while the owner waits in CM.  The completion edge below then
