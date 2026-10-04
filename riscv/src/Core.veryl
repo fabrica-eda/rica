@@ -290,6 +290,9 @@ module Core #(
     var cm_exception_q          : logic                     ;
     var cm_exception_cause_q    : logic<64>                 ;
     var cm_exception_value_q    : logic<64>                 ;
+    var cm_data_fault_value_q   : logic                     ;
+    var cm_data_fault_boot_q    : logic                     ;
+    var cm_data_fault_ram_q     : logic                     ;
     var cm_is_mret_q            : logic                     ;
     var cm_is_fence_i_q         : logic                     ;
     var cm_prediction_token_q   : logic<3>                  ;
@@ -399,7 +402,6 @@ module Core #(
     var lsu_ram_candidates      : logic               [3];
     var lsu_boot_regions        : logic               [3];
     var lsu_timer_regions       : logic               [3];
-    var lsu_fault_address       : logic<64>              ;
     var lsu_access_size         : logic<2>               ;
     var lsu_access_fault        : logic                  ;
     var rx_fetch_fault_q        : logic                  ;
@@ -1444,12 +1446,6 @@ module Core #(
         lsu_access_allowed = lsu_access_allowed && pmp_data_allowed;
         lsu_access_fault  = STRICT_MEMORY && !(ACTIVE_A && ex_is_atomic_q) && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
         if ENABLE_U && ex_is_atomic_q && ex_valid_q && !pmp_data_allowed { lsu_access_fault = 1'b1; }
-        lsu_fault_address = lsu_address;
-        if lsu_boot_boundary {
-            lsu_fault_address = 64'h0000_0000_0000_1000;
-        } else if lsu_ram_boundary {
-            lsu_fault_address = 64'h0000_0000_8003_f000;
-        }
         if ex_bypass_q.store_data {
             execute_store_data = bypass_data;
         } else {
@@ -1782,6 +1778,14 @@ module Core #(
         csr_bus.trap_pc      = cm_pc_q;
         csr_bus.trap_cause   = cm_exception_cause_q;
         csr_bus.trap_value   = cm_exception_value_q;
+        if cm_data_fault_value_q {
+            csr_bus.trap_value = cm_lsu_address_q;
+            if cm_data_fault_boot_q {
+                csr_bus.trap_value = 64'h0000_0000_0000_1000;
+            } else if cm_data_fault_ram_q {
+                csr_bus.trap_value = 64'h0000_0000_8003_f000;
+            }
+        }
         csr_bus.mret         = cm_mret_event;
         if atomic_fault {
             csr_bus.trap_cause = {60'd0, atomic_cause};
@@ -2522,6 +2526,9 @@ module Core #(
             cm_exception_q           = 1'b0;
             cm_exception_cause_q     = 64'd0;
             cm_exception_value_q     = 64'd0;
+            cm_data_fault_value_q    = 1'b0;
+            cm_data_fault_boot_q     = 1'b0;
+            cm_data_fault_ram_q      = 1'b0;
             cm_is_mret_q             = 1'b0;
             cm_is_fence_i_q          = 1'b0;
             cm_control_kind_q        = 3'd0;
@@ -2774,12 +2781,17 @@ module Core #(
                 // cm_exception_q makes it observable, so the late permission
                 // result need not select all 64 MTVAL bits. Instruction faults
                 // keep priority over any load/store bits in the fetched word.
+                // The data-fault MTVAL is chosen at trap entry from the CM
+                // address and two registered boundary flags, so the boundary
+                // decode reaches three FFs instead of all 64 value bits.
+                cm_data_fault_value_q = STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception;
+                cm_data_fault_boot_q = lsu_boot_boundary;
+                cm_data_fault_ram_q = lsu_ram_boundary;
                 if STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception {
                     cm_exception_cause_q = 64'd5;
                     if ex_is_store_q {
                         cm_exception_cause_q = 64'd7;
                     }
-                    cm_exception_value_q = lsu_fault_address;
                 }
                 cm_is_mret_q           = ex_is_mret_q;
                 cm_is_fence_i_q        = ex_is_fence_i_q;
