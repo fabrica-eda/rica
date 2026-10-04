@@ -63,6 +63,26 @@ class PlatformGateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_profile(self.path)
 
+    def test_intermediate_half_rate_templates_keep_zero_phase(self):
+        for vco, cpu, divider in [(648_000_000, 108_000_000, 6), (672_000_000, 112_000_000, 6)]:
+            with self.subTest(cpu=cpu):
+                self.profile.update(cpu_hz=cpu, memory_hz=cpu // 2, vco_hz=vco)
+                self.path.write_text(json.dumps(self.profile))
+                profile = load_profile(self.path)
+                pll = json.loads(generated(profile)[PROJECT / profile['pll']])
+                params = pll['parameters']
+                self.assertEqual(params['CLKI_DIV'], '1')
+                self.assertEqual(params['FEEDBK_PATH'], 'INT_OP')
+                self.assertEqual(12 * int(params['CLKFB_DIV']) * int(params['CLKOP_DIV']),
+                                 vco // 1_000_000)
+                self.assertEqual(params['CLKOS_DIV'], str(divider))
+                self.assertEqual(params['CLKOS2_DIV'], str(2 * divider))
+                for pin in ('CLKOS', 'CLKOS2'):
+                    self.assertEqual(params[pin + '_CPHASE'], '0')
+                    self.assertEqual(params[pin + '_FPHASE'], '0')
+                self.assertEqual(pll['attributes']['FREQUENCY_PIN_CLKOS'], f'{cpu // 1_000_000}')
+                self.assertEqual(pll['attributes']['FREQUENCY_PIN_CLKOS2'], f'{cpu // 2_000_000}')
+
     def test_84_mhz_uses_exact_generated_pll_and_preserves_guards(self):
         self.profile.update(cpu_hz=84_000_000, memory_hz=84_000_000,
                             vco_hz=588_000_000)

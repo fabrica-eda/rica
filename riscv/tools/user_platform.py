@@ -5,9 +5,13 @@ import json
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
+# Templates come unmodified from ecppll through tools/pll_template_from_ecppll.py
+# (12 MHz phase detector, internal CLKOP feedback, zero CLKOS/CLKOS2 phase).
 PLL_TEMPLATES = {
     624_000_000: 'pll-12-to-124p8.json',
     588_000_000: 'pll-12-to-84.json',
+    648_000_000: 'pll-12-to-108.json',
+    672_000_000: 'pll-12-to-112.json',
 }
 
 
