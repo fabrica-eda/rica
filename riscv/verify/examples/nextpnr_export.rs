@@ -21,16 +21,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut files = fs::read_dir(Path::new(project).join("src"))?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<Result<Vec<_>, _>>()?;
-    files.retain(|path| path.extension().is_some_and(|extension| extension == "veryl"));
+    files.retain(|path| {
+        path.extension()
+            .is_some_and(|extension| extension == "veryl")
+    });
     files.sort();
     let mut sources = files
         .iter()
         .map(fs::read_to_string)
         .collect::<Result<Vec<_>, _>>()?;
     // A single compilation unit needs packages before their users.
-    sources.sort_by_key(|text| !text.lines().any(|line| line.trim_start().starts_with("package ")));
+    sources.sort_by_key(|text| {
+        !text
+            .lines()
+            .any(|line| line.trim_start().starts_with("package "))
+    });
     let source = sources.join("\n");
-    eprintln!("nextpnr-export: analyze/lower {top} from {} files", files.len());
+    eprintln!(
+        "nextpnr-export: analyze/lower {top} from {} files",
+        files.len()
+    );
     let design = analyze_and_lower(&source, "rica_riscv", top)?;
     let synthesized = synthesize(&design)?;
     let mut mapped = map_to_ecp5_with_options(

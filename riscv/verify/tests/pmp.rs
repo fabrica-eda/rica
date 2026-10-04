@@ -621,9 +621,8 @@ uniform,read,write,execute);
     let mut uniform_pages = [0_u64; 2];
     for mapped in [false, true] {
         let mut sim = if mapped {
-            let rtl =
-                struo_frontend_veryl::analyze_and_lower(&source, "pmp_page_test", "PageTest")
-                    .unwrap();
+            let rtl = struo_frontend_veryl::analyze_and_lower(&source, "pmp_page_test", "PageTest")
+                .unwrap();
             let netlist = struo_target_ecp5::map_to_ecp5_with_options(
                 &struo_synth::synthesize(&rtl).unwrap().netlist,
                 Default::default(),
@@ -663,8 +662,10 @@ uniform,read,write,execute);
                 *value = match (bits >> 3) % 4 {
                     0 => page_index << 10,
                     1 => (page_index << 10) + ((bits >> 8) & 0x3ff) as u32,
-                    2 => ((page_index << 10) & !((1 << ((bits >> 8) % 14)) - 1))
-                        | ((1 << ((bits >> 8) % 14)) - 1) >> 1,
+                    2 => {
+                        ((page_index << 10) & !((1 << ((bits >> 8) % 14)) - 1))
+                            | ((1 << ((bits >> 8) % 14)) - 1) >> 1
+                    }
                     _ => ((page_index + 1) << 10) - 1 - (i as u32),
                 } & 0x3fff_ffff;
             }
@@ -727,7 +728,10 @@ uniform,read,write,execute);
     }
     // Both classes must actually occur for the generated configurations.
     // About an eighth of the generated pages are split by a PMP boundary.
-    assert!(uniform_pages[0] > 1000 && uniform_pages[0] < 5500, "{uniform_pages:?}");
+    assert!(
+        uniform_pages[0] > 1000 && uniform_pages[0] < 5500,
+        "{uniform_pages:?}"
+    );
     assert_eq!(uniform_pages[0], uniform_pages[1]);
     assert!(checked_accesses > 50_000, "{checked_accesses}");
 }
