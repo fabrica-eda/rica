@@ -1,9 +1,9 @@
 {
-  "name": "user-cpu108-memory54",
+  "name": "user-cpu112-memory56",
   "reference_hz": 12000000,
-  "vco_hz": 648000000,
-  "cpu_hz": 108000000,
-  "memory_hz": 54000000,
+  "vco_hz": 672000000,
+  "cpu_hz": 112000000,
+  "memory_hz": 56000000,
   "pmp_data_stages": 2,
   "setup_hold_guard_ps": 194,
   "top": "HardwareCompactUserTestTop",

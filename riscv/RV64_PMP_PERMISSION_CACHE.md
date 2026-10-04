@@ -1,8 +1,8 @@
 # PMP権限キャッシュ
 
-2026-10-04〜05。作業中のU/PMPプロファイル（`platform-user.json`）は**108/54 MHz**。
-このRTLは108/54 MHzで素のTexoフローによりタイミングを満たし、実機で269 ELFが合格した
-（[108/54 MHz](#10854-mhz2026-10-05)）。104/52 MHzの結果は充填レジスタ化前の記録として残す。
+2026-10-04〜05。権限キャッシュ入りのRTLは素のTexoフローで104/52、108/54 MHzに閉じ、
+それぞれ実機で269 ELFが合格した。その後ALUと例外値の経路を組み替えて112/56 MHzにも閉じ、
+作業中のプロファイルは**112/56 MHz**になった（[112/56 MHz化](RV64_112_TIMING.md)）。
 
 ## 目的
 
@@ -74,7 +74,7 @@ U kernelは命令側ミスの1サイクル増で232,883→232,957サイクル（
 | --- | ---: | ---: | --- |
 | 104/52 MHz | +17 ps | +1 ps | 達成（化前は0 ps） |
 | **108/54 MHz** | **+1 ps** | **+1 ps** | **達成** |
-| 112/56 MHz | −137 ps（32件） | −40 ps | 未達 |
+| 112/56 MHz | −137 ps（32件） | −40 ps | 未達（ALU・例外値の組み替え後は+10 ps／+1 psで達成） |
 | 117.6/58.8 MHz（化前） | −708 ps（523件） | −15 ps | 未達 |
 | 124.8/62.4 MHz（化前） | −1,779 ps | −111 ps | 未達 |
 
@@ -182,21 +182,21 @@ cargo test --release --locked --offline -p verify-riscv --test pmp
 (cd riscv && veryl check)
 python3 riscv/kernel/build-user.py   # pmp-cache.elf を含む
 python3 riscv/tools/build_rv64_machine_interrupts.py --platform-profile riscv/platform-user.json \
-  --output-dir build/timer-108   # タイムベース54 MHzのタイマーELF
+  --output-dir build/timer-112   # タイムベース56 MHzのタイマーELF
 
 # 素のフロー（シード配置・配線ヒントなし）。測定モデルと194 psガードはtexo-measuredが付ける。
 riscv/tools/texo-measured pnr riscv --top HardwareCompactUserTestTop \
   --device LFE5UM5G-85F --package CABGA381 --speed 8 \
   --lpf riscv/lfe5um5g-85f-evn.lpf --pll-binding riscv/pll-user.json \
-  --synthesis-goal-mhz 108 --jtagg-prefix jtag \
+  --synthesis-goal-mhz 112 --jtagg-prefix jtag \
   --clock-constraints riscv/jtck-clock-constraints.json \
   --timing-exceptions riscv/timing-coverage-exceptions.json \
   --architecture toolchain/worktrees/dsp/deps/ecp5-dsp-architecture-v6.txdb \
-  --setup-optimization-budget-seconds 1800 --output build/user-108-pmpcache.txcp
+  --setup-optimization-budget-seconds 1800 --output build/user-112.txcp
 
 # nextpnr参照用のネットリスト（Struoマップ、JTAG/PLL結線済み）
 cargo run --release --locked -p verify-riscv --example nextpnr_export -- \
-  riscv HardwareCompactUserTestTop riscv/pll-user.json 108 build/user-108.nextpnr.json
+  riscv HardwareCompactUserTestTop riscv/pll-user.json 112 build/user-112.nextpnr.json
 ```
 
 実装・監査・実機の記録は `toolchain/measurements/2026-10-04-rv64-u-104-pmpcache/`

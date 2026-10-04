@@ -13,15 +13,17 @@ The clock increase from the preserved 78 MHz reference is 7.7%; same-work RTL
 execution takes about 7% less time. This is a simulation comparison, not a board
 measurement. Details are in [RV64_USER_PLATFORM.md](RV64_USER_PLATFORM.md).
 
-The working U profile runs the CPU at **108 MHz with 54 MHz memory** (VCO 648 MHz;
+The working U profile runs the CPU at **112 MHz with 56 MHz memory** (VCO 672 MHz;
 CPU/memory outputs have zero phase). It precomputes PMP range validity, caches
 return-stack tops on the existing update edge, shortens CSR write gating, replaces
-bulk RAS recovery copies with eight sharing flags, and caches PMP fetch and data
-permissions per uniform 4 KiB page ([permission cache](RV64_PMP_PERMISSION_CACHE.md)).
-With the Texo routability fix pinned in `Cargo.toml`, a plain flow without seed
-placement or route hints closes it at **setup +1 ps / hold +1 ps** with the measured
-models, 194 ps guards and four reviewed exceptions. The bitstream passed all 269
-validation ELFs on the FPGA on 2026-10-05; 112/56 MHz still misses setup by 137 ps.
+bulk RAS recovery copies with eight sharing flags, caches PMP fetch and data
+permissions per uniform 4 KiB page ([permission cache](RV64_PMP_PERMISSION_CACHE.md)),
+adds with four 16-bit carry-select slices and selects data-fault MTVAL at trap entry
+([112/56 MHz timing](RV64_112_TIMING.md)). With the Texo routability fix pinned in
+`Cargo.toml`, a plain flow without seed placement or route hints closes it at
+**setup +10 ps / hold +1 ps** with the measured models, 194 ps guards and four
+reviewed exceptions. The bitstream passed all 269 validation ELFs on the FPGA on
+2026-10-05; the same flow and hardware suite also passed at 104/52 and 108/54 MHz.
 The 84 MHz result applies to its archived source and checkpoint; changing this
 development profile's clock alone does not reproduce that implementation.
 The earlier 78 MHz archive remains unchanged.
