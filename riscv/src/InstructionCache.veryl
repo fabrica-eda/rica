@@ -57,6 +57,9 @@ module InstructionCache #(
     var ahead_line        : 'cpu logic<32>            ;
     var desired_ahead     : 'cpu logic                ;
     var next_line         : 'cpu logic<32>            ;
+    var previous_even_row : 'cpu logic<28>            ;
+    var previous_even_index: 'cpu logic<INDEX_BITS>   ;
+    var previous_request_line: 'cpu logic<32>         ;
     var read_address      : 'cpu logic<32>         [2];
     var read_index        : 'cpu logic<INDEX_BITS> [2];
     var read_index_q      : 'cpu logic<INDEX_BITS> [2];
@@ -71,7 +74,6 @@ module InstructionCache #(
     var pair_valid_q      : 'cpu logic                ;
     var window_next_valid : 'cpu logic                ;
     var entry             : 'cpu logic<ENTRY_BITS> [2];
-    var bank_hit          : 'cpu logic             [2];
     var bank_settled      : 'cpu logic             [2];
     var write_enable      : 'cpu logic             [2];
     var write_index       : 'cpu logic<INDEX_BITS>    ;
@@ -105,18 +107,23 @@ module InstructionCache #(
         if pc[3] {
             read_address[0] = next_line;
         }
+        // Compare a successor against registered cache/request addresses.
+        // Moving the modular increment to their side keeps the current PC
+        // mux out of an increment-then-wide-comparison chain. No state or
+        // request edge changes: x == y+1 iff x-1 == y at the same width.
+        previous_even_row = {entry[0][ENTRY_BITS - 2:68], read_index_q[0]} - 28'd1;
+        previous_even_index = read_index_q[0] - 1;
+        previous_request_line = request_address_q - 32'd8;
         for bank in 0..2 {
             read_index[bank]   = read_address[bank][INDEX_BITS + 3:4];
-            bank_settled[bank] = read_valid_q[bank] && (read_index_q[bank] == read_index[bank]);
-            bank_hit[bank]     = bank_settled[bank] && entry[bank][ENTRY_BITS - 1]
-                && (entry[bank][ENTRY_BITS - 2:68] == read_address[bank][31:INDEX_BITS + 4]);
+            bank_settled[bank] = read_valid_q[bank] && (read_index_q[bank] == pc[INDEX_BITS + 3:4]);
             // Compare the demanded line directly with PC, keeping the
             // successor increment out of the current-hit timing cone.
             current_bank_hit[bank] = read_valid_q[bank] && (read_index_q[bank] == pc[INDEX_BITS + 3:4])
                 && entry[bank][ENTRY_BITS - 1] && (entry[bank][ENTRY_BITS - 2:68] == pc[31:INDEX_BITS + 4]);
         }
         current_hit        = current_bank_hit[0];
-        next_hit           = bank_hit[1];
+        next_hit           = current_bank_hit[1];
         current_settled    = bank_settled[0];
         next_settled       = bank_settled[1];
         current_data       = entry[0][63:0];
@@ -124,9 +131,10 @@ module InstructionCache #(
         current_compressed = entry[0][67:64];
         if pc[3] {
             current_hit        = current_bank_hit[1];
-            next_hit           = bank_hit[0];
+            next_hit           = read_valid_q[0] && entry[0][ENTRY_BITS - 1]
+                && (previous_even_row == pc[31:4]);
             current_settled    = bank_settled[1];
-            next_settled       = bank_settled[0];
+            next_settled       = read_valid_q[0] && (previous_even_index == pc[INDEX_BITS + 3:4]);
             current_data       = entry[1][63:0];
             next_data          = entry[0][63:0];
             current_compressed = entry[1][67:64];
@@ -171,7 +179,7 @@ module InstructionCache #(
         }
         // This speculative read is bounded to PC+16. If PC remains stopped,
         // its completion cannot trigger another request beyond that window.
-        if fill && current_hit && (request_address_q == next_line) {
+        if fill && current_hit && (previous_request_line == pc_line) {
             desired_ahead = 1'b1;
             miss_request  = 1'b1;
         }

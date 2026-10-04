@@ -162,7 +162,13 @@ after_ecall:
     csrr t0, mstatus
     lui t1, 0x2
     addi t1, t1, -0x778
-    bne t0, t1, fail_12
+    # U-capable harts set UXL=64 and reset MPP to U after MRET.
+    csrr t2, misa
+    srli t2, t2, 20
+    andi t2, t2, 1
+    beqz t2, 1f
+    li t1, 0x200000088
+1:  bne t0, t1, fail_12
 
     PASS
 
@@ -179,7 +185,12 @@ trap_handler:
     csrr t0, mstatus
     lui t1, 0x2
     addi t1, t1, -0x780
-    bne t0, t1, fail_13
+    csrr t2, misa
+    srli t2, t2, 20
+    andi t2, t2, 1
+    beqz t2, 1f
+    li t1, 0x200001880
+1:  bne t0, t1, fail_13
 
 trap_resume:
     addi t0, s1, 4

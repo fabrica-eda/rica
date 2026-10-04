@@ -1,0 +1,3545 @@
+--- a/crates/texo-cli/Cargo.toml
++++ b/crates/texo-cli/Cargo.toml
+@@ -29,6 +29,7 @@
+ zstd.workspace = true
+ 
+ [dev-dependencies]
++texo-timing.workspace = true
+ celox.workspace = true
+ struo-celox.workspace = true
+ struo-example-axi4-smartconnect.workspace = true
+--- a/crates/texo-cli/examples/measured_jtag_sta.rs
++++ b/crates/texo-cli/examples/measured_jtag_sta.rs
+@@ -0,0 +1,330 @@
++//! Supplemental JTCK-domain STA using the original Texo engine and frozen net
++//! delays. Hard JTAGG timing and async reset recovery/removal remain external
++//! boundaries, explicitly reported instead of inventing characterization.
++use serde_json::{Value, json};
++use std::{
++    collections::{BTreeMap, BTreeSet},
++    error::Error,
++    fs::File,
++    io::BufReader,
++};
++use texo_model::{CellPinId, Design, PinDirection, ResourceKind};
++use texo_target_ecp5::{DelayRangeRecord, read_architecture_cache};
++use texo_timing::{
++    ClockEdge, DelayRange, NetDelay, TimingConstraints, TimingModel, analyze_timing_from_net_delays,
++};
++
++fn u(v: &Value) -> u64 {
++    v.as_u64().unwrap()
++}
++fn s(v: &Value) -> &str {
++    v.as_str().unwrap()
++}
++fn delay(v: DelayRangeRecord) -> DelayRange {
++    DelayRange::new(v.min_ps, v.max_ps).unwrap()
++}
++
++fn main() -> Result<(), Box<dyn Error>> {
++    let args: Vec<_> = std::env::args().skip(1).collect();
++    assert_eq!(args.len(), 3, "ARCH CHECKPOINT OUTPUT");
++    let mut arch = read_architecture_cache(BufReader::new(File::open(&args[0])?))?;
++    let cp: Value = serde_json::from_reader(BufReader::new(File::open(&args[1])?))?;
++    let measured = cp
++        .pointer("/target/measured_timing")
++        .filter(|v| !v.is_null())
++        .ok_or("measured checkpoint required")?;
++    texo_cli::measured_timing::install(
++        std::path::Path::new(s(&measured["path"])),
++        &mut arch,
++        s(&cp["target"]["package"]),
++        Some(s(&measured["sha256"])),
++    )?;
++
++    let metadata: BTreeMap<_, _> = cp["primitive_metadata"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(|m| (u(&m["cell_id"]), m))
++        .collect();
++    let delays = cp["timing"]["net_delays"].as_array().unwrap();
++    let mut design = Design::new();
++    let mut cells = BTreeMap::new();
++    for cell in cp["placement"].as_array().unwrap() {
++        cells.insert(
++            u(&cell["cell_id"]),
++            design.add_cell(s(&cell["cell"]), ResourceKind::Logic),
++        );
++    }
++    let mut pin_info = BTreeMap::new();
++    let mut by_net = BTreeMap::<u64, Vec<&Value>>::new();
++    for d in delays {
++        for (prefix, direction) in [
++            ("driver", PinDirection::Output),
++            ("sink", PinDirection::Input),
++        ] {
++            pin_info.insert(
++                u(&d[format!("{prefix}_pin_id")]),
++                (
++                    u(&d[format!("{prefix}_cell_id")]),
++                    s(&d[format!("{prefix}_pin")]),
++                    direction,
++                ),
++            );
++        }
++        by_net.entry(u(&d["net_id"])).or_default().push(d);
++    }
++    let mut pins = BTreeMap::new();
++    let mut named = BTreeMap::new();
++    for (&old, &(cell, name, direction)) in &pin_info {
++        let pin = design.add_pin(cells[&cell], name, direction)?;
++        pins.insert(old, pin);
++        named.insert((cell, name), pin);
++    }
++    let mut nets = BTreeMap::new();
++    let mut net_delays = Vec::new();
++    for (&old, ds) in &by_net {
++        let driver = pins[&u(&ds[0]["driver_pin_id"])];
++        assert!(ds.iter().all(|d| pins[&u(&d["driver_pin_id"])] == driver));
++        let net = design.add_net(
++            s(&ds[0]["net"]),
++            driver,
++            ds.iter().map(|d| pins[&u(&d["sink_pin_id"])]),
++        )?;
++        nets.insert(old, net);
++        for d in ds {
++            net_delays.push(NetDelay {
++                net,
++                sink: pins[&u(&d["sink_pin_id"])],
++                delay: DelayRange::from_independent_corners(
++                    u(&d["min_delay_ps"]),
++                    u(&d["max_delay_ps"]),
++                ),
++            });
++        }
++    }
++    let source = by_net
++        .iter()
++        .find(|(_, ds)| ds[0]["driver_pin"] == "JTCK")
++        .ok_or("missing JTCK")?
++        .0;
++    let global = cp["packing"]["global_clocks"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .find(|g| u(&g["source_net"]) == *source)
++        .ok_or("missing JTCK global buffer")?;
++    let clock_net = nets[&u(&global["global_net"])];
++    let mut constraints = TimingConstraints::new();
++    constraints.set_clock_period_ps(nets[source], 166_666);
++    constraints.set_clock_period_ps(clock_net, 166_666);
++    constraints.set_generated_clock(clock_net, nets[source], 1, 1, 0);
++    let records: BTreeMap<_, _> = arch.speed_grades()["8_5G"]
++        .cells
++        .iter()
++        .map(|r| (r.cell_type.as_str(), r))
++        .collect();
++    let general: BTreeSet<_> = cp["packing"]["general_routing_ffs"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .map(u)
++        .collect();
++    let constants: BTreeSet<_> = by_net
++        .iter()
++        .filter_map(|(_, ds)| {
++            s(&ds[0]["driver_cell"])
++                .starts_with("$PACKER_")
++                .then_some(nets[&u(&ds[0]["net_id"])])
++        })
++        .collect();
++    let mut incoming_inputs = BTreeMap::new();
++    for route in cp["routes"].as_array().unwrap() {
++        for pip in route["pips"].as_array().unwrap() {
++            let flags = u(&pip["lutperm_flags"]);
++            if flags & 0x4000 != 0 {
++                incoming_inputs.insert(
++                    u(&pip["to_wire_id"]),
++                    ["A", "B", "C", "D"][(flags & 3) as usize],
++                );
++            }
++        }
++    }
++    let mut physical_inputs = BTreeMap::new();
++    for placement in cp["placement"].as_array().unwrap() {
++        for pin in placement["bel_pins"].as_array().unwrap() {
++            if let Some(&input) = incoming_inputs.get(&u(&pin["wire_id"])) {
++                physical_inputs.insert((u(&placement["cell_id"]), s(&pin["name"])), input);
++            }
++        }
++    }
++    let mut model = TimingModel::new();
++    let mut selected = BTreeSet::new();
++    let mut other_tap_clocks = Vec::new();
++    let mut rising = Vec::new();
++    for (&old, &cell) in &cells {
++        let pin = |name| named.get(&(old, name)).copied();
++        let is_ff = metadata
++            .get(&old)
++            .is_some_and(|m| m["configuration"]["kind"] == "flip_flop");
++        let is_jtag = design.cells()[cell.0]
++            .name
++            .starts_with("ff_board.jtag_debug_transport.");
++        let on_jtck =
++            is_ff && pin("CLK").is_some_and(|p| design.pins()[p.0].net() == Some(clock_net));
++        if is_jtag && is_ff && !on_jtck {
++            let name = &design.cells()[cell.0].name;
++            if name.contains("mailbox_") || name.ends_with(".request_toggle") {
++                other_tap_clocks.push(name.clone());
++            }
++        }
++        let edge = if metadata
++            .get(&old)
++            .is_some_and(|m| m["configuration"]["edge"] == "falling")
++        {
++            ClockEdge::Falling
++        } else {
++            ClockEdge::Rising
++        };
++        if on_jtck {
++            selected.insert(cell);
++            if edge == ClockEdge::Rising {
++                rising.push(design.cells()[cell.0].name.clone());
++            }
++        }
++        let mut types = Vec::new();
++        if on_jtck {
++            types.push("TRELLIS_FF");
++        } else if !is_ff {
++            if pin("CLKI").is_some() && pin("CLKO").is_some() {
++                types.push("DCCA");
++            } else if ["A", "B", "C", "D"].iter().any(|&p| pin(p).is_some()) && pin("F").is_some() {
++                types.push("TRELLIS_COMB");
++            }
++            if pin("OFX").is_some() {
++                types.push(if pin("F1").is_some() {
++                    "TRELLIS_PFUMX"
++                } else {
++                    "TRELLIS_L6MUX21"
++                });
++            }
++        }
++        for name in types {
++            let record = records[name];
++            for arc in &record.arcs {
++                let (Some(from), Some(to)) = (pin(arc.from_pin.as_str()), pin(arc.to_pin.as_str()))
++                else {
++                    continue;
++                };
++                if on_jtck && arc.from_pin == "CLK" && arc.to_pin == "Q" {
++                    model.add_clock_to_q(from, to, edge, delay(arc.delay))?;
++                } else {
++                    let physical_input = physical_inputs
++                        .get(&(old, arc.from_pin.as_str()))
++                        .copied()
++                        .unwrap_or(arc.from_pin.as_str());
++                    let physical_arc = record
++                        .arcs
++                        .iter()
++                        .find(|a| a.from_pin == physical_input && a.to_pin == arc.to_pin)
++                        .ok_or("missing physical input arc")?;
++                    model.add_cell_arc(from, to, delay(physical_arc.delay))?;
++                }
++            }
++            if on_jtck {
++                for check in &record.setup_holds {
++                    if check.signal_pin == "LSR"
++                        || (check.signal_pin == "DI" && general.contains(&old))
++                        || (check.signal_pin == "M" && !general.contains(&old))
++                    {
++                        continue;
++                    }
++                    let signal_name = if check.signal_pin == "M" {
++                        "DI"
++                    } else {
++                        &check.signal_pin
++                    };
++                    let (Some(signal), Some(clock)) = (pin(signal_name), pin(&check.clock_pin))
++                    else {
++                        continue;
++                    };
++                    if design.pins()[signal.0]
++                        .net()
++                        .is_some_and(|n| constants.contains(&n))
++                    {
++                        continue;
++                    }
++                    model.add_setup_hold(
++                        clock,
++                        signal,
++                        edge,
++                        delay(check.setup),
++                        delay(check.hold),
++                    )?;
++                }
++            }
++        }
++    }
++    let report = analyze_timing_from_net_delays(&design, &model, &constraints, net_delays)?;
++    let describe = |p: CellPinId| json!({"cell":design.cells()[design.pins()[p.0].cell.0].name,"pin":design.pins()[p.0].name});
++    let unchecked: Vec<_> = report
++        .unchecked_endpoints
++        .iter()
++        .map(|e| json!({"endpoint":describe(e.data_pin),"reason":format!("{:?}",e.reason)}))
++        .collect();
++    let setup: Vec<_> = report.setup_checks.iter().map(|c| json!({"endpoint":describe(c.data_pin),"slack_ps":c.slack_ps,"launch_edge":c.launch_edge.as_str(),"capture_edge":c.capture_edge.as_str()})).collect();
++    let hold: Vec<_> = report.hold_checks.iter().map(|c| json!({"endpoint":describe(c.data_pin),"slack_ps":c.slack_ps,"launch_edge":c.launch_edge.as_str(),"capture_edge":c.capture_edge.as_str()})).collect();
++    // These are the three wholly external JTAGG input cones in this RTL.
++    // A new missing endpoint is an error, even if all measured slacks are positive.
++    let expected_boundaries: BTreeSet<_> = [
++        "ff_board.jtag_debug_transport.shift_high[63]",
++        "ff_board.jtag_debug_transport.shift_enable_q",
++        "ff_board.jtag_debug_transport.update_q",
++    ]
++    .into_iter()
++    .map(str::to_owned)
++    .collect();
++    let actual_boundaries: BTreeSet<_> = report
++        .unchecked_endpoints
++        .iter()
++        .map(|e| {
++            design.cells()[design.pins()[e.data_pin.0].cell.0]
++                .name
++                .clone()
++        })
++        .collect();
++    let boundary_coverage_ok = actual_boundaries == expected_boundaries
++        && report.unchecked_endpoints.len() == expected_boundaries.len()
++        && report.unchecked_endpoints.iter().all(|e| {
++            e.reason == texo_timing::UncheckedEndpointReason::NoSynchronousLaunch
++                && design.pins()[e.data_pin.0].name == "DI"
++        });
++    let internal_coverage_ok = selected.len() == 261
++        && report.setup_checks.len() == 515
++        && report.hold_checks.len() == 515;
++    let pass = report.met_timing()
++        && rising.is_empty()
++        && other_tap_clocks.is_empty()
++        && boundary_coverage_ok
++        && internal_coverage_ok;
++    let result = json!({"scope":"JTCK register-to-register only; original pinned Texo STA and routed delays",
++        "external_boundaries_not_characterized":["JTAGG launch/capture arcs", "JRSTN recovery/removal", "JTCK-to-CPU bundled-data CDC"],
++        "jtag_tck_hz":6_000_000,"boundary_coverage_ok":boundary_coverage_ok,"internal_coverage_ok":internal_coverage_ok,"jtck_register_count":selected.len(),"register_paths_met_timing":report.met_timing(),
++        "falling_edge_structure_ok":rising.is_empty(),"separate_update_clock_absent":other_tap_clocks.is_empty(),
++        "rising_edge_registers":rising,"other_tap_clock_registers":other_tap_clocks,
++        "worst_setup_slack_ps":report.worst_slack_ps,"worst_hold_slack_ps":report.worst_hold_slack_ps,
++        "unchecked_endpoints":unchecked,"setup_checks":setup,"hold_checks":hold,"structural_and_internal_timing_gate":pass});
++    serde_json::to_writer_pretty(File::create(&args[2])?, &result)?;
++    println!(
++        "JTCK FFs={} setup={} hold={} unchecked={} WNS={:?} WHS={:?} gate={pass}",
++        selected.len(),
++        report.setup_checks.len(),
++        report.hold_checks.len(),
++        report.unchecked_endpoints.len(),
++        report.worst_slack_ps,
++        report.worst_hold_slack_ps
++    );
++    if !pass {
++        std::process::exit(1);
++    }
++    Ok(())
++}
+--- a/crates/texo-cli/src/bitgen.rs
++++ b/crates/texo-cli/src/bitgen.rs
+@@ -158,7 +158,44 @@
+         .or_else(|| pack.as_ref().map(|pack| &pack.ecppack))
+         .expect("an explicit runtime or target pack was resolved");
+ 
+-    let architecture = load_architecture(architecture_path)?;
++    let mut architecture = load_architecture(architecture_path)?;
++    if let Some(measured) = checkpoint
++        .pointer("/target/measured_timing")
++        .filter(|v| !v.is_null())
++    {
++        let path = measured["path"]
++            .as_str()
++            .ok_or("measured library path missing")?;
++        let digest = measured["sha256"]
++            .as_str()
++            .ok_or("measured library digest missing")?;
++        let package = checkpoint
++            .pointer("/target/package")
++            .and_then(Value::as_str)
++            .ok_or("package missing")?;
++        let loaded = crate::measured_timing::install(
++            Path::new(path),
++            &mut architecture,
++            package,
++            Some(digest),
++        )?;
++        if checkpoint.pointer("/target/speed_grade") != Some(&loaded["timing_grade"]) {
++            return Err("bitgen measured timing grade mismatch".into());
++        }
++        let guard = loaded["required_setup_hold_guard_ps"]
++            .as_u64()
++            .ok_or("measured guard missing")?;
++        for field in ["setup_uncertainty_ps", "hold_uncertainty_ps"] {
++            if checkpoint["timing"][field]
++                .as_u64()
++                .is_none_or(|value| value < guard)
++            {
++                return Err(
++                    format!("checkpoint does not retain the measured {field} requirement").into(),
++                );
++            }
++        }
++    }
+     let base_config = fs::read_to_string(base_config_path)?;
+     let iodb_path = pack.as_ref().map_or_else(
+         || database.join("ECP5").join(device).join("iodb.json"),
+--- a/crates/texo-cli/src/checkpoint.rs
++++ b/crates/texo-cli/src/checkpoint.rs
+@@ -153,6 +153,8 @@
+                 "package": self.package,
+                 "speed_grade": self.result.speed_grade,
+                 "placement_weight_exponent": self.result.placement_weight_exponent,
++                "measured_placement": self.result.measured_placement,
++                "measured_timing": self.result.measured_timing,
+                 "placement_model": checkpoint_placement_model(
+                     self.result.initial_placement_algorithm,
+                     self.result.placement_weight_exponent,
+@@ -484,7 +486,14 @@
+             "all_modeled_endpoints_checked",
+             &result.timing.all_modeled_endpoints_checked(),
+         )?;
+-        timing.serialize_entry("delay_model", "nextpnr_ecp5_project_trellis_min_max_ps")?;
++        timing.serialize_entry(
++            "delay_model",
++            if result.measured_timing.is_some() {
++                "measured_joint_cell_route_min_max_ps"
++            } else {
++                "nextpnr_ecp5_project_trellis_min_max_ps"
++            },
++        )?;
+         timing.serialize_entry("hold_checks", &HoldCheckRecords(result))?;
+         timing.serialize_entry("met_timing", &result.timing.met_timing())?;
+         timing.serialize_entry("meets_timing_closure", &result.meets_timing_closure())?;
+--- a/crates/texo-cli/src/lib.rs
++++ b/crates/texo-cli/src/lib.rs
+@@ -3,6 +3,7 @@
+ mod bitgen;
+ mod bitstream;
+ mod checkpoint;
++pub mod measured_timing;
+ mod target_pack;
+ mod veryl_project;
+ mod visualizer;
+--- a/crates/texo-cli/src/main.rs
++++ b/crates/texo-cli/src/main.rs
+@@ -139,6 +139,12 @@
+ 
+ #[derive(Debug, Args)]
+ struct PnrArgs {
++    /// Complete measured replacement for routing, cell and setup/hold timing.
++    #[arg(long, value_name = "JSON")]
++    measured_timing_library: Option<PathBuf>,
++    /// Verified board-measured LUT-hop model; replaces guessed placement prediction.
++    #[arg(long, value_name = "JSON")]
++    measured_placement_model: Option<PathBuf>,
+     /// Project directory or `Veryl.toml`.
+     input: PathBuf,
+     /// Top module; overrides `[synth].top`.
+@@ -485,8 +491,39 @@
+         .as_deref()
+         .or_else(|| pack.as_ref().map(|pack| pack.architecture.as_path()))
+         .expect("an explicit architecture or target pack was resolved");
+-    let architecture = load_architecture(architecture_path)?;
++    let mut architecture = load_architecture(architecture_path)?;
++    let measured_timing = args
++        .measured_timing_library
++        .as_deref()
++        .map(|path| {
++            texo_cli::measured_timing::install(path, &mut architecture, &args.package, None)
++        })
++        .transpose()?;
++    if let Some(record) = measured_timing.as_ref() {
++        let guard = record["required_setup_hold_guard_ps"]
++            .as_u64()
++            .ok_or("measured guard missing")?;
++        if args.setup_uncertainty_ps < guard || args.hold_uncertainty_ps < guard {
++            return Err(format!(
++                "measured STA requires setup and hold uncertainty of at least {guard} ps"
++            )
++            .into());
++        }
++        let expected = if args.speed == "8" && architecture.device().name().starts_with("LFE5UM5G")
++        {
++            "8_5G"
++        } else {
++            args.speed.as_str()
++        };
++        if record["timing_grade"].as_str() != Some(expected) {
++            return Err(
++                "measured timing grade does not match requested speed; legacy fallback forbidden"
++                    .into(),
++            );
++        }
++    }
+     if let Some(saved) = &resumed {
++        saved.validate_timing_selection(measured_timing.as_ref())?;
+         saved.validate_target(&architecture, &args.package)?;
+     }
+     println!(
+@@ -498,7 +535,14 @@
+         None => None,
+     };
+ 
++    let measured_model = args
++        .measured_placement_model
++        .as_deref()
++        .map(texo_flow::MeasuredPlacementModel::load)
++        .transpose()?;
+     let mut options = Ecp5FlowOptions {
++        measured_placement_model: measured_model.as_ref(),
++        measured_timing: measured_timing.as_ref(),
+         post_map_simulation: PostMapSimulationPolicy::AllowMissing,
+         speed_grade: Some(&args.speed),
+         package: Some(&args.package),
+--- a/crates/texo-cli/src/measured_timing.rs
++++ b/crates/texo-cli/src/measured_timing.rs
+@@ -0,0 +1,208 @@
++//! All-or-nothing installation of an empirically fitted STA timing library.
++use serde::Deserialize;
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::collections::BTreeMap;
++use std::error::Error;
++use std::path::Path;
++use texo_target_ecp5::{Ecp5Architecture, SpeedGradeRecord};
++
++#[derive(Deserialize)]
++struct Library {
++    schema: u32,
++    kind: String,
++    device: String,
++    package: String,
++    input_sha256: BTreeMap<String, String>,
++    qualification: Qualification,
++    timing: SpeedGradeRecord,
++    entry_evidence: BTreeMap<String, Vec<String>>,
++}
++#[derive(Deserialize)]
++struct Qualification {
++    heldout_passed: bool,
++    no_legacy_delay_labels: bool,
++    independent_voltage_sweep: bool,
++    temperature_fraction: f64,
++    required_setup_hold_guard_ps: u64,
++    validated_samples: BTreeMap<String, String>,
++}
++
++/// Verify measurements and atomically replace the complete selected timing grade.
++///
++/// # Errors
++/// Rejects hash mismatches, failed holdouts, unsupported targets and missing entries.
++pub fn install(
++    path: &Path,
++    architecture: &mut Ecp5Architecture,
++    package: &str,
++    expected_sha256: Option<&str>,
++) -> Result<Value, Box<dyn Error>> {
++    let bytes = std::fs::read(path)?;
++    let digest = format!("{:x}", Sha256::digest(&bytes));
++    if expected_sha256.is_some_and(|expected| expected != digest) {
++        return Err("STA library differs from the implemented checkpoint".into());
++    }
++    let library: Library = serde_json::from_slice(&bytes)?;
++    if library.schema != 1
++        || library.kind != "measured_joint_cell_route_sta_library"
++        || library.device != architecture.device().name()
++        || library.package != package
++        || !library.qualification.heldout_passed
++        || !library.qualification.no_legacy_delay_labels
++        || library.qualification.validated_samples.is_empty()
++        || library.input_sha256.is_empty()
++        || !library.qualification.temperature_fraction.is_finite()
++        || library.qualification.temperature_fraction < 0.20
++        || library.qualification.required_setup_hold_guard_ps == 0
++    {
++        return Err("unqualified or incompatible measured STA library".into());
++    }
++    for (name, expected) in &library.input_sha256 {
++        if format!("{:x}", Sha256::digest(std::fs::read(name)?)) != *expected {
++            return Err(format!("measurement input changed: {name}").into());
++        }
++    }
++    for path in library.qualification.validated_samples.values() {
++        if !library.input_sha256.contains_key(path) {
++            return Err("sample evidence is not hash-bound".into());
++        }
++    }
++    let mut keys = Vec::new();
++    for class in library.timing.pip_classes.keys() {
++        keys.push(format!("pip:{class}"));
++    }
++    for cell in &library.timing.cells {
++        for a in &cell.arcs {
++            keys.push(format!(
++                "arc:{}:{}:{}",
++                cell.cell_type, a.from_pin, a.to_pin
++            ));
++        }
++        for h in &cell.setup_holds {
++            keys.push(format!(
++                "check:{}:{}:{}",
++                cell.cell_type, h.signal_pin, h.clock_pin
++            ));
++        }
++    }
++    if keys.len() != library.entry_evidence.len() {
++        return Err("timing evidence surface differs from the table".into());
++    }
++    for key in &keys {
++        let refs = library
++            .entry_evidence
++            .get(key)
++            .ok_or_else(|| format!("unmeasured STA entry: {key}"))?;
++        if refs.is_empty()
++            || refs
++                .iter()
++                .any(|r| !library.qualification.validated_samples.contains_key(r))
++        {
++            return Err(format!("missing measurement support for {key}").into());
++        }
++    }
++    let result = json!({"path":path.canonicalize()?.display().to_string(),"sha256":digest,
++        "kind":library.kind,"timing_grade":library.timing.name,"entries":keys.len(),
++        "legacy_table_fallback":false,"lut_input_timing":"routed_physical_pin","temperature_fraction":library.qualification.temperature_fraction,
++        "voltage_sweep_measured":library.qualification.independent_voltage_sweep,
++        "required_setup_hold_guard_ps":library.qualification.required_setup_hold_guard_ps});
++    architecture
++        .replace_timing_grade(library.timing)
++        .map_err(|s| -> Box<dyn Error> { s.into() })?;
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn changed_measurement_and_incomplete_surface_never_install() {
++        let mut architecture = texo_target_ecp5::read_architecture(
++            include_str!("../../texo-target-ecp5/fixtures/minimal-ecp5.json").as_bytes(),
++        )
++        .unwrap();
++        let original = architecture.speed_grades()["6"].clone();
++        let directory = std::env::temp_dir().join(format!(
++            "texo-measured-library-test-{}-{}",
++            std::process::id(),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        std::fs::create_dir(&directory).unwrap();
++        let evidence = directory.join("explicit-synthetic-unit-test.txt");
++        std::fs::write(
++            &evidence,
++            b"synthetic parser fixture; never a production measurement",
++        )
++        .unwrap();
++        let digest = format!("{:x}", Sha256::digest(std::fs::read(&evidence).unwrap()));
++        let mut refs = BTreeMap::new();
++        for name in original.pip_classes.keys() {
++            refs.insert(format!("pip:{name}"), vec!["test"]);
++        }
++        for cell in &original.cells {
++            for arc in &cell.arcs {
++                refs.insert(
++                    format!("arc:{}:{}:{}", cell.cell_type, arc.from_pin, arc.to_pin),
++                    vec!["test"],
++                );
++            }
++            for check in &cell.setup_holds {
++                refs.insert(
++                    format!(
++                        "check:{}:{}:{}",
++                        cell.cell_type, check.signal_pin, check.clock_pin
++                    ),
++                    vec!["test"],
++                );
++            }
++        }
++        let mut library = json!({"schema":1,"kind":"measured_joint_cell_route_sta_library",
++            "device":architecture.device().name(),"package":"test-package",
++            "input_sha256":{evidence.display().to_string():digest},
++            "qualification":{"heldout_passed":true,"no_legacy_delay_labels":true,"independent_voltage_sweep":false,
++                "temperature_fraction":0.2,"required_setup_hold_guard_ps":201,
++                "validated_samples":{"test":evidence.display().to_string()}},
++            "timing":original,"entry_evidence":refs});
++        let file = directory.join("library.json");
++        std::fs::write(&file, serde_json::to_vec(&library).unwrap()).unwrap();
++        assert!(
++            install(
++                &file,
++                &mut architecture,
++                "test-package",
++                Some("wrong digest")
++            )
++            .is_err()
++        );
++        std::fs::write(&evidence, b"changed measurement").unwrap();
++        assert!(install(&file, &mut architecture, "test-package", None).is_err());
++        assert_eq!(architecture.speed_grades()["6"], original);
++        std::fs::write(
++            &evidence,
++            b"synthetic parser fixture; never a production measurement",
++        )
++        .unwrap();
++        let complete = library.clone();
++        library["timing"]["cells"][0]["arcs"]
++            .as_array_mut()
++            .unwrap()
++            .clear();
++        library["entry_evidence"]
++            .as_object_mut()
++            .unwrap()
++            .remove("arc:DCCA:CLKI:CLKO");
++        std::fs::write(&file, serde_json::to_vec(&library).unwrap()).unwrap();
++        assert!(install(&file, &mut architecture, "test-package", None).is_err());
++        assert_eq!(architecture.speed_grades()["6"], original);
++        std::fs::write(&file, serde_json::to_vec(&complete).unwrap()).unwrap();
++        let provenance = install(&file, &mut architecture, "test-package", None).unwrap();
++        assert_eq!(provenance["legacy_table_fallback"], false);
++        assert_eq!(provenance["required_setup_hold_guard_ps"], 201);
++        std::fs::remove_dir_all(directory).unwrap();
++    }
++}
+--- a/crates/texo-cli/src/resume.rs
++++ b/crates/texo-cli/src/resume.rs
+@@ -21,6 +21,8 @@
+ 
+ #[derive(Deserialize)]
+ struct Target {
++    #[serde(default)]
++    measured_timing: Option<serde_json::Value>,
+     device: String,
+     package: String,
+     database_revision: String,
+@@ -54,6 +56,16 @@
+         Ok(saved)
+     }
+ 
++    pub fn validate_timing_selection(
++        &self,
++        selected: Option<&serde_json::Value>,
++    ) -> Result<(), Box<dyn Error>> {
++        if self.target.measured_timing.is_some() && selected.is_none() {
++            return Err("resuming measured STA requires an explicit measured library; legacy fallback forbidden".into());
++        }
++        Ok(())
++    }
++
+     pub fn validate_target(
+         &self,
+         architecture: &Ecp5Architecture,
+--- a/crates/texo-flow/Cargo.toml
++++ b/crates/texo-flow/Cargo.toml
+@@ -8,6 +8,7 @@
+ [dependencies]
+ serde_json.workspace = true
+ serde.workspace = true
++sha2.workspace = true
+ texo-model.workspace = true
+ texo-pnr.workspace = true
+ texo-struo.workspace = true
+--- a/crates/texo-flow/src/lib.rs
++++ b/crates/texo-flow/src/lib.rs
+@@ -3,6 +3,9 @@
+ mod clock_constraints;
+ mod ecp5_pll;
+ mod initial_routing;
++mod measured_placement;
++mod routed_cell_timing;
++pub use measured_placement::MeasuredPlacementModel;
+ mod setup_budget;
+ mod timing_coverage;
+ 
+@@ -203,6 +206,10 @@
+     pub post_map_simulation: PostMapSimulationPolicy,
+     /// Exact ECP5 speed grade used for all timing arcs.
+     pub speed_grade: Option<&'a str>,
++    /// Measured local-placement ranking, replacing guessed placement timing.
++    pub measured_placement_model: Option<&'a MeasuredPlacementModel>,
++    /// Exact replacement timing-library provenance recorded in the checkpoint.
++    pub measured_timing: Option<&'a serde_json::Value>,
+     /// Exact architecture package used to resolve LPF pin names.
+     pub package: Option<&'a str>,
+     /// Parsed LPF constraints, when supplied by the user.
+@@ -257,6 +264,8 @@
+         Self {
+             post_map_simulation: PostMapSimulationPolicy::default(),
+             speed_grade: None,
++            measured_placement_model: None,
++            measured_timing: None,
+             package: None,
+             lpf: None,
+             allow_unconstrained_io: false,
+@@ -312,6 +321,10 @@
+ pub struct Ecp5FlowResult {
+     /// Exact speed-grade timing table used by STA.
+     pub speed_grade: String,
++    /// Measured model provenance and transactional candidate results.
++    pub measured_placement: Option<serde_json::Value>,
++    /// Identity of the complete replacement STA library, when selected.
++    pub measured_timing: Option<serde_json::Value>,
+     /// Logical design after target-inserted resources such as DCCA buffers.
+     pub design: Design,
+     /// Original mapped primitive configuration indexed by stable cell ID.
+@@ -453,6 +466,28 @@
+     evidence: &mut Evidence,
+     mut progress: impl FnMut(Ecp5FlowStage),
+ ) -> Result<Ecp5FlowResult, Ecp5FlowError> {
++    let options = if options.measured_placement_model.is_some() {
++        if architecture.device().name() != "LFE5UM5G-85F"
++            || options.package != Some("CABGA381")
++            || !matches!(options.speed_grade, Some("8" | "8_5G"))
++        {
++            return Err(PnrError::InvalidPlacement {
++                reason: "measured model target mismatch".into(),
++            }
++            .into());
++        }
++        Ecp5FlowOptions {
++            // Placement-only experiments keep their original STA acceptance
++            // behavior. A full measured library enables exact routed setup/hold
++            // repair without re-enabling the heuristic placement predictor.
++            optimize_timing: options.optimize_timing && options.measured_timing.is_some(),
++            initial_timing_reroute: options.initial_timing_reroute
++                && options.measured_timing.is_some(),
++            ..options
++        }
++    } else {
++        options
++    };
+     let flow_started = Instant::now();
+     let mut phase_started = flow_started;
+     // Preserve the public API's historical zero-as-one behavior while
+@@ -633,9 +668,11 @@
+     let mut staged_evidence = evidence.clone();
+     staged_evidence.record(Gate::MappedNetlistComplete);
+     let use_timing_route = options.optimize_timing || options.initial_timing_reroute;
+-    let placement_delay_predictor = use_timing_route
+-        .then(|| Ecp5PlacementDelayPredictor::new(architecture, &speed_grade.name))
+-        .transpose()?;
++    let placement_delay_predictor = (use_timing_route
++        && options.measured_placement_model.is_none()
++        && options.measured_timing.is_none())
++    .then(|| Ecp5PlacementDelayPredictor::new(architecture, &speed_grade.name))
++    .transpose()?;
+     let mut global_routing_cache = architecture.global_routing_cache();
+     let initial_placement_algorithm = if options.initial_placement.is_some() {
+         Ecp5InitialPlacementAlgorithm::Imported
+@@ -744,6 +781,15 @@
+             Ok::<_, Ecp5FlowError>(costs)
+         })
+         .transpose()?;
++    if timing_routing_costs.is_none() && use_timing_route {
++        // Physical PIP costs come from the installed measured table. Actual
++        // routed STA supplies criticalities immediately after the first route.
++        timing_routing_costs = Some(ecp5_routing_costs(
++            architecture,
++            speed_grade,
++            BTreeMap::new(),
++        )?);
++    }
+     let mut routing = packing.global_routing_constraints_cached(
+         &design,
+         architecture,
+@@ -798,6 +844,83 @@
+     }
+     report_metric_phase("initial_route_and_timing", &mut phase_started);
+     let (mut implementation, mut timing) = (initial_implementation, initial_timing);
++    let mut measured_placement = options
++        .measured_placement_model
++        .map(MeasuredPlacementModel::provenance);
++    if let Some(record) = measured_placement.as_mut() {
++        record["sta_model_replaced"] = options.measured_timing.is_some().into();
++    }
++    if let Some(model) = options.measured_placement_model {
++        if !initial_routing::allows_placement_feedback(options.initial_routes) {
++            return Err(PnrError::InvalidPlacement {
++                reason:
++                    "measured placement requires advisory routes; immutable imports cannot move"
++                        .into(),
++            }
++            .into());
++        }
++        let proposals = measured_placement::propose(
++            model,
++            &design,
++            architecture,
++            packing.constraints(),
++            &implementation.placement,
++            &timing,
++        );
++        let mut attempts = Vec::new();
++        for mut proposal in proposals {
++            eprintln!("[measured-placement] {}", proposal.report);
++            let mut candidate_routing = packing.global_routing_constraints_cached(
++                &design,
++                architecture,
++                &proposal.placement,
++                &mut global_routing_cache,
++            )?;
++            for route in &implementation.routes {
++                if !proposal.nets.contains(&route.net) {
++                    candidate_routing.add_initial_route(route.clone());
++                }
++            }
++            let candidate = route_with_workspace_and_progress(
++                &design,
++                architecture.device(),
++                proposal.placement,
++                &candidate_routing,
++                &mut routing_workspace,
++                |event| progress(Ecp5FlowStage::Routing(event)),
++            );
++            let candidate = match candidate {
++                Ok(candidate) => candidate,
++                Err(error) => {
++                    proposal.report["accepted"] = false.into();
++                    proposal.report["routing_error"] = error.to_string().into();
++                    attempts.push(proposal.report);
++                    continue;
++                }
++            };
++            let candidate_timing = analyze_ecp5_implementation(
++                &design,
++                architecture,
++                speed_grade,
++                &candidate,
++                &timing_model,
++                &timing_constraints,
++            )?;
++            let accepted = measured_placement::accepts(&timing, &candidate_timing);
++            proposal.report["accepted"] = accepted.into();
++            proposal.report["routed_wns_ps"] = serde_json::json!(candidate_timing.worst_slack_ps);
++            proposal.report["routed_whs_ps"] =
++                serde_json::json!(candidate_timing.worst_hold_slack_ps);
++            eprintln!("[measured-placement] routed {}", proposal.report);
++            attempts.push(proposal.report);
++            if accepted {
++                implementation = candidate;
++                timing = candidate_timing;
++                break;
++            }
++        }
++        measured_placement.as_mut().expect("model provenance")["attempts"] = attempts.into();
++    }
+     let mut route_eco_worklist = WorstSetupRouteEcoWorklist::default();
+     let mut setup_budget = SetupBudget::new(options.setup_optimization_budget);
+     if options.optimize_timing
+@@ -856,7 +979,6 @@
+                     speed_grade,
+                     timing_model: &timing_model,
+                     timing_constraints: &timing_constraints,
+-                    delay_predictor,
+                     routing_workspace: &mut routing_workspace,
+                     setup_budget: &mut setup_budget,
+                 }
+@@ -864,6 +986,7 @@
+                     implementation,
+                     timing,
+                     initial_predicted_timing,
++                    delay_predictor,
+                     costs,
+                     &mut progress,
+                 )?;
+@@ -911,10 +1034,7 @@
+     if options.optimize_timing
+         && initial_routing::allows_placement_feedback(options.initial_routes)
+         && timing.worst_slack_ps.is_some_and(|slack| slack < 0)
+-        && let (Some(costs), Some(delay_predictor)) = (
+-            timing_routing_costs.as_mut(),
+-            placement_delay_predictor.as_ref(),
+-        )
++        && let Some(costs) = timing_routing_costs.as_mut()
+     {
+         let placement_refiner = PlacementRefiner::new_with_workspace(
+             &design,
+@@ -922,6 +1042,8 @@
+             packing.constraints(),
+             &mut placement_refinement_workspace,
+         )?;
++        let mut tried_local_moves = BTreeSet::new();
++        let mut move_epoch_objective = timing_objective(&timing);
+         // A placement repair changes which routes compete for resources.
+         // Reopen route ECOs after a strict local-placement improvement, then
+         // iterate until closure or a fixed point instead of requiring another
+@@ -940,7 +1062,6 @@
+                 speed_grade,
+                 timing_model: &timing_model,
+                 timing_constraints: &timing_constraints,
+-                delay_predictor,
+                 routing_workspace: &mut routing_workspace,
+                 setup_budget: &mut setup_budget,
+             }
+@@ -948,9 +1069,18 @@
+                 &mut implementation,
+                 &mut timing,
+                 costs,
++                &mut tried_local_moves,
+                 &mut progress,
+             )?;
+             if !strictly_improves_timing_objective(timing_objective(&timing), before) {
++                // Unrelated small accepted moves should not immediately retry
++                // every failed wide relocation. At a fixed point, reconsider
++                // them once in the improved physical context before stopping.
++                if strictly_improves_timing_objective(before, move_epoch_objective) {
++                    tried_local_moves.clear();
++                    move_epoch_objective = before;
++                    continue;
++                }
+                 break;
+             }
+             route_eco_worklist.reset_attempted_after_global_change();
+@@ -1024,6 +1154,8 @@
+ 
+     Ok(Ecp5FlowResult {
+         speed_grade: speed_grade_name.into(),
++        measured_placement,
++        measured_timing: options.measured_timing.cloned(),
+         design,
+         primitive_metadata: imported.metadata().clone(),
+         absorbed_inputs: imported.absorbed_inputs().clone(),
+@@ -1233,6 +1365,36 @@
+     )
+ }
+ 
++#[derive(Eq, PartialEq, Ord, PartialOrd)]
++struct PlacementMoveIdentity {
++    cells: Vec<(CellId, BelId, BelId)>,
++    pins: Vec<(CellPinId, Option<BelPinId>, Option<BelPinId>)>,
++}
++
++fn placement_move_identity(
++    design: &Design,
++    before: &Placement,
++    after: &Placement,
++) -> PlacementMoveIdentity {
++    PlacementMoveIdentity {
++        cells: before
++            .bindings()
++            .iter()
++            .zip(after.bindings())
++            .enumerate()
++            .filter_map(|(i, (&old, &new))| (old != new).then_some((CellId(i), old, new)))
++            .collect(),
++        pins: (0..design.pins().len())
++            .map(CellPinId)
++            .filter_map(|pin| {
++                let old = before.pin_binding(pin);
++                let new = after.pin_binding(pin);
++                (old != new).then_some((pin, old, new))
++            })
++            .collect(),
++    }
++}
++
+ /// One deterministic STA-feedback trajectory.
+ ///
+ /// Detailed placement and routing each own their generic physical objective.
+@@ -1247,7 +1409,6 @@
+     speed_grade: &'a SpeedGradeRecord,
+     timing_model: &'a TimingModel,
+     timing_constraints: &'a TimingConstraints,
+-    delay_predictor: &'a Ecp5PlacementDelayPredictor<'a>,
+     routing_workspace: &'work mut RoutingWorkspace,
+     setup_budget: &'work mut SetupBudget,
+ }
+@@ -1312,18 +1473,70 @@
+         implementation: &mut PnrResult,
+         timing: &mut TimingReport,
+         routing_costs: &mut RoutingCosts,
++        tried_moves: &mut BTreeSet<PlacementMoveIdentity>,
++        progress: &mut impl FnMut(Ecp5FlowStage),
++    ) -> Result<(), Ecp5FlowError> {
++        self.improve_local_setup_trial(
++            implementation,
++            timing,
++            routing_costs,
++            tried_moves,
++            true,
++            progress,
++        )
++    }
++
++    #[allow(clippy::too_many_lines)]
++    fn improve_local_setup_trial(
++        &mut self,
++        implementation: &mut PnrResult,
++        timing: &mut TimingReport,
++        routing_costs: &mut RoutingCosts,
++        tried_moves: &mut BTreeSet<PlacementMoveIdentity>,
++        allow_compound: bool,
+         progress: &mut impl FnMut(Ecp5FlowStage),
+     ) -> Result<(), Ecp5FlowError> {
+         let mut seen = BTreeSet::from([placement_identity(self.design, &implementation.placement)]);
+         let round = 1_usize;
++        let mut bridges = Vec::<(PnrResult, TimingReport)>::new();
+         if let Some(worst) = timing.worst_slack_ps.filter(|&slack| slack < 0) {
+             if self.setup_budget.exhausted() {
+                 return Ok(());
+             }
++            let input_costs = routed_cell_timing::InputCosts::new(self.speed_grade)?;
++            let input_penalties = implementation
++                .routes
++                .iter()
++                .flat_map(|route| {
++                    route.arcs.iter().filter_map(|arc| {
++                        arc.sink.map(|sink| {
++                            (
++                                (route.net, sink),
++                                arc.pips
++                                    .iter()
++                                    .map(|&pip| {
++                                        u64::from(input_costs.pip_penalty(self.architecture, pip))
++                                    })
++                                    .sum::<u64>(),
++                            )
++                        })
++                    })
++                })
++                .collect::<BTreeMap<_, _>>();
+             let delays = timing
+                 .net_delays
+                 .iter()
+-                .map(|delay| ((delay.net, delay.sink), delay.delay.max_ps))
++                .map(|delay| {
++                    (
++                        (delay.net, delay.sink),
++                        delay.delay.max_ps.saturating_add(
++                            input_penalties
++                                .get(&(delay.net, delay.sink))
++                                .copied()
++                                .unwrap_or(0),
++                        ),
++                    )
++                })
+                 .collect::<BTreeMap<_, _>>();
+             let edges = timing
+                 .net_setup_slacks
+@@ -1353,42 +1566,45 @@
+             }
+             let mut cells = cells.into_iter().collect::<Vec<_>>();
+             cells.sort_unstable_by_key(|&(cell, (slack, delay))| (slack, Reverse(delay), cell));
+-            for (cell, _) in cells {
+-                if self.setup_budget.exhausted() {
+-                    return Ok(());
+-                }
+-                let selected = edges
+-                    .iter()
+-                    .filter_map(|edge| {
+-                        let driver = self.design.nets()[edge.net.0].driver;
+-                        (self.design.pins()[driver.0].cell == cell
+-                            || self.design.pins()[edge.sink.0].cell == cell)
+-                            .then_some((driver, edge.sink, edge.net, edge.slack_ps))
+-                    })
+-                    .collect::<Vec<_>>();
+-                let connections = selected
+-                    .iter()
+-                    .map(|&(driver, sink, _, _)| (driver, sink))
+-                    .collect::<Vec<_>>();
+-                let realized_delays = selected
+-                    .iter()
+-                    .map(|&(_, sink, net, _)| delays.get(&(net, sink)).copied().unwrap_or(0))
+-                    .collect::<Vec<_>>();
+-                let targets = selected
+-                    .iter()
+-                    .map(|&(_, sink, net, slack)| {
+-                        let deficit = u64::try_from(slack.unsigned_abs()).unwrap_or(u64::MAX);
+-                        delays
+-                            .get(&(net, sink))
+-                            .copied()
+-                            .unwrap_or(0)
+-                            .saturating_sub(deficit)
+-                    })
+-                    .collect::<Vec<_>>();
+-                // Try short, low-disruption moves before broad span moves.
+-                // Both use each connection's own timing allowance; full
+-                // routed STA remains the only acceptance authority.
+-                for radius in [2, 256] {
++            // Try every cell's nearby moves before a wide relocation can
++            // consume the budget. In particular, a critical BRAM must not
++            // starve small LUT moves on the same path.
++            for radius in [2, 4, 8, 256] {
++                for &(cell, _) in &cells {
++                    if self.setup_budget.exhausted() {
++                        return Ok(());
++                    }
++                    let selected = edges
++                        .iter()
++                        .filter_map(|edge| {
++                            let driver = self.design.nets()[edge.net.0].driver;
++                            (self.design.pins()[driver.0].cell == cell
++                                || self.design.pins()[edge.sink.0].cell == cell)
++                                .then_some((driver, edge.sink, edge.net, edge.slack_ps))
++                        })
++                        .collect::<Vec<_>>();
++                    let connections = selected
++                        .iter()
++                        .map(|&(driver, sink, _, _)| (driver, sink))
++                        .collect::<Vec<_>>();
++                    let realized_delays = selected
++                        .iter()
++                        .map(|&(_, sink, net, _)| delays.get(&(net, sink)).copied().unwrap_or(0))
++                        .collect::<Vec<_>>();
++                    let targets = selected
++                        .iter()
++                        .map(|&(_, sink, net, slack)| {
++                            let deficit = u64::try_from(slack.unsigned_abs()).unwrap_or(u64::MAX);
++                            delays
++                                .get(&(net, sink))
++                                .copied()
++                                .unwrap_or(0)
++                                .saturating_sub(deficit)
++                        })
++                        .collect::<Vec<_>>();
++                    // Try short, low-disruption moves before broad span moves.
++                    // Both use each connection's own timing allowance; full
++                    // routed STA remains the only acceptance authority.
+                     let candidates = self
+                         .placement_refiner
+                         .refine_cell_connection_delays_against_routed(
+@@ -1409,6 +1625,13 @@
+                         if !seen.insert(placement_identity(self.design, &placement)) {
+                             continue;
+                         }
++                        if !tried_moves.insert(placement_move_identity(
++                            self.design,
++                            &implementation.placement,
++                            &placement,
++                        )) {
++                            continue;
++                        }
+                         let routing = self.packing.global_routing_constraints_cached(
+                             self.design,
+                             self.architecture,
+@@ -1473,17 +1696,59 @@
+                                 owners.len()
+                             );
+                         }
+-                        let routed_candidate = route_with_timing_costs_workspace_and_progress(
++                        let previous_max_iterations = routing_costs.max_iterations();
++                        routing_costs.set_max_iterations(previous_max_iterations.min(8));
++                        let mut routed_candidate = route_with_timing_costs_workspace_and_progress(
+                             self.design,
+                             self.architecture.device(),
+-                            placement,
++                            placement.clone(),
+                             &frozen,
+                             routing_costs,
+                             self.routing_workspace,
+                             |event| progress(Ecp5FlowStage::TimingDrivenRouting(event)),
+                         );
++                        if matches!(
++                            routed_candidate,
++                            Err(PnrError::CongestionNotResolved { .. }
++                                | PnrError::Unroutable { .. })
++                        ) {
++                            // Preserve target-owned clock topology, but let
++                            // ordinary retained neighbors negotiate around the
++                            // moved cell. This is still a disposable full-STA trial.
++                            eprintln!(
++                                "[metrics] local_placement_route_displacement cell={} radius={radius}",
++                                cell.0
++                            );
++                            // A BRAM relocation changes both wide data ports and
++                            // many address/control branches. Board runs reduced
++                            // >1,500 conflicting nets to four by iteration 32;
++                            // retain the normal budget for these larger trials.
++                            let retry_limit =
++                                if self.design.cells()[cell.0].kind == ResourceKind::Memory {
++                                    previous_max_iterations
++                                } else {
++                                    previous_max_iterations.min(32)
++                                };
++                            routing_costs.set_max_iterations(retry_limit);
++                            let mut advisory = routing.clone();
++                            for route in frozen.routes().values() {
++                                if !advisory.routes().contains_key(&route.net) {
++                                    advisory.add_initial_route((**route).clone());
++                                }
++                            }
++                            routed_candidate = route_with_timing_costs_workspace_and_progress(
++                                self.design,
++                                self.architecture.device(),
++                                placement,
++                                &advisory,
++                                routing_costs,
++                                self.routing_workspace,
++                                |event| progress(Ecp5FlowStage::TimingDrivenRouting(event)),
++                            );
++                        }
+                         routing_costs.set_detailed_timing_nets(previous_detailed_nets);
+-                        let candidate = match routed_candidate {
++                        routing_costs.set_max_iterations(previous_max_iterations);
++                        let mut candidate = match routed_candidate {
+                             Ok(candidate) => candidate,
+                             Err(
+                                 PnrError::CongestionNotResolved { .. }
+@@ -1499,7 +1764,7 @@
+                             }
+                             Err(error) => return Err(error.into()),
+                         };
+-                        let candidate_timing = analyze_ecp5_implementation(
++                        let mut candidate_timing = analyze_ecp5_implementation(
+                             self.design,
+                             self.architecture,
+                             self.speed_grade,
+@@ -1507,6 +1772,38 @@
+                             self.timing_model,
+                             self.timing_constraints,
+                         )?;
++                        // A move may expose another near-critical route. Give
++                        // a close trial fresh timing-driven route feedback before
++                        // judging the whole transaction against the incumbent.
++                        // No intermediate placement or timing is committed.
++                        if !strictly_improves_timing_objective(
++                            timing_objective(&candidate_timing),
++                            timing_objective(timing),
++                        ) && candidate_timing
++                            .worst_slack_ps
++                            .is_some_and(|slack| slack >= worst.saturating_mul(2))
++                            && !self.setup_budget.exhausted()
++                        {
++                            eprintln!(
++                                "[metrics] setup_placement_trial_refinement cell={} radius={radius} before={:?}",
++                                cell.0, candidate_timing.worst_slack_ps
++                            );
++                            improve_worst_setup_net_route_ecos(
++                                self.design,
++                                self.architecture,
++                                self.speed_grade,
++                                self.timing_model,
++                                self.timing_constraints,
++                                &routing,
++                                routing_costs,
++                                self.routing_workspace,
++                                &mut candidate,
++                                &mut candidate_timing,
++                                &mut WorstSetupRouteEcoWorklist::default(),
++                                self.setup_budget,
++                                progress,
++                            )?;
++                        }
+                         progress(timing_snapshot(&candidate_timing));
+                         let improves = strictly_improves_timing_objective(
+                             timing_objective(&candidate_timing),
+@@ -1523,22 +1820,65 @@
+                                 candidate_timing.worst_slack_ps
+                             );
+                         }
+-                        if commit_strict_route_eco_candidate(
+-                            implementation,
+-                            timing,
+-                            candidate,
+-                            candidate_timing,
+-                        ) {
++                        if improves {
++                            commit_strict_route_eco_candidate(
++                                implementation,
++                                timing,
++                                candidate,
++                                candidate_timing,
++                            );
+                             // Return after one accepted placement so the outer
+                             // loop can immediately rebuild critical routes in
+                             // the new resource topology. A long placement-only
+                             // descent used to consume the entire setup budget.
+                             return Ok(());
+                         }
++                        // Preserve a small near-miss frontier only after a
++                        // complete route/STA trial. Explore a second placement
++                        // after exhausting single moves, never by committing
++                        // a worse intermediate implementation.
++                        if allow_compound
++                            && candidate_timing
++                                .worst_slack_ps
++                                .is_some_and(|slack| slack >= worst.saturating_mul(2))
++                        {
++                            bridges.push((candidate, candidate_timing));
++                            bridges.sort_by_key(|(_, report)| Reverse(timing_objective(report)));
++                            bridges.truncate(3);
++                        }
+                     }
+                 }
+             }
+         }
++        for (mut bridge, mut report) in bridges {
++            if self.setup_budget.exhausted() {
++                break;
++            }
++            // Do not spend the second move simply undoing the first one.
++            let mut tried = BTreeSet::from([placement_move_identity(
++                self.design,
++                &bridge.placement,
++                &implementation.placement,
++            )]);
++            let before = report.worst_slack_ps;
++            self.improve_local_setup_trial(
++                &mut bridge,
++                &mut report,
++                routing_costs,
++                &mut tried,
++                false,
++                progress,
++            )?;
++            let after = report.worst_slack_ps;
++            let accepted =
++                commit_strict_route_eco_candidate(implementation, timing, bridge, report);
++            eprintln!(
++                "[metrics] setup_compound_placement before={before:?} after={after:?} accepted={accepted}"
++            );
++            if accepted {
++                return Ok(());
++            }
++        }
+         Ok(())
+     }
+ 
+@@ -1547,6 +1887,7 @@
+         round: usize,
+         placement: &Placement,
+         incumbent: &TimingReport,
++        delay_predictor: &Ecp5PlacementDelayPredictor<'_>,
+     ) -> Result<Option<TimingReport>, Ecp5FlowError> {
+         let started = Instant::now();
+         let candidate = estimated_placement_timing(
+@@ -1555,7 +1896,7 @@
+             self.timing_model,
+             self.timing_constraints,
+             self.placement_refiner,
+-            self.delay_predictor,
++            delay_predictor,
+         )?;
+         let rejected = predicted_setup_candidate_is_pareto_dominated(incumbent, &candidate);
+         report_timing_feedback_prescreen(
+@@ -1578,6 +1919,7 @@
+         mut implementation: PnrResult,
+         mut timing: TimingReport,
+         initial_predicted_timing: &TimingReport,
++        delay_predictor: &Ecp5PlacementDelayPredictor<'_>,
+         routing_costs: &mut RoutingCosts,
+         progress: &mut impl FnMut(Ecp5FlowStage),
+     ) -> Result<(PnrResult, TimingReport), Ecp5FlowError> {
+@@ -1595,7 +1937,7 @@
+             let (placement, moved) = self.placement_refiner.refine_with_predicted_timing_pass(
+                 implementation.placement.clone(),
+                 &criticalities,
+-                self.delay_predictor,
++                delay_predictor,
+             )?;
+             progress(Ecp5FlowStage::TimingDrivenPlaced);
+             if moved == 0 || placement == implementation.placement {
+@@ -1608,7 +1950,7 @@
+             }
+ 
+             let Some(candidate_predicted) =
+-                self.prescreen_placement(round, &placement, &incumbent_predicted)?
++                self.prescreen_placement(round, &placement, &incumbent_predicted, delay_predictor)?
+             else {
+                 break;
+             };
+@@ -1775,6 +2117,7 @@
+                 &trial_model,
+                 timing_constraints,
+                 requested_minimums.clone(),
++                None,
+                 routing_costs,
+                 global_routing_cache,
+                 routing_workspace,
+@@ -1807,6 +2150,7 @@
+                     &trial_model,
+                     timing_constraints,
+                     requested_minimums.clone(),
++                    None,
+                     routing_costs,
+                     global_routing_cache,
+                     routing_workspace,
+@@ -1874,9 +2218,159 @@
+         global_routing_cache,
+         routing_workspace,
+         progress,
++    )?;
++    repair_local_hold_placement(
++        design,
++        architecture,
++        speed_grade,
++        constant_cells,
++        metadata,
++        timing_constraints,
++        packing,
++        implementation,
++        timing,
++        routing_costs,
++        global_routing_cache,
++        routing_workspace,
++        progress,
+     )
+ }
+ 
++/// Try legal vacant sites when a hold-safe detour is unavailable in place.
++#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
++fn repair_local_hold_placement(
++    design: &Design,
++    architecture: &Ecp5Architecture,
++    speed_grade: &SpeedGradeRecord,
++    constant_cells: &BTreeSet<CellId>,
++    metadata: &BTreeMap<CellId, PrimitiveMetadata>,
++    timing_constraints: &TimingConstraints,
++    packing: &Ecp5Packing,
++    implementation: &mut PnrResult,
++    timing: &mut TimingReport,
++    routing_costs: &RoutingCosts,
++    global_routing_cache: &mut Ecp5GlobalRoutingCache<'_>,
++    routing_workspace: &mut RoutingWorkspace,
++    progress: &mut impl FnMut(Ecp5FlowStage),
++) -> Result<(), Ecp5FlowError> {
++    let model = ecp5_timing_model(design, packing, speed_grade, constant_cells, metadata)?;
++    let mut tried = BTreeSet::new();
++    let mut trials = 0;
++    loop {
++        if timing.met_timing() || trials >= 128 {
++            break;
++        }
++        let cells = timing
++            .hold_checks
++            .iter()
++            .filter(|check| check.slack_ps < 0)
++            .map(|check| (check.slack_ps, check.cell))
++            .collect::<BTreeSet<_>>();
++        let bindings = implementation.placement.bindings().to_vec();
++        let occupied = bindings.iter().copied().collect::<BTreeSet<_>>();
++        let mut accepted = false;
++        'search: for radius in [2, 4, 8] {
++            for &(_, cell) in &cells {
++                let old = bindings[cell.0];
++                let point = architecture.device().bels()[old.0].point;
++                let mut destinations = architecture
++                    .device()
++                    .bels()
++                    .iter()
++                    .enumerate()
++                    .filter(|(index, bel)| {
++                        bel.kind == design.cells()[cell.0].kind
++                            && !occupied.contains(&BelId(*index))
++                            && bel.point.manhattan(point) <= radius
++                    })
++                    .map(|(index, bel)| (bel.point.manhattan(point), BelId(index)))
++                    .collect::<Vec<_>>();
++                destinations.sort_unstable();
++                let mut legal_trials = 0;
++                for (_, destination) in destinations {
++                    if !tried.insert((cell, old, destination)) {
++                        continue;
++                    }
++                    let mut next = bindings.clone();
++                    next[cell.0] = destination;
++                    let placement = match placement_from_complete_bindings(
++                        design,
++                        architecture.device(),
++                        packing.constraints(),
++                        next,
++                    ) {
++                        Ok(placement) => placement,
++                        Err(PnrError::InvalidPlacement { .. }) => continue,
++                        Err(error) => return Err(error.into()),
++                    };
++                    legal_trials += 1;
++                    trials += 1;
++                    let mut costs = routing_costs.clone();
++                    costs.set_max_iterations(costs.max_iterations().min(32));
++                    let violating = hold_sink_min_delays(timing);
++                    let mut minimums = hold_sink_min_delays_with_protection(timing, true);
++                    minimums.retain(|&(net, sink), _| {
++                        !violating.contains_key(&(net, sink))
++                            || design.pins()[sink.0].cell == cell
++                            || design.pins()[design.nets()[net.0].driver.0].cell == cell
++                    });
++                    let trial = route_hold_trial(
++                        design,
++                        architecture,
++                        speed_grade,
++                        packing,
++                        implementation,
++                        timing,
++                        &model,
++                        timing_constraints,
++                        minimums,
++                        Some(placement),
++                        &costs,
++                        global_routing_cache,
++                        routing_workspace,
++                        progress,
++                    )?;
++                    if let Some((candidate, report)) = trial {
++                        let improves = report.worst_slack_ps.is_some_and(|slack| slack >= 0)
++                            && strictly_improves_timing_objective(
++                                timing_objective(&report),
++                                timing_objective(timing),
++                            );
++                        if metrics_enabled() {
++                            eprintln!(
++                                "[metrics] hold_placement cell={} destination={} wns={:?} whs={:?} accepted={improves}",
++                                cell.0,
++                                destination.0,
++                                report.worst_slack_ps,
++                                report.worst_hold_slack_ps
++                            );
++                        }
++                        progress(Ecp5FlowStage::TimingTrialDecision {
++                            improves_objective: improves,
++                        });
++                        if improves {
++                            *implementation = candidate;
++                            *timing = report;
++                            accepted = true;
++                            break 'search;
++                        }
++                    }
++                    if trials >= 128 {
++                        break 'search;
++                    }
++                    if legal_trials >= 8 {
++                        break;
++                    }
++                }
++            }
++        }
++        if !accepted {
++            break;
++        }
++    }
++    Ok(())
++}
++
+ /// Repairs all general-routing hold arcs together after setup has closed.
+ #[allow(clippy::too_many_arguments)]
+ fn repair_general_hold_routes(
+@@ -1901,55 +2395,77 @@
+         if new_minimums.is_empty() {
+             break;
+         }
++        let active_nets = new_minimums
++            .keys()
++            .map(|key| key.0)
++            .collect::<BTreeSet<_>>();
+         accumulate_hold_minimums(&mut accumulated_minimums, new_minimums);
+-        let Some((trial_implementation, trial_timing)) = route_hold_trial(
+-            design,
+-            architecture,
+-            speed_grade,
+-            packing,
+-            implementation,
+-            timing,
+-            &model,
+-            timing_constraints,
+-            accumulated_minimums.clone(),
+-            routing_costs,
+-            global_routing_cache,
+-            routing_workspace,
+-            progress,
+-        )?
+-        else {
+-            break;
+-        };
+-        if trial_timing.worst_slack_ps.is_none_or(|setup| setup < 0) {
+-            break;
+-        }
+-        let improves = strictly_improves_timing_objective(
+-            timing_objective(&trial_timing),
+-            timing_objective(timing),
+-        );
+-        progress(Ecp5FlowStage::TimingTrialDecision {
+-            improves_objective: improves,
+-        });
+-        if metrics_enabled() {
+-            eprintln!(
+-                "[metrics] general_hold_feedback wns={:?} whs={:?} accepted={improves}",
+-                trial_timing.worst_slack_ps, trial_timing.worst_hold_slack_ps,
+-            );
+-        }
+-        if !improves {
+-            break;
++        let requested_minimums = accumulated_minimums
++            .iter()
++            .filter(|(key, _)| active_nets.contains(&key.0))
++            .map(|(&key, &minimum)| (key, minimum))
++            .collect::<BTreeMap<_, _>>();
++        // A congested net must not prevent independent hold repairs. Try the
++        // full request first, then isolate each net while retaining all of its
++        // sink floors. Every accepted trial still passes whole-design STA.
++        let mut requests = vec![requested_minimums.clone()];
++        requests.extend(hold_minimums_by_net(&requested_minimums));
++        let mut accepted = false;
++        for (trial_index, minimums) in requests.into_iter().enumerate() {
++            let Some((trial_implementation, trial_timing)) = route_hold_trial(
++                design,
++                architecture,
++                speed_grade,
++                packing,
++                implementation,
++                timing,
++                &model,
++                timing_constraints,
++                minimums,
++                None,
++                routing_costs,
++                global_routing_cache,
++                routing_workspace,
++                progress,
++            )?
++            else {
++                continue;
++            };
++            let improves = trial_timing.worst_slack_ps.is_some_and(|setup| setup >= 0)
++                && strictly_improves_timing_objective(
++                    timing_objective(&trial_timing),
++                    timing_objective(timing),
++                );
++            progress(Ecp5FlowStage::TimingTrialDecision {
++                improves_objective: improves,
++            });
++            if metrics_enabled() {
++                eprintln!(
++                    "[metrics] general_hold_feedback trial={trial_index} wns={:?} whs={:?} accepted={improves}",
++                    trial_timing.worst_slack_ps, trial_timing.worst_hold_slack_ps,
++                );
++            }
++            if !improves {
++                continue;
++            }
++            *implementation = trial_implementation;
++            *timing = trial_timing;
++            accepted = true;
++            if timing.met_timing() {
++                return Ok(());
++            }
++            if trial_index == 0 {
++                break;
++            }
+         }
+-        let closed = trial_timing.met_timing();
+-        *implementation = trial_implementation;
+-        *timing = trial_timing;
+-        if closed {
++        if !accepted {
+             break;
+         }
+     }
+     Ok(())
+ }
+ 
+-#[allow(clippy::too_many_arguments)]
++#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+ fn route_hold_trial(
+     design: &Design,
+     architecture: &Ecp5Architecture,
+@@ -1960,21 +2476,30 @@
+     timing_model: &TimingModel,
+     timing_constraints: &TimingConstraints,
+     minimums: BTreeMap<(NetId, CellPinId), u64>,
++    proposed_placement: Option<Placement>,
+     routing_costs: &RoutingCosts,
+     global_routing_cache: &mut Ecp5GlobalRoutingCache<'_>,
+     routing_workspace: &mut RoutingWorkspace,
+     progress: &mut impl FnMut(Ecp5FlowStage),
+ ) -> Result<Option<TimingCandidate>, Ecp5FlowError> {
+-    let released = minimums.keys().copied().collect::<BTreeSet<_>>();
++    let mut released = if proposed_placement.is_some() {
++        BTreeSet::new()
++    } else {
++        minimums.keys().copied().collect::<BTreeSet<_>>()
++    };
+     // Re-resolve physical pin bindings under the trial packing. Merely
+     // cloning the incumbent placement would retain the old dedicated `DI`
+     // binding even after the logical FF input was rebound to general `M`.
+-    let trial_placement = rebind_placement_pins(
+-        design,
+-        architecture.device(),
+-        packing.constraints(),
+-        &implementation.placement,
+-    )?;
++    let trial_placement = if let Some(placement) = proposed_placement {
++        placement
++    } else {
++        rebind_placement_pins(
++            design,
++            architecture.device(),
++            packing.constraints(),
++            &implementation.placement,
++        )?
++    };
+     let recomputed_global_routing;
+     let base = if global_clock_endpoints_unchanged(
+         design,
+@@ -2012,11 +2537,46 @@
+         &recomputed_global_routing
+     };
+     progress(Ecp5FlowStage::TimingDrivenGlobalClocksRouted);
+-    let frozen = freeze_unchanged_routes(design, implementation, &trial_placement, base, &released);
+     let mut costs = routing_costs.clone();
+     costs.set_net_criticalities(timing_net_weights(timing, timing_constraints));
+     costs.set_sink_criticalities(timing_arc_weights(timing, timing_constraints));
+     costs.set_sink_min_delays_ps(minimums);
++    let same_placement = trial_placement == implementation.placement;
++    if !same_placement {
++        let targets = hold_sink_min_delays(timing)
++            .keys()
++            .filter(|&&(net, sink)| {
++                [
++                    design.pins()[sink.0].cell,
++                    design.pins()[design.nets()[net.0].driver.0].cell,
++                ]
++                .iter()
++                .any(|&cell| implementation.placement.bel(cell) != trial_placement.bel(cell))
++            })
++            .map(|key| key.0)
++            .collect::<BTreeSet<_>>()
++            .into_iter()
++            .collect::<Vec<_>>();
++        let owners = placement_route_eco_owners(
++            design,
++            architecture.device(),
++            implementation,
++            &trial_placement,
++            base,
++            &costs,
++            &targets,
++            LegalRouteEcoOptions::new(WORST_SETUP_ROUTE_ECO_ESTIMATE_DELAY_PER_TILE_PS)
++                .with_displacement_limit(32),
++            routing_workspace,
++        )?;
++        released.extend(owners.iter().flat_map(|&net| {
++            design.nets()[net.0]
++                .sinks
++                .iter()
++                .map(move |&sink| (net, sink))
++        }));
++    }
++    let frozen = freeze_unchanged_routes(design, implementation, &trial_placement, base, &released);
+     let routed = match route_with_timing_costs_workspace_and_progress(
+         design,
+         architecture.device(),
+@@ -2028,10 +2588,38 @@
+     ) {
+         Ok(routed) => routed,
+         Err(PnrError::CongestionNotResolved { .. } | PnrError::Unroutable { .. }) => {
+-            progress(Ecp5FlowStage::TimingTrialDecision {
+-                improves_objective: false,
+-            });
+-            return Ok(None);
++            // Frozen neighbors can block a longer hold-safe route. Discover
++            // and release only the conflicting owners, just as setup ECOs do.
++            // Pair-release trials have changed pin bindings and cannot use
++            // the incumbent's placement for this fallback.
++            let nets = released.iter().map(|key| key.0).collect::<BTreeSet<_>>();
++            let candidate = if same_placement {
++                let mut owner_costs = costs.clone();
++                let mut owner_minimums = hold_sink_min_delays_with_protection(timing, true);
++                accumulate_hold_minimums(&mut owner_minimums, costs.sink_min_delays_ps().clone());
++                owner_costs.set_sink_min_delays_ps(owner_minimums);
++                legal_nets_route_eco_candidate_with_workspace(
++                    design,
++                    architecture.device(),
++                    implementation,
++                    base,
++                    &owner_costs,
++                    &nets.into_iter().collect::<Vec<_>>(),
++                    LegalRouteEcoOptions::new(WORST_SETUP_ROUTE_ECO_ESTIMATE_DELAY_PER_TILE_PS)
++                        .with_displacement_limit(32),
++                    routing_workspace,
++                )?
++            } else {
++                None
++            };
++            if let Some(routed) = candidate {
++                routed
++            } else {
++                progress(Ecp5FlowStage::TimingTrialDecision {
++                    improves_objective: false,
++                });
++                return Ok(None);
++            }
+         }
+         Err(error) => return Err(error.into()),
+     };
+@@ -2077,7 +2665,8 @@
+     }
+     let mut pip_min_delays_ps = Vec::with_capacity(architecture.device().pips().len());
+     let mut pip_delays_ps = Vec::with_capacity(architecture.device().pips().len());
+-    for class_id in architecture.pip_timing_class_ids() {
++    let input_costs = routed_cell_timing::InputCosts::new(speed_grade)?;
++    for (index, class_id) in architecture.pip_timing_class_ids().enumerate() {
+         let (minimum, maximum) = class_delays[class_id as usize].ok_or_else(|| {
+             Ecp5FlowError::MissingPipTimingClass {
+                 speed_grade: speed_grade.name.clone(),
+@@ -2088,7 +2677,11 @@
+             }
+         })?;
+         pip_min_delays_ps.push(minimum);
+-        pip_delays_ps.push(maximum);
++        pip_delays_ps.push(
++            maximum
++                .checked_add(input_costs.pip_penalty(architecture, PipId(index)))
++                .ok_or(Ecp5FlowError::TimingDelayOverflow)?,
++        );
+     }
+     let mut costs = RoutingCosts::new(pip_delays_ps, net_criticalities);
+     costs.set_pip_min_delays_ps(pip_min_delays_ps);
+@@ -2117,12 +2710,19 @@
+     timing_constraints: &TimingConstraints,
+ ) -> Result<TimingReport, Ecp5FlowError> {
+     let pip_delays = ecp5_pip_delays(architecture, speed_grade, implementation)?;
++    let routed_model = routed_cell_timing::resolve(
++        design,
++        architecture,
++        speed_grade,
++        implementation,
++        timing_model,
++    )?;
+     Ok(analyze_timing(
+         design,
+         architecture.device(),
+         implementation,
+         &pip_delays,
+-        timing_model,
++        &routed_model,
+         timing_constraints,
+     )?)
+ }
+@@ -2300,6 +2900,17 @@
+ }
+ 
+ fn hold_sink_min_delays(timing: &TimingReport) -> BTreeMap<(NetId, CellPinId), u64> {
++    hold_sink_min_delays_with_protection(timing, false)
++}
++
++fn hold_route_floor(delay_ps: u64, slack_ps: i128) -> u64 {
++    u64::try_from(i128::from(delay_ps).saturating_sub(slack_ps).max(0)).unwrap_or(u64::MAX)
++}
++
++fn hold_sink_min_delays_with_protection(
++    timing: &TimingReport,
++    protect_met_checks: bool,
++) -> BTreeMap<(NetId, CellPinId), u64> {
+     let delays_by_sink = timing
+         .net_delays
+         .iter()
+@@ -2307,14 +2918,16 @@
+         .collect::<BTreeMap<_, _>>();
+     let mut minimums = BTreeMap::<(NetId, CellPinId), u64>::new();
+     for check in &timing.hold_checks {
+-        if check.slack_ps >= 0 {
++        if !protect_met_checks && check.slack_ps >= 0 {
+             continue;
+         }
+         let Some(delay) = delays_by_sink.get(&check.data_pin) else {
+             continue;
+         };
+-        let deficit_ps = u64::try_from(check.slack_ps.unsigned_abs()).unwrap_or(u64::MAX);
+-        let minimum_ps = delay.delay.min_ps.saturating_add(deficit_ps);
++        let minimum_ps = hold_route_floor(delay.delay.min_ps, check.slack_ps);
++        if minimum_ps == 0 {
++            continue;
++        }
+         minimums
+             .entry((delay.net, delay.sink))
+             .and_modify(|known| *known = (*known).max(minimum_ps))
+@@ -2323,6 +2936,19 @@
+     minimums
+ }
+ 
++fn hold_minimums_by_net(
++    minimums: &BTreeMap<(NetId, CellPinId), u64>,
++) -> Vec<BTreeMap<(NetId, CellPinId), u64>> {
++    let mut groups = BTreeMap::<NetId, BTreeMap<(NetId, CellPinId), u64>>::new();
++    for (&key, &minimum) in minimums {
++        groups.entry(key.0).or_default().insert(key, minimum);
++    }
++    if groups.len() <= 1 {
++        return Vec::new();
++    }
++    groups.into_values().collect()
++}
++
+ fn accumulate_hold_minimums(
+     accumulated: &mut BTreeMap<(NetId, CellPinId), u64>,
+     new_minimums: BTreeMap<(NetId, CellPinId), u64>,
+@@ -3156,6 +3782,7 @@
+ /// physical state, so a nonclosing search terminates after exhausting the
+ /// finite set of candidate nets.
+ struct Ecp5EcoTimingSession<'a> {
++    routed_model_inputs: Option<(&'a Design, &'a TimingModel, &'a TimingConstraints)>,
+     timing: TimingAnalysisSession<'a>,
+     architecture: &'a Ecp5Architecture,
+     speed_grade: &'a SpeedGradeRecord,
+@@ -3176,6 +3803,11 @@
+         constraints: &'a TimingConstraints,
+     ) -> Result<Self, Ecp5FlowError> {
+         Ok(Self {
++            routed_model_inputs: routed_cell_timing::has_input_asymmetry(speed_grade).then_some((
++                design,
++                model,
++                constraints,
++            )),
+             timing: TimingAnalysisSession::new(design, model, constraints)?,
+             architecture,
+             speed_grade,
+@@ -3189,6 +3821,19 @@
+     }
+ 
+     fn analyze(&mut self, implementation: &PnrResult) -> Result<TimingReport, Ecp5FlowError> {
++        if let Some((design, model, constraints)) = self.routed_model_inputs {
++            // A route ECO can change LUT permutation and therefore cell delays.
++            // The fixed-cell session cannot reuse its old graph in this case.
++            return analyze_ecp5_implementation(
++                design,
++                self.architecture,
++                self.speed_grade,
++                implementation,
++                model,
++                constraints,
++            );
++        }
++
+         for pip in self.touched_pips.drain(..) {
+             self.selected[pip.0] = false;
+         }
+@@ -3694,7 +4339,26 @@
+         .iter()
+         .map(|arc| (arc.from_pin.clone(), arc.to_pin.clone()))
+         .collect::<BTreeSet<_>>();
+-    if actual != expected || record.arcs.len() != expected.len() || !record.setup_holds.is_empty() {
++    // Older caches use a dense surface. A measured table omits impossible
++    // dependencies: bit i cannot affect product bits below i, and signed
++    // correction is a multiple of 2^18. Require either complete surface,
++    // never a partial mixture with a missing real dependency.
++    let physical = expected
++        .iter()
++        .filter(|(from, to)| {
++            let first = if from.starts_with("SIGNED") {
++                18
++            } else {
++                from[1..].parse::<u32>().unwrap()
++            };
++            to[1..].parse::<u32>().unwrap() >= first
++        })
++        .cloned()
++        .collect::<BTreeSet<_>>();
++    if (actual != expected && actual != physical)
++        || record.arcs.len() != actual.len()
++        || !record.setup_holds.is_empty()
++    {
+         return Err(Ecp5FlowError::IncompleteMultiplierTiming {
+             speed_grade: speed_grade.into(),
+         });
+@@ -5869,7 +6533,7 @@
+     }
+ 
+     #[test]
+-    fn rejected_route_eco_sta_trial_keeps_the_incumbent_bit_exact() {
++    fn compound_trial_must_beat_original_incumbent_not_intermediate_trial() {
+         let design = Design::new();
+         let device = Device::rectangular_logic(1, 1).unwrap();
+         let placement = placement_from_partial_bindings(
+@@ -5900,14 +6564,26 @@
+         let mut candidate = implementation.clone();
+         candidate.total_pips = 99;
+ 
+-        assert!(!commit_strict_route_eco_candidate(
++        // A second move can improve a -200 ps bridge to -150 ps without
++        // beating the -100 ps original. Neither that nor a plateau may commit.
++        for slack in [-150, -100] {
++            assert!(!commit_strict_route_eco_candidate(
++                &mut implementation,
++                &mut timing,
++                candidate.clone(),
++                timing_at(slack),
++            ));
++            assert_eq!(implementation, before_implementation);
++            assert_eq!(timing, before_timing);
++        }
++        assert!(commit_strict_route_eco_candidate(
+             &mut implementation,
+             &mut timing,
+-            candidate,
+-            timing_at(-100),
++            candidate.clone(),
++            timing_at(-90),
+         ));
+-        assert_eq!(implementation, before_implementation);
+-        assert_eq!(timing, before_timing);
++        assert_eq!(implementation, candidate);
++        assert_eq!(timing, timing_at(-90));
+     }
+ 
+     #[test]
+@@ -5960,6 +6636,32 @@
+     }
+ 
+     #[test]
++    fn hold_owner_floor_spends_only_existing_positive_slack() {
++        assert_eq!(super::hold_route_floor(47, -15), 62);
++        assert_eq!(super::hold_route_floor(80, 18), 62);
++        assert_eq!(super::hold_route_floor(62, 0), 62);
++        assert_eq!(super::hold_route_floor(20, 40), 0);
++        assert_eq!(super::hold_route_floor(u64::MAX, -1), u64::MAX);
++        assert_eq!(super::hold_route_floor(1, i128::MIN), u64::MAX);
++    }
++
++    #[test]
++    fn isolated_hold_trials_preserve_all_fanout_sink_floors() {
++        let a = (NetId(1), texo_model::CellPinId(10));
++        let b = (NetId(1), texo_model::CellPinId(11));
++        let c = (NetId(2), texo_model::CellPinId(20));
++        let first = BTreeMap::from([(a, 120), (b, 190)]);
++        let second = BTreeMap::from([(c, 80)]);
++        let all = BTreeMap::from([(a, 120), (b, 190), (c, 80)]);
++        assert_eq!(
++            super::hold_minimums_by_net(&all),
++            vec![first.clone(), second]
++        );
++        assert!(super::hold_minimums_by_net(&first).is_empty());
++        assert!(super::hold_minimums_by_net(&BTreeMap::new()).is_empty());
++    }
++
++    #[test]
+     fn hold_feedback_retains_and_strengthens_prior_sink_floors() {
+         let first = (NetId(1), texo_model::CellPinId(10));
+         let second = (NetId(2), texo_model::CellPinId(20));
+@@ -6642,6 +7344,33 @@
+                 );
+             }
+         }
++        record.arcs.retain(|arc| {
++            let first = if arc.from_pin.starts_with("SIGNED") {
++                18
++            } else {
++                arc.from_pin[1..].parse::<u32>().unwrap()
++            };
++            arc.to_pin[1..].parse::<u32>().unwrap() >= first
++        });
++        assert_eq!(record.arcs.len(), 1026);
++        *grade.cells.last_mut().unwrap() = record.clone();
++        let physical = model(&grade).unwrap();
++        assert!(
++            physical
++                .cell_arc(
++                    find_cell_pin(&design, dsp, "A17").unwrap(),
++                    find_cell_pin(&design, dsp, "P0").unwrap()
++                )
++                .is_none()
++        );
++        assert!(
++            physical
++                .cell_arc(
++                    find_cell_pin(&design, dsp, "SIGNEDA").unwrap(),
++                    find_cell_pin(&design, dsp, "P35").unwrap()
++                )
++                .is_some()
++        );
+         record.arcs.pop();
+         *grade.cells.last_mut().unwrap() = record;
+         assert!(matches!(
+--- a/crates/texo-flow/src/measured_placement.rs
++++ b/crates/texo-flow/src/measured_placement.rs
+@@ -0,0 +1,422 @@
++//! Measured LUT-hop ranking. Combined LUT/route measurements are never inserted
++//! into a net-only STA arc. Unmeasured edges receive no synthetic delay.
++use serde::Deserialize;
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::collections::{BTreeMap, BTreeSet};
++use std::path::Path;
++use texo_model::{BelId, CellId, CellPinId, Design, NetId, ResourceKind};
++use texo_pnr::{Placement, PlacementConstraints, placement_from_complete_bindings};
++use texo_target_ecp5::Ecp5Architecture;
++use texo_timing::TimingReport;
++
++/// Validated measured ranking data with immutable source provenance.
++#[derive(Clone, Debug)]
++pub struct MeasuredPlacementModel {
++    coefficients: BTreeMap<String, [f64; 6]>,
++    holdout_error: f64,
++    sha256: String,
++    source: String,
++}
++
++#[derive(Deserialize)]
++struct Record {
++    schema: u32,
++    kind: String,
++    device: String,
++    package: String,
++    features: Vec<String>,
++    coefficients_by_input_pin_ps: BTreeMap<String, [f64; 6]>,
++    holdout_max_abs_relative_error: f64,
++    input_sha256: BTreeMap<String, String>,
++    sta_qualified: bool,
++}
++
++impl MeasuredPlacementModel {
++    /// Load and verify every measured input hash. No guessed-model fallback.
++    ///
++    /// # Errors
++    /// Rejects missing/tampered inputs, incompatible target or invalid fit.
++    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
++        let bytes = std::fs::read(path)?;
++        let r: Record = serde_json::from_slice(&bytes)?;
++        if r.schema != 1
++            || r.kind != "measured_loop_average_lut_plus_route_cost"
++            || r.device != "LFE5UM5G-85F"
++            || r.package != "CABGA381"
++            || r.sta_qualified
++            || r.features
++                != [
++                    "lut_hops",
++                    "x_near_tiles",
++                    "x_far_tiles",
++                    "y_near_tiles",
++                    "y_far_tiles",
++                    "loop_offset",
++                ]
++            || r.coefficients_by_input_pin_ps
++                .keys()
++                .map(String::as_str)
++                .collect::<Vec<_>>()
++                != ["A", "B", "C", "D"]
++            || !r.holdout_max_abs_relative_error.is_finite()
++            || !(0.0..=0.10).contains(&r.holdout_max_abs_relative_error)
++            || r.coefficients_by_input_pin_ps
++                .values()
++                .flatten()
++                .any(|v| !v.is_finite() || *v < 0.0)
++            || r.input_sha256.is_empty()
++        {
++            return Err("invalid measured placement model or failed independent holdout".into());
++        }
++        for (file, expected) in &r.input_sha256 {
++            let actual = format!("{:x}", Sha256::digest(std::fs::read(file)?));
++            if actual != *expected {
++                return Err(format!("measured input hash mismatch: {file}").into());
++            }
++        }
++        Ok(Self {
++            coefficients: r.coefficients_by_input_pin_ps,
++            holdout_error: r.holdout_max_abs_relative_error,
++            sha256: format!("{:x}", Sha256::digest(&bytes)),
++            source: path.canonicalize()?.display().to_string(),
++        })
++    }
++
++    pub(super) fn provenance(&self) -> Value {
++        json!({"kind":"measured_lut_hop_ranking_v1", "model_path":self.source,
++            "model_sha256":self.sha256, "holdout_max_abs_relative_error":self.holdout_error,
++            "guessed_placement_predictor_enabled":false, "sta_model_replaced":false,
++            "scope":"K0 F to K0 A/B/C/D, one logical sink, nonzero displacement, major axis <=12 tiles and minor axis <=2",
++            "acceptance":"fresh whole-design routed STA, no worse setup or hold slack",
++            "uncovered_edges":"not scored; all affected nets rerouted and timed"})
++    }
++
++    fn hop(
++        &self,
++        source: &str,
++        sink: &str,
++        pin: &str,
++        dx: u32,
++        dy: u32,
++        fanout: usize,
++    ) -> Option<f64> {
++        if !source.ends_with(".K0")
++            || !sink.ends_with(".K0")
++            || fanout != 1
++            || dx + dy == 0
++            || dx.max(dy) > 12
++            || dx.min(dy) > 2
++        {
++            return None;
++        }
++        let c = self.coefficients.get(pin)?;
++        // Ring-specific gate/observer offset is deliberately not charged per hop.
++        let f = [
++            1.0,
++            f64::from(dx.min(5)),
++            f64::from(dx.saturating_sub(5)),
++            f64::from(dy.min(5)),
++            f64::from(dy.saturating_sub(5)),
++            0.0,
++        ];
++        Some(c.iter().zip(f).map(|(a, b)| a * b).sum())
++    }
++}
++
++pub(super) struct Proposal {
++    pub placement: Placement,
++    pub nets: BTreeSet<NetId>,
++    pub report: Value,
++}
++
++struct Scored {
++    cell: CellId,
++    target: BelId,
++    nets: BTreeSet<NetId>,
++    before: f64,
++    after: f64,
++    slack: i128,
++    covered: usize,
++    total: usize,
++}
++
++#[allow(clippy::too_many_arguments)]
++fn edge_score(
++    model: &MeasuredPlacementModel,
++    design: &Design,
++    arch: &Ecp5Architecture,
++    place: &Placement,
++    net_id: NetId,
++    sink: CellPinId,
++    moved: CellId,
++    target: BelId,
++) -> Option<f64> {
++    let net = &design.nets()[net_id.0];
++    let driver = &design.pins()[net.driver.0];
++    let sink = &design.pins()[sink.0];
++    if driver.name != "F"
++        || design.cells()[driver.cell.0].kind != ResourceKind::Lut(4)
++        || design.cells()[sink.cell.0].kind != ResourceKind::Lut(4)
++    {
++        return None;
++    }
++    let sb = if driver.cell == moved {
++        target
++    } else {
++        place.bel(driver.cell)?
++    };
++    let tb = if sink.cell == moved {
++        target
++    } else {
++        place.bel(sink.cell)?
++    };
++    let source = &arch.device().bels()[sb.0];
++    let target = &arch.device().bels()[tb.0];
++    model.hop(
++        &source.name,
++        &target.name,
++        &sink.name,
++        source.point.x.abs_diff(target.point.x),
++        source.point.y.abs_diff(target.point.y),
++        net.sinks.len(),
++    )
++}
++
++/// Rank legal local moves using measurements; routed STA only orders urgency.
++#[allow(clippy::too_many_lines)]
++pub(super) fn propose(
++    model: &MeasuredPlacementModel,
++    design: &Design,
++    arch: &Ecp5Architecture,
++    constraints: &PlacementConstraints,
++    place: &Placement,
++    timing: &TimingReport,
++) -> Vec<Proposal> {
++    let occupied: BTreeSet<_> = place.bindings().iter().copied().collect();
++    let grouped: BTreeSet<_> = constraints
++        .groups()
++        .iter()
++        .flat_map(|g| g.cells.iter().copied())
++        .collect();
++    let mut free = BTreeMap::<(u32, u32), Vec<BelId>>::new();
++    for (i, b) in arch.device().bels().iter().enumerate() {
++        if b.kind == ResourceKind::Lut(4)
++            && b.name.ends_with(".K0")
++            && !occupied.contains(&BelId(i))
++        {
++            free.entry((b.point.x, b.point.y))
++                .or_default()
++                .push(BelId(i));
++        }
++    }
++    let mut incidents = vec![Vec::new(); design.cells().len()];
++    for (i, n) in design.nets().iter().enumerate() {
++        let source = design.pins()[n.driver.0].cell;
++        for &sink in &n.sinks {
++            incidents[source.0].push((NetId(i), sink));
++            let target = design.pins()[sink.0].cell;
++            if target != source {
++                incidents[target.0].push((NetId(i), sink));
++            }
++        }
++    }
++    let mut slacks = BTreeMap::<NetId, i128>::new();
++    for s in &timing.net_setup_slacks {
++        slacks
++            .entry(s.net)
++            .and_modify(|v| *v = (*v).min(s.slack_ps))
++            .or_insert(s.slack_ps);
++    }
++    let mut scored = Vec::new();
++    for (i, c) in design.cells().iter().enumerate() {
++        let cell = CellId(i);
++        let Some(old) = place.bel(cell) else {
++            continue;
++        };
++        if c.kind != ResourceKind::Lut(4)
++            || grouped.contains(&cell)
++            || !arch.device().bels()[old.0].name.ends_with(".K0")
++        {
++            continue;
++        }
++        let incident = &incidents[i];
++        let covered = incident
++            .iter()
++            .filter_map(|&(n, s)| {
++                edge_score(model, design, arch, place, n, s, cell, old).map(|v| (n, s, v))
++            })
++            .collect::<Vec<_>>();
++        if covered.is_empty() || covered.len() * 2 < incident.len() {
++            continue;
++        }
++        let slack = covered
++            .iter()
++            .filter_map(|(n, _, _)| slacks.get(n))
++            .copied()
++            .min()
++            .unwrap_or(i128::MAX);
++        if slack > 2000 {
++            continue;
++        }
++        let before: f64 = covered.iter().map(|(_, _, v)| v).sum();
++        let point = arch.device().bels()[old.0].point;
++        for dx in -3..=3 {
++            for dy in -3..=3 {
++                let (Some(x), Some(y)) = (
++                    point.x.checked_add_signed(dx),
++                    point.y.checked_add_signed(dy),
++                ) else {
++                    continue;
++                };
++                for &target in free.get(&(x, y)).into_iter().flatten() {
++                    let Some(after) = covered
++                        .iter()
++                        .map(|&(n, s, _)| {
++                            edge_score(model, design, arch, place, n, s, cell, target)
++                        })
++                        .sum::<Option<f64>>()
++                    else {
++                        continue;
++                    };
++                    if before - after <= (2.0 * model.holdout_error * before).max(100.0) {
++                        continue;
++                    }
++                    scored.push(Scored {
++                        cell,
++                        target,
++                        nets: incident.iter().map(|(n, _)| *n).collect(),
++                        before,
++                        after,
++                        slack,
++                        covered: covered.len(),
++                        total: incident.len(),
++                    });
++                }
++            }
++        }
++    }
++    scored.sort_by(|a, b| {
++        a.slack
++            .cmp(&b.slack)
++            .then_with(|| (b.before - b.after).total_cmp(&(a.before - a.after)))
++            .then_with(|| {
++                design.cells()[a.cell.0]
++                    .name
++                    .cmp(&design.cells()[b.cell.0].name)
++            })
++            .then_with(|| {
++                arch.device().bels()[a.target.0]
++                    .name
++                    .cmp(&arch.device().bels()[b.target.0].name)
++            })
++    });
++    let mut proposals = Vec::new();
++    for s in scored {
++        let mut bindings = place.bindings().to_vec();
++        let old = bindings[s.cell.0];
++        bindings[s.cell.0] = s.target;
++        // Enforces carry occupancy, packed FFs, pin bindings and shared resources.
++        let Ok(placement) =
++            placement_from_complete_bindings(design, arch.device(), constraints, bindings)
++        else {
++            continue;
++        };
++        let report = json!({"cell":design.cells()[s.cell.0].name,"old":arch.device().bels()[old.0].name,
++            "new":arch.device().bels()[s.target.0].name,"score_before_ps":s.before,"score_after_ps":s.after,
++            "modeled_incident_hops":s.covered,"unmodeled_incident_hops":s.total-s.covered,
++            "minimum_incident_native_slack_ps":s.slack,"incident_nets":s.nets.iter().map(|n|&design.nets()[n.0].name).collect::<Vec<_>>()});
++        proposals.push(Proposal {
++            placement,
++            nets: s.nets,
++            report,
++        });
++        if proposals.len() == 4 {
++            break;
++        }
++    }
++    proposals
++}
++
++pub(super) fn accepts(incumbent: &TimingReport, candidate: &TimingReport) -> bool {
++    candidate.met_timing()
++        && candidate.worst_slack_ps >= incumbent.worst_slack_ps
++        && candidate.worst_hold_slack_ps >= incumbent.worst_hold_slack_ps
++        && candidate.setup_checks.len() == incumbent.setup_checks.len()
++        && candidate.hold_checks.len() == incumbent.hold_checks.len()
++        && candidate.unchecked_endpoints == incumbent.unchecked_endpoints
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn model() -> MeasuredPlacementModel {
++        MeasuredPlacementModel {
++            coefficients: ["A", "B", "C", "D"]
++                .into_iter()
++                .map(|p| (p.into(), [400.0, 30.0, 20.0, 40.0, 25.0, 900.0]))
++                .collect(),
++            holdout_error: 0.04,
++            sha256: String::new(),
++            source: String::new(),
++        }
++    }
++    #[test]
++    fn unsupported_edges_never_receive_fabricated_costs() {
++        let m = model();
++        for (source, sink, pin, dx, dy, fanout) in [
++            ("a.K1", "b.K0", "A", 1, 0, 1),
++            ("a.K0", "b.FF0", "DI", 1, 0, 1),
++            ("a.K0", "b.K0", "A", 1, 0, 2),
++            ("a.K0", "b.K0", "A", 13, 0, 1),
++            ("a.K0", "b.K0", "A", 3, 3, 1),
++            ("a.K0", "b.K0", "A", 0, 0, 1),
++        ] {
++            assert_eq!(m.hop(source, sink, pin, dx, dy, fanout), None);
++        }
++    }
++    #[test]
++    fn loop_offset_is_not_double_counted_per_hop() {
++        assert_eq!(model().hop("a.K0", "b.K0", "A", 6, 1, 1), Some(610.0));
++    }
++
++    #[test]
++    fn rejected_timing_cannot_trade_hold_for_setup_or_lose_constraints() {
++        let baseline = TimingReport {
++            net_delays: vec![],
++            net_setup_slacks: vec![],
++            net_setup_criticalities: vec![],
++            setup_checks: vec![],
++            hold_checks: vec![],
++            unchecked_endpoints: vec![],
++            worst_slack_ps: Some(0),
++            worst_hold_slack_ps: Some(90),
++        };
++        assert!(accepts(&baseline, &baseline));
++        for (setup, hold) in [(Some(-1), Some(90)), (Some(100), Some(89)), (None, None)] {
++            let mut next = baseline.clone();
++            next.worst_slack_ps = setup;
++            next.worst_hold_slack_ps = hold;
++            assert!(!accepts(&baseline, &next));
++        }
++    }
++
++    #[test]
++    fn tampered_measurement_is_rejected_before_use() {
++        let dir = std::env::temp_dir().join(format!("texo-measured-input-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let sample = dir.join("sample.json");
++        let model_path = dir.join("model.json");
++        std::fs::write(&sample, b"measured counts").unwrap();
++        let value = json!({"schema":1,"kind":"measured_loop_average_lut_plus_route_cost",
++            "device":"LFE5UM5G-85F","package":"CABGA381","sta_qualified":false,
++            "features":["lut_hops","x_near_tiles","x_far_tiles","y_near_tiles","y_far_tiles","loop_offset"],
++            "coefficients_by_input_pin_ps":model().coefficients,"holdout_max_abs_relative_error":0.04,
++            "input_sha256":{sample.display().to_string():format!("{:x}",Sha256::digest(b"measured counts"))}});
++        std::fs::write(&model_path, serde_json::to_vec(&value).unwrap()).unwrap();
++        assert!(MeasuredPlacementModel::load(&model_path).is_ok());
++        std::fs::write(&sample, b"different counts").unwrap();
++        assert!(MeasuredPlacementModel::load(&model_path).is_err());
++        std::fs::remove_dir_all(dir).unwrap();
++    }
++}
+--- a/crates/texo-flow/src/routed_cell_timing.rs
++++ b/crates/texo-flow/src/routed_cell_timing.rs
+@@ -0,0 +1,302 @@
++//! Select cell input delays after physical LUT input permutation is known.
++use super::*;
++use std::borrow::Cow;
++
++pub(super) fn has_input_asymmetry(grade: &SpeedGradeRecord) -> bool {
++    grade.cells.iter().any(|cell| {
++        let mut outputs = BTreeMap::new();
++        cell.arcs
++            .iter()
++            .filter(|a| matches!(a.from_pin.as_str(), "A" | "B" | "C" | "D"))
++            .any(|a| {
++                outputs
++                    .insert(&a.to_pin, a.delay)
++                    .is_some_and(|old| old != a.delay)
++            })
++    })
++}
++
++pub(super) fn resolve<'a>(
++    design: &Design,
++    architecture: &Ecp5Architecture,
++    grade: &SpeedGradeRecord,
++    implementation: &PnrResult,
++    model: &'a TimingModel,
++) -> Result<Cow<'a, TimingModel>, Ecp5FlowError> {
++    if !has_input_asymmetry(grade) {
++        return Ok(Cow::Borrowed(model));
++    }
++    let records = grade
++        .cells
++        .iter()
++        .map(|c| (c.cell_type.as_str(), c))
++        .collect::<BTreeMap<_, _>>();
++    let mut result = Cow::Borrowed(model);
++    for route in &implementation.routes {
++        for arc in &route.arcs {
++            let Some(sink) = arc.sink else {
++                continue;
++            };
++            let pin = &design.pins()[sink.0];
++            if design.cells()[pin.cell.0].kind != ResourceKind::Lut(4)
++                || !matches!(pin.name.as_str(), "A" | "B" | "C" | "D")
++            {
++                continue;
++            }
++            let bel = implementation
++                .placement
++                .bel(pin.cell)
++                .expect("routed cell is placed");
++            let bound = implementation
++                .placement
++                .pin_binding(sink)
++                .or_else(|| {
++                    architecture.device().bels()[bel.0]
++                        .pins()
++                        .iter()
++                        .copied()
++                        .find(|id| architecture.device().bel_pins()[id.0].name == pin.name)
++                })
++                .ok_or_else(|| PnrError::InvalidPlacement {
++                    reason: format!(
++                        "missing physical LUT input {}.{}",
++                        design.cells()[pin.cell.0].name,
++                        pin.name
++                    ),
++                })?;
++            let physical = &architecture.device().bel_pins()[bound.0];
++            let mut input = physical.name.as_str();
++            for &pip in &arc.pips {
++                if architecture.device().pips()[pip.0].to() != physical.wire {
++                    continue;
++                }
++                let flags = architecture.pip_metadata(pip).lutperm_flags;
++                if flags & 0x4000 != 0 {
++                    // D0 -> B0_SLICE (0x4007) routes logical B through
++                    // physical D. The bit generator permutes INIT accordingly.
++                    input = ["A", "B", "C", "D"][usize::from(flags & 3)];
++                }
++            }
++            if input == pin.name {
++                continue;
++            }
++            let carry = find_cell_pin(design, pin.cell, "FCO").is_some();
++            let ordinary = if carry {
++                if architecture.device().bels()[bel.0].name.ends_with(".K0") {
++                    "TRELLIS_CARRY0"
++                } else {
++                    "TRELLIS_CARRY1"
++                }
++            } else {
++                "TRELLIS_COMB"
++            };
++            for output in ["F", "FCO", "OFX"] {
++                let Some(to) = find_cell_pin(design, pin.cell, output) else {
++                    continue;
++                };
++                if model.cell_arc(sink, to).is_none() {
++                    continue;
++                }
++                let kind = if output == "OFX" {
++                    "TRELLIS_PFUMX"
++                } else {
++                    ordinary
++                };
++                let record = records
++                    .get(kind)
++                    .ok_or_else(|| Ecp5FlowError::MissingCellTiming {
++                        speed_grade: grade.name.clone(),
++                        cell_type: kind.into(),
++                    })?;
++                let measured = record
++                    .arcs
++                    .iter()
++                    .find(|a| a.from_pin == input && a.to_pin == output)
++                    .ok_or_else(|| Ecp5FlowError::MissingCellTiming {
++                        speed_grade: grade.name.clone(),
++                        cell_type: format!("{kind}:{input}->{output}"),
++                    })?;
++                let changed =
++                    result
++                        .to_mut()
++                        .update_cell_arc_delay(sink, to, timing_delay(measured.delay)?);
++                debug_assert!(changed);
++            }
++        }
++    }
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use texo_pnr::RouteArc;
++    use texo_target_ecp5::{DelayRangeRecord, read_architecture};
++
++    #[test]
++    fn routed_d_to_b_uses_physical_delay_and_does_not_mutate_the_logical_model() {
++        let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
++            "../../texo-target-ecp5/fixtures/minimal-ecp5.json"
++        ))
++        .unwrap();
++        fixture["location_types"][0]["pips"]
++            .as_array_mut()
++            .unwrap()
++            .push(serde_json::json!({
++                "from":{"dx":0,"dy":0,"index":3},"to":{"dx":0,"dy":0,"index":1},
++                "fixed":false,"tile_type":"PLC2","timing_class":"default","lutperm_flags":0x4007
++            }));
++        let arch = read_architecture(serde_json::to_vec(&fixture).unwrap().as_slice()).unwrap();
++        let mut grade = arch.speed_grades()["6"].clone();
++        let lut = grade
++            .cells
++            .iter_mut()
++            .find(|c| c.cell_type == "TRELLIS_COMB")
++            .unwrap();
++        for arc in &mut lut.arcs {
++            arc.delay = if arc.from_pin == "D" {
++                DelayRangeRecord {
++                    min_ps: 20,
++                    max_ps: 40,
++                }
++            } else {
++                DelayRangeRecord {
++                    min_ps: 100,
++                    max_ps: 200,
++                }
++            };
++        }
++        let mut design = Design::new();
++        let cell = design.add_cell("lut", ResourceKind::Lut(4));
++        let input = design.add_pin(cell, "B", PinDirection::Input).unwrap();
++        let output = design.add_pin(cell, "F", PinDirection::Output).unwrap();
++        let bel = arch
++            .device()
++            .bels()
++            .iter()
++            .position(|b| b.name == "R0C0/SLICEA.K0")
++            .map(BelId)
++            .unwrap();
++        let placement = placement_from_complete_bindings(
++            &design,
++            arch.device(),
++            &PlacementConstraints::default(),
++            vec![bel],
++        )
++        .unwrap();
++        let bound = arch.device().bels()[bel.0]
++            .pins()
++            .iter()
++            .copied()
++            .find(|id| arch.device().bel_pins()[id.0].name == "B")
++            .unwrap();
++        let wire = arch.device().bel_pins()[bound.0].wire;
++        let pip = arch
++            .device()
++            .pips()
++            .iter()
++            .enumerate()
++            .find(|(i, p)| p.to() == wire && arch.pip_metadata(PipId(*i)).lutperm_flags == 0x4007)
++            .map(|(i, _)| PipId(i))
++            .unwrap();
++        // This synthetic unit fixture checks cell remapping only, not routing.
++        let mut implementation = PnrResult {
++            placement,
++            routes: vec![Arc::new(NetRoute::new(
++                NetId(0),
++                vec![RouteArc {
++                    sink: Some(input),
++                    wires: vec![arch.device().pips()[pip.0].from(), wire],
++                    pips: vec![pip],
++                }],
++            ))],
++            total_pips: 1,
++        };
++        let mut model = TimingModel::new();
++        model
++            .add_cell_arc(input, output, DelayRange::new(100, 200).unwrap())
++            .unwrap();
++        let physical = resolve(&design, &arch, &grade, &implementation, &model).unwrap();
++        assert_eq!(
++            physical.cell_arc(input, output),
++            Some(DelayRange::new(20, 40).unwrap())
++        );
++        assert_eq!(
++            model.cell_arc(input, output),
++            Some(DelayRange::new(100, 200).unwrap())
++        );
++        assert!(!model.update_cell_arc_delay(output, input, DelayRange::new(1, 2).unwrap()));
++        implementation.routes.clear();
++        let rerouted = resolve(&design, &arch, &grade, &implementation, &model).unwrap();
++        assert_eq!(
++            rerouted.cell_arc(input, output),
++            Some(DelayRange::new(100, 200).unwrap())
++        );
++        let constraints = TimingConstraints::new();
++        let session =
++            Ecp5EcoTimingSession::new(&design, &arch, &grade, &model, &constraints).unwrap();
++        assert!(session.routed_model_inputs.is_some());
++        let costs = InputCosts::new(&grade).unwrap();
++        assert_eq!(costs.pip_penalty(&arch, pip), 0); // Physical D is the fastest input.
++        let direct = arch
++            .device()
++            .pips()
++            .iter()
++            .enumerate()
++            .find(|(i, p)| p.to() == wire && arch.pip_metadata(PipId(*i)).lutperm_flags == 0)
++            .map(|(i, _)| PipId(i))
++            .unwrap();
++        assert_eq!(costs.pip_penalty(&arch, direct), 160); // Direct B must pay B-D.
++    }
++}
++
++/// Relative cell-input cost for route ranking, never a net-delay STA label.
++pub(super) struct InputCosts([u32; 4]);
++impl InputCosts {
++    pub(super) fn new(grade: &SpeedGradeRecord) -> Result<Self, Ecp5FlowError> {
++        let mut values = [0; 4];
++        if let Some(record) = grade.cells.iter().find(|c| c.cell_type == "TRELLIS_COMB") {
++            for (i, pin) in ["A", "B", "C", "D"].iter().enumerate() {
++                if let Some(arc) = record
++                    .arcs
++                    .iter()
++                    .find(|a| a.from_pin == *pin && a.to_pin == "F")
++                {
++                    values[i] = u32::try_from(arc.delay.max_ps)
++                        .map_err(|_| Ecp5FlowError::TimingDelayOverflow)?;
++                }
++            }
++        }
++        let base = *values.iter().min().expect("four inputs");
++        Ok(Self(values.map(|v| v - base)))
++    }
++
++    pub(super) fn pip_penalty(&self, architecture: &Ecp5Architecture, pip: PipId) -> u32 {
++        if self.0 == [0; 4] {
++            return 0;
++        }
++        let wire = &architecture.device().wires()[architecture.device().pips()[pip.0].to().0];
++        let Some(stem) = wire
++            .name
++            .rsplit('/')
++            .next()
++            .and_then(|n| n.strip_suffix("_SLICE"))
++        else {
++            return 0;
++        };
++        let bytes = stem.as_bytes();
++        if bytes.len() != 2
++            || !(b'A'..=b'D').contains(&bytes[0])
++            || !(b'0'..=b'7').contains(&bytes[1])
++        {
++            return 0;
++        }
++        let flags = architecture.pip_metadata(pip).lutperm_flags;
++        let input = if flags & 0x4000 == 0 {
++            usize::from(bytes[0] - b'A')
++        } else {
++            usize::from(flags & 3)
++        };
++        self.0[input]
++    }
++}
+--- a/crates/texo-pnr/src/lib.rs
++++ b/crates/texo-pnr/src/lib.rs
+@@ -2070,8 +2070,8 @@
+ #[derive(Default)]
+ pub struct PlacementConnectionDelayWorkspace {
+     delays: PackedRouteMap<Option<u64>>,
+-    queue: BinaryHeap<Reverse<(u64, u8, WireId)>>,
+-    best: PackedRouteMap<[u64; LOCAL_HOP_STATES]>,
++    queue: BinaryHeap<Reverse<(u64, WireId)>>,
++    best: PackedRouteMap<u64>,
+ }
+ 
+ #[derive(Default)]
+@@ -2893,7 +2893,10 @@
+             .iter()
+             .position(|&cell| cell == moving_cell)
+             .expect("the selected unit contains its moving cell");
+-        let broad_path_move = max_move_distance > 2;
++        // Intermediate moves can cross routing-channel boundaries without
++        // shortening Manhattan span. Use actual PIP costs through radius 8;
++        // reserve the coarse span filter for truly broad relocations.
++        let broad_path_move = max_move_distance > 8;
+         // Local moves score by the routed-delay excess over the per-connection
+         // allowance targets so already-satisfied connections stop absorbing
+         // moves. Broad path moves stay span-ranked: measuring excess on every
+@@ -3124,7 +3127,11 @@
+             // which lower-criticality arcs would have to retreat, before
+             // paying for a complete negotiated route and STA trial.
+             const PROJECTION_SHORTLIST: usize = 16;
+-            best.truncate(PROJECTION_SHORTLIST.max(max_candidates));
++            shortlist_vacant_and_swap_moves(
++                &mut best,
++                &assignment_owners,
++                PROJECTION_SHORTLIST.max(max_candidates),
++            );
+             let fallback = best.clone();
+             // Moving one member moves the complete rigid placement unit.  A
+             // carry/FF macro therefore has to project every connection that
+@@ -3168,7 +3175,11 @@
+                 best = projected;
+             }
+         }
+-        best.truncate(max_candidates.max(1));
++        if broad_path_move {
++            shortlist_vacant_and_swap_moves(&mut best, &assignment_owners, max_candidates.max(1));
++        } else {
++            best.truncate(max_candidates.max(1));
++        }
+         let mut proposals = Vec::with_capacity(best.len());
+         for (_, _, selected) in best {
+             let mut proposed = placed.clone();
+@@ -3410,6 +3421,29 @@
+         })
+ }
+ 
++/// Keep vacant destinations visible even when nearer occupied sites dominate
++/// the geometric ranking. A swap can damage the displaced macro's other paths.
++fn shortlist_vacant_and_swap_moves(
++    candidates: &mut Vec<(u64, u64, Vec<BelId>)>,
++    owners: &BTreeMap<Vec<BelId>, usize>,
++    limit: usize,
++) {
++    let (vacant, swaps): (Vec<_>, Vec<_>) = std::mem::take(candidates)
++        .into_iter()
++        .partition(|(_, _, assignment)| !owners.contains_key(assignment));
++    let mut vacant = vacant.into_iter();
++    let mut swaps = swaps.into_iter();
++    for ordinal in 0..limit {
++        let next = if ordinal % 2 == 0 {
++            vacant.next().or_else(|| swaps.next())
++        } else {
++            swaps.next().or_else(|| vacant.next())
++        };
++        let Some(next) = next else { break };
++        candidates.push(next);
++    }
++}
++
+ fn assignment_connection_span(
+     graph: &UnifiedGraph<'_>,
+     unit: &PlacementUnit,
+@@ -3508,13 +3542,13 @@
+     start: WireId,
+     goal: WireId,
+     pip_delays_ps: &[u32],
+-    queue: &mut BinaryHeap<Reverse<(u64, u8, WireId)>>,
+-    best: &mut PackedRouteMap<[u64; LOCAL_HOP_STATES]>,
++    queue: &mut BinaryHeap<Reverse<(u64, WireId)>>,
++    best: &mut PackedRouteMap<u64>,
+ ) -> Option<u64> {
+-    // Long-line entry/exit PIPs can put even a modest tile displacement over
+-    // eight graph edges.  A too-small bound made a badly displaced critical
+-    // vertex impossible to score, so the detailed placer could never move it
+-    // back toward its path.  The one-tile corridor keeps this search local.
++    // The finite spatial corridor bounds the search. A hop-count cutoff can
++    // reject a reachable long connection (including zero-delay access PIPs).
++    // Nonnegative PIP costs allow ordinary Dijkstra with one label per wire;
++    // equal-cost and zero-cost cycles never need another queue entry.
+     const LOCAL_MARGIN: u32 = 1;
+     let device = graph.device();
+     let corridor = routing_corridor(
+@@ -3525,46 +3559,34 @@
+     );
+     queue.clear();
+     best.clear();
+-    queue.push(Reverse((0_u64, 0_u8, start)));
+-    best.insert(start.0 as u64, [0; LOCAL_HOP_STATES]);
+-    while let Some(Reverse((delay, hops, wire))) = queue.pop() {
+-        if wire == goal {
+-            return Some(delay);
+-        }
+-        if hops == MAX_LOCAL_HOPS
+-            || best
+-                .get(&(wire.0 as u64))
+-                .is_some_and(|frontier| frontier[usize::from(hops)] < delay)
++    queue.push(Reverse((0_u64, start)));
++    best.insert(start.0 as u64, 0);
++    while let Some(Reverse((delay, wire))) = queue.pop() {
++        if best
++            .get(&(wire.0 as u64))
++            .is_some_and(|known| *known < delay)
+         {
+             continue;
+         }
++        if wire == goal {
++            return Some(delay);
++        }
+         for (neighbor, pip) in graph.routing_neighbors(wire).ok()? {
+             if !point_inside_corridor(device.wires()[neighbor.0].point, corridor) {
+                 continue;
+             }
+-            let next_hops = hops + 1;
+             let next_delay = delay.saturating_add(u64::from(pip_delays_ps[pip.0]));
+-            let frontier = best
+-                .entry(neighbor.0 as u64)
+-                .or_insert([u64::MAX; LOCAL_HOP_STATES]);
+-            if frontier[usize::from(next_hops)] <= next_delay {
++            let known = best.entry(neighbor.0 as u64).or_insert(u64::MAX);
++            if *known <= next_delay {
+                 continue;
+             }
+-            // A route reaching the same wire in fewer hops and no more delay
+-            // dominates this state for every remaining hop budget.  Store the
+-            // cumulative Pareto frontier so those states never enter the heap.
+-            for known in &mut frontier[usize::from(next_hops)..] {
+-                *known = (*known).min(next_delay);
+-            }
+-            queue.push(Reverse((next_delay, next_hops, neighbor)));
++            *known = next_delay;
++            queue.push(Reverse((next_delay, neighbor)));
+         }
+     }
+     None
+ }
+ 
+-const MAX_LOCAL_HOPS: u8 = 16;
+-const LOCAL_HOP_STATES: usize = MAX_LOCAL_HOPS as usize + 1;
+-
+ #[derive(Clone, Debug)]
+ struct PlacementUnit {
+     cells: Vec<CellId>,
+@@ -10971,6 +10993,44 @@
+     }
+ 
+     #[test]
++    fn broad_shortlist_keeps_a_vacant_destination_beside_nearer_swaps() {
++        let mut design = two_cell_design();
++        design.add_cell("near-occupant", ResourceKind::Logic);
++        design.add_cell("second-occupant", ResourceKind::Logic);
++        let device = Device::rectangular_logic(6, 1).unwrap();
++        let mut constraints = PlacementConstraints::new();
++        constraints.add_group([CellId(1)], [vec![BelId(5)]]);
++        let placement = placement_from_complete_bindings(
++            &design,
++            &device,
++            &constraints,
++            vec![BelId(0), BelId(5), BelId(4), BelId(3)],
++        )
++        .unwrap();
++        let net = &design.nets()[0];
++        let proposals = PlacementRefiner::new(&design, &device, &constraints)
++            .unwrap()
++            .refine_cell_connection_delays(
++                placement,
++                CellId(0),
++                &[(net.driver, net.sinks[0])],
++                &[0],
++                &vec![1; device.pips().len()],
++                None,
++                16,
++                2,
++            )
++            .unwrap();
++        assert_eq!(proposals.len(), 2);
++        assert_eq!(proposals[0].bel(CellId(0)), Some(BelId(2)));
++        assert_eq!(proposals[0].bel(CellId(2)), Some(BelId(4)));
++        assert_eq!(proposals[0].bel(CellId(3)), Some(BelId(3)));
++        assert_eq!(proposals[1].bel(CellId(0)), Some(BelId(4)));
++        assert_eq!(proposals[1].bel(CellId(2)), Some(BelId(0)));
++        assert!(proposals.iter().all(|p| p.bel(CellId(1)) == Some(BelId(5))));
++    }
++
++    #[test]
+     fn connection_swap_works_without_empty_bels_and_preserves_fixed_cells() {
+         let mut design = two_cell_design();
+         design.add_cell("neutral", ResourceKind::Logic);
+@@ -12345,9 +12405,8 @@
+         ));
+     }
+ 
+-    #[test]
+     #[allow(clippy::too_many_lines)] // Keep the placement proposal and its legal physical reroute together.
+-    fn routed_incumbent_exposes_a_local_move_hidden_by_an_occupied_shortcut() {
++    fn check_routed_incumbent_move(point: Point, radius: u64) {
+         let mut fixture = net_cohort_eco_fixture();
+         let net = &fixture.design.nets()[0];
+         let source_cell = fixture.design.pins()[net.driver.0].cell;
+@@ -12358,13 +12417,10 @@
+             .wires
+             .last()
+             .unwrap();
+-        let near_wire = fixture
+-            .device
+-            .add_wire("near-driver", Point::new(1, 0), 1)
+-            .unwrap();
++        let near_wire = fixture.device.add_wire("near-driver", point, 1).unwrap();
+         let near_bel = fixture
+             .device
+-            .add_bel("near-source", ResourceKind::Logic, Point::new(1, 0))
++            .add_bel("near-source", ResourceKind::Logic, point)
+             .unwrap();
+         fixture
+             .device
+@@ -12405,7 +12461,7 @@
+                 &[100],
+                 costs.pip_delays_ps(),
+                 None,
+-                2,
++                radius,
+                 8,
+             )
+             .unwrap();
+@@ -12422,7 +12478,7 @@
+                 &[100],
+                 costs.pip_delays_ps(),
+                 None,
+-                2,
++                radius,
+                 8,
+             )
+             .unwrap();
+@@ -12440,7 +12496,7 @@
+             &[100],
+             costs.pip_delays_ps(),
+             None,
+-            2,
++            radius,
+             8,
+         );
+         assert!(invalid.is_err());
+@@ -12468,6 +12524,64 @@
+     }
+ 
+     #[test]
++    fn routed_incumbent_exposes_a_local_move_hidden_by_an_occupied_shortcut() {
++        check_routed_incumbent_move(Point::new(1, 0), 2);
++    }
++
++    #[test]
++    fn local_delay_search_handles_long_paths_and_zero_cost_cycles() {
++        let design = Design::new();
++        let mut device = Device::new("long-local-path", 3, 1).unwrap();
++        let wires = (0..=24)
++            .map(|i| {
++                device
++                    .add_wire(format!("w{i}"), Point::new(1, 0), 1)
++                    .unwrap()
++            })
++            .collect::<Vec<_>>();
++        let mut delays = Vec::new();
++        for pair in wires.windows(2) {
++            device.add_pip(pair[0], pair[1], false, 1).unwrap();
++            delays.push(3);
++        }
++        device.add_pip(wires[12], wires[11], false, 1).unwrap();
++        delays.push(0);
++        delays[11] = 0; // w11 <-> w12 is a zero-cost cycle.
++        let unreachable = device.add_wire("unreachable", Point::new(1, 0), 1).unwrap();
++        let graph = UnifiedGraph::new(&design, &device);
++        let mut workspace = super::PlacementConnectionDelayWorkspace::new();
++        assert_eq!(
++            super::local_connection_delay(
++                &graph,
++                wires[0],
++                wires[24],
++                &delays,
++                &mut workspace.queue,
++                &mut workspace.best
++            ),
++            Some(69)
++        );
++        assert_eq!(
++            super::local_connection_delay(
++                &graph,
++                wires[0],
++                unreachable,
++                &delays,
++                &mut workspace.queue,
++                &mut workspace.best
++            ),
++            None
++        );
++    }
++
++    #[test]
++    fn intermediate_move_uses_pip_delay_even_when_manhattan_span_is_unchanged() {
++        // (0,0)->(4,0) and (2,2)->(4,0) both span four tiles, but
++        // the latter has a legal 60 ps path instead of the 800 ps detour.
++        check_routed_incumbent_move(Point::new(2, 2), 4);
++    }
++
++    #[test]
+     fn placement_owner_probe_releases_a_blocker_but_never_an_immutable_route() {
+         let mut fixture = net_cohort_eco_fixture();
+         let before = fixture.incumbent.clone();
+--- a/crates/texo-target-ecp5/examples/measured_surface.rs
++++ b/crates/texo-target-ecp5/examples/measured_surface.rs
+@@ -0,0 +1,52 @@
++//! Export physical resource identities for measurements; delays are not labels.
++use std::collections::HashMap;
++use std::error::Error;
++use std::fs::File;
++use std::io::{BufReader, BufWriter};
++use texo_model::PipId;
++use texo_target_ecp5::read_architecture_cache;
++
++fn main() -> Result<(), Box<dyn Error>> {
++    let args: Vec<_> = std::env::args().collect();
++    assert_eq!(args.len(), 4, "architecture.txdb requests.json output.json");
++    let architecture = read_architecture_cache(BufReader::new(File::open(&args[1])?))?;
++    let device = architecture.device();
++    let requests: Vec<(String, String)> =
++        serde_json::from_reader(BufReader::new(File::open(&args[2])?))?;
++    let names: HashMap<_, _> = device
++        .wires()
++        .iter()
++        .enumerate()
++        .map(|(id, w)| (w.name.as_str(), id))
++        .collect();
++    let mut wanted: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
++    for (index, (source, sink)) in requests.iter().enumerate() {
++        if let (Some(&a), Some(&b)) = (names.get(source.as_str()), names.get(sink.as_str())) {
++            wanted.entry((a, b)).or_default().push(index);
++        }
++    }
++    drop(names);
++    let mut matches = vec![Vec::new(); requests.len()];
++    for (id, pip) in device.pips().iter().enumerate() {
++        if let Some(indices) = wanted.get(&(pip.from().0, pip.to().0)) {
++            let meta = architecture.pip_metadata(PipId(id));
++            let value = serde_json::json!({"pip_id":id,"class":meta.timing_class,"fixed":meta.fixed,"lutperm_flags":meta.lutperm_flags});
++            for &index in indices {
++                matches[index].push(value.clone());
++            }
++        }
++    }
++    let covered = matches.iter().filter(|m| !m.is_empty()).count();
++    serde_json::to_writer(
++        BufWriter::new(File::create(&args[3])?),
++        &serde_json::json!({
++            "resource_identities_only":true,"request_count":requests.len(),"matched":covered,"matches":matches,
++            "timing_surface_for_coverage_only":architecture.speed_grades()["8_5G"],
++        }),
++    )?;
++    println!(
++        "Mapped {covered}/{} requested physical arcs",
++        requests.len()
++    );
++    Ok(())
++}
+--- a/crates/texo-target-ecp5/examples/measurement_identities.rs
++++ b/crates/texo-target-ecp5/examples/measurement_identities.rs
+@@ -0,0 +1,70 @@
++//! Export physical resource identities for measurements; delays are not labels.
++use std::collections::{BTreeMap, BTreeSet, HashMap};
++use std::error::Error;
++use std::fs::File;
++use std::io::{BufReader, BufWriter};
++use texo_model::PipId;
++use texo_target_ecp5::read_architecture_cache;
++
++fn main() -> Result<(), Box<dyn Error>> {
++    let args: Vec<_> = std::env::args().collect();
++    assert_eq!(args.len(), 4, "architecture.txdb requests.json output.json");
++    let architecture = read_architecture_cache(BufReader::new(File::open(&args[1])?))?;
++    let device = architecture.device();
++    let input: serde_json::Value = serde_json::from_reader(BufReader::new(File::open(&args[2])?))?;
++    let requests: Vec<(String, String)> = serde_json::from_value(input["pips"].clone())?;
++    let wanted_bels: BTreeSet<String> = serde_json::from_value(input["bels"].clone())?;
++    let mut bels = BTreeMap::new();
++    for bel in device.bels() {
++        if wanted_bels.contains(&bel.name) {
++            let pins: BTreeMap<_, _> = bel
++                .pins()
++                .iter()
++                .map(|id| {
++                    let pin = &device.bel_pins()[id.0];
++                    (pin.name.clone(), device.wires()[pin.wire.0].name.clone())
++                })
++                .collect();
++            bels.insert(bel.name.clone(), pins);
++        }
++    }
++    if bels.len() != wanted_bels.len() {
++        return Err("missing requested physical BEL".into());
++    }
++    let names: HashMap<_, _> = device
++        .wires()
++        .iter()
++        .enumerate()
++        .map(|(id, w)| (w.name.as_str(), id))
++        .collect();
++    let mut wanted: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
++    for (index, (source, sink)) in requests.iter().enumerate() {
++        if let (Some(&a), Some(&b)) = (names.get(source.as_str()), names.get(sink.as_str())) {
++            wanted.entry((a, b)).or_default().push(index);
++        }
++    }
++    drop(names);
++    let mut matches = vec![Vec::new(); requests.len()];
++    for (id, pip) in device.pips().iter().enumerate() {
++        if let Some(indices) = wanted.get(&(pip.from().0, pip.to().0)) {
++            let meta = architecture.pip_metadata(PipId(id));
++            let value = serde_json::json!({"pip_id":id,"class":meta.timing_class,"fixed":meta.fixed,"lutperm_flags":meta.lutperm_flags});
++            for &index in indices {
++                matches[index].push(value.clone());
++            }
++        }
++    }
++    let covered = matches.iter().filter(|m| !m.is_empty()).count();
++    serde_json::to_writer(
++        BufWriter::new(File::create(&args[3])?),
++        &serde_json::json!({
++            "resource_identities_only":true,"request_count":requests.len(),"matched":covered,"matches":matches,
++            "bel_pins":bels,
++        }),
++    )?;
++    println!(
++        "Mapped {covered}/{} requested physical arcs",
++        requests.len()
++    );
++    Ok(())
++}
+--- a/crates/texo-target-ecp5/src/lib.rs
++++ b/crates/texo-target-ecp5/src/lib.rs
+@@ -683,6 +683,95 @@
+         &self.speed_grades
+     }
+ 
++    /// Replace an entire timing grade. Missing classes/arcs are errors, never fallback.
++    ///
++    /// # Errors
++    /// Rejects a different surface, duplicate arcs, or inverted delay ranges.
++    pub fn replace_timing_grade(&mut self, replacement: SpeedGradeRecord) -> Result<(), String> {
++        fn surface(
++            grade: &SpeedGradeRecord,
++            remove_impossible_dsp_arcs: bool,
++        ) -> Result<BTreeSet<String>, String> {
++            let mut result = BTreeSet::new();
++            let mut add = |key: String| {
++                if result.insert(key) {
++                    Ok(())
++                } else {
++                    Err("duplicate timing entry".to_string())
++                }
++            };
++            for c in &grade.cells {
++                add(format!("cell:{}", c.cell_type))?;
++                for a in &c.arcs {
++                    // Multiplication modulo 2^j is independent of input bits
++                    // numbered j or above. Signed correction is a multiple of
++                    // 2^18. Legacy dense tables contain these non-existent arcs;
++                    // a complete measured library must omit, not fit, them.
++                    if remove_impossible_dsp_arcs
++                        && c.cell_type == "MULT18X18D:REGS=NONE"
++                        && a.to_pin
++                            .strip_prefix('P')
++                            .and_then(|p| p.parse::<u32>().ok())
++                            .is_some_and(|output| {
++                                output < 36
++                                    && if matches!(a.from_pin.as_str(), "SIGNEDA" | "SIGNEDB") {
++                                        output < 18
++                                    } else {
++                                        a.from_pin
++                                            .strip_prefix('A')
++                                            .or_else(|| a.from_pin.strip_prefix('B'))
++                                            .and_then(|p| p.parse::<u32>().ok())
++                                            .is_some_and(|input| input < 18 && output < input)
++                                    }
++                            })
++                    {
++                        continue;
++                    }
++                    if a.delay.min_ps > a.delay.max_ps {
++                        return Err("inverted cell delay range".into());
++                    }
++                    add(format!("arc:{}:{}:{}", c.cell_type, a.from_pin, a.to_pin))?;
++                }
++                for h in &c.setup_holds {
++                    if h.setup.min_ps > h.setup.max_ps || h.hold.min_ps > h.hold.max_ps {
++                        return Err("inverted setup/hold range".into());
++                    }
++                    add(format!(
++                        "check:{}:{}:{}",
++                        c.cell_type, h.signal_pin, h.clock_pin
++                    ))?;
++                }
++            }
++            Ok(result)
++        }
++        let original = self
++            .speed_grades
++            .get(&replacement.name)
++            .ok_or("unknown timing grade")?;
++        if original
++            .pip_classes
++            .keys()
++            .ne(replacement.pip_classes.keys())
++        {
++            return Err("replacement must cover every PIP timing class exactly".into());
++        }
++        if surface(original, true)? != surface(&replacement, false)? {
++            return Err(
++                "replacement must cover every cell arc and setup/hold check exactly".into(),
++            );
++        }
++        for p in replacement.pip_classes.values() {
++            for corner in [p.base, p.fanout_adder] {
++                if corner.min_ps > corner.typ_ps || corner.typ_ps > corner.max_ps {
++                    return Err("inverted measured PIP corners".into());
++                }
++            }
++        }
++        self.speed_grades
++            .insert(replacement.name.clone(), replacement);
++        Ok(())
++    }
++
+     fn metadata_string(&self, id: u32) -> &str {
+         &self.metadata_strings[id as usize]
+     }
+@@ -5152,6 +5241,82 @@
+ 
+     const FIXTURE: &str = include_str!("../fixtures/minimal-ecp5.json");
+ 
++    #[test]
++    fn complete_timing_replacement_is_atomic_and_has_no_partial_fallback() {
++        let mut architecture = read_architecture(FIXTURE.as_bytes()).unwrap();
++        let original = architecture.speed_grades()["6"].clone();
++        let mut replacement = original.clone();
++        for timing in replacement.pip_classes.values_mut() {
++            timing.base.min_ps = 7;
++            timing.base.typ_ps = 8;
++            timing.base.max_ps = 9;
++        }
++        let mut missing_pip = replacement.clone();
++        missing_pip.pip_classes.remove("default");
++        assert!(architecture.replace_timing_grade(missing_pip).is_err());
++        let mut missing_arc = replacement.clone();
++        missing_arc.cells[0].arcs.pop();
++        assert!(architecture.replace_timing_grade(missing_arc).is_err());
++        let mut missing_check = replacement.clone();
++        missing_check
++            .cells
++            .iter_mut()
++            .find(|c| !c.setup_holds.is_empty())
++            .unwrap()
++            .setup_holds
++            .pop();
++        assert!(architecture.replace_timing_grade(missing_check).is_err());
++        let mut duplicate = replacement.clone();
++        duplicate.cells.push(duplicate.cells[0].clone());
++        assert!(architecture.replace_timing_grade(duplicate).is_err());
++        let mut inverted = replacement.clone();
++        inverted.pip_classes.get_mut("default").unwrap().base.min_ps = 10;
++        assert!(architecture.replace_timing_grade(inverted).is_err());
++        assert_eq!(architecture.speed_grades()["6"], original);
++        architecture
++            .replace_timing_grade(replacement.clone())
++            .unwrap();
++        assert_eq!(architecture.speed_grades()["6"], replacement);
++    }
++
++    #[test]
++    fn measured_library_removes_only_provably_absent_multiplier_arcs() {
++        let mut architecture = read_architecture(FIXTURE.as_bytes()).unwrap();
++        let mut dsp = architecture.speed_grades()["6"].cells[0].clone();
++        dsp.cell_type = "MULT18X18D:REGS=NONE".into();
++        let mut arc = dsp.arcs[0].clone();
++        arc.from_pin = "A1".into();
++        arc.to_pin = "P0".into();
++        dsp.arcs = vec![arc.clone()];
++        arc.to_pin = "P1".into();
++        dsp.arcs.push(arc.clone());
++        arc.from_pin = "SIGNEDA".into();
++        arc.to_pin = "P17".into();
++        dsp.arcs.push(arc.clone());
++        arc.to_pin = "P18".into();
++        dsp.arcs.push(arc);
++        architecture
++            .speed_grades
++            .get_mut("6")
++            .unwrap()
++            .cells
++            .push(dsp);
++        let original = architecture.speed_grades()["6"].clone();
++        assert!(architecture.replace_timing_grade(original.clone()).is_err());
++        let mut replacement = original.clone();
++        let dsp = replacement.cells.last_mut().unwrap();
++        dsp.arcs
++            .retain(|a| matches!(a.to_pin.as_str(), "P1" | "P18"));
++        let mut missing_real_arc = replacement.clone();
++        missing_real_arc.cells.last_mut().unwrap().arcs.pop();
++        assert!(architecture.replace_timing_grade(missing_real_arc).is_err());
++        assert_eq!(architecture.speed_grades()["6"], original);
++        architecture
++            .replace_timing_grade(replacement.clone())
++            .unwrap();
++        assert_eq!(architecture.speed_grades()["6"], replacement);
++    }
++
+     #[derive(Clone, Copy)]
+     struct TestCarryHalf {
+         cell: CellId,
+@@ -6913,6 +7078,7 @@
+             MappingOptions {
+                 timing_goal_mhz: 250,
+                 arithmetic: ArithmeticMapping::CarryChain,
++                ..MappingOptions::default()
+             },
+         )
+         .unwrap();
+--- a/crates/texo-timing/src/lib.rs
++++ b/crates/texo-timing/src/lib.rs
+@@ -241,6 +241,21 @@
+         }
+     }
+ 
++    /// Replaces a combinational delay without changing the timing graph.
++    /// Returns false when the pin pair is not an existing cell arc.
++    pub fn update_cell_arc_delay(
++        &mut self,
++        from: CellPinId,
++        to: CellPinId,
++        delay: DelayRange,
++    ) -> bool {
++        let Some(current) = self.cell_arcs.get_mut(&(from, to)) else {
++            return false;
++        };
++        *current = delay;
++        true
++    }
++
+     /// Adds a sequential clock-to-output arc.
+     ///
+     /// # Errors

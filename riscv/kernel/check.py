@@ -2,10 +2,13 @@
 """Build the Rust kernels and run them against the current CPU RTL."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+
+from build import TOOLCHAIN
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -19,8 +22,14 @@ def sha(path):
 
 def main():
     subprocess.run([sys.executable, str(HERE / 'build.py')], cwd=ROOT, check=True)
-    subprocess.run(['cargo', 'build', '--release', '--offline', '--locked', '--bin', 'verify-riscv'],
-                   cwd=ROOT, check=True)
+    sysroot = Path(subprocess.check_output(
+        ['rustup', 'run', TOOLCHAIN, 'rustc', '--print', 'sysroot'], text=True).strip())
+    subprocess.run(['rustup', 'run', TOOLCHAIN, 'cargo', 'build', '--release',
+                    '--offline', '--locked', '--bin', 'verify-riscv',
+                    '--target-dir', str(ROOT / 'target')],
+                   cwd=ROOT, check=True, env={**os.environ,
+                       'RUSTC': str(sysroot / 'bin/rustc'),
+                       'RUSTDOC': str(sysroot / 'bin/rustdoc')})
     build = json.loads((OUT / 'build.json').read_text())
     runner = ROOT / 'target/release/verify-riscv'
     sources = {str(p.relative_to(ROOT)): sha(p) for p in sorted((ROOT / 'riscv/src').glob('*.veryl'))}
@@ -38,10 +47,14 @@ def main():
         'inputs': inputs, 'runner_sha256': sha(runner),
         'build_record_sha256': sha(OUT / 'build.json'), 'runs': [],
     }
-    plain = [p for p in build['elfs'] if Path(p).stem != 'kernel-console']
+    plain = [p for p in build['elfs'] if Path(p).stem not in {'kernel-console', 'kernel-atomics'}]
     console = [p for p in build['elfs'] if Path(p).stem == 'kernel-console']
-    assert len(plain) == 2 and len(console) == 1
+    atomic = [p for p in build['elfs'] if Path(p).stem == 'kernel-atomics']
+    assert len(atomic) == 1
+    assert len(plain) == 3 and len(console) == 1
     for name, extra, elfs, timed in [
+        ('atomic-serialized', ['--a-extension'], atomic, False),
+        ('atomic-simultaneous', ['--a-extension', '--timed-clocks'], atomic, True),
         ('serialized', [], plain, False),
         ('simultaneous', ['--timed-clocks'], plain, True),
         ('console-serialized', ['--kernel-console'], console, False),

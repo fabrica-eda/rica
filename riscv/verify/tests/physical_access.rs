@@ -9,8 +9,8 @@ fn value(sim: &mut Simulator<NativeBackend>, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
-// Deliberately byte-wise: the RTL uses region decoders and an eight-byte lane
-// carry, whereas this oracle checks membership of every requested byte.
+// Deliberately byte-wise: the RTL uses region decoders and lane comparisons,
+// whereas this oracle checks membership of every requested byte.
 fn expected(address: u64, size: u8, instruction: bool, timer: bool) -> (bool, bool, u64) {
     for region in [0..0x1000, 0x8000_0000..0x8003_f000] {
         if region.contains(&address) {

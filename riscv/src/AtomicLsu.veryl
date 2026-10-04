@@ -1,0 +1,173 @@
+/// Single-hart A transaction owner. Core holds CM and the request payload until
+/// done; issue toggles the ordinary memory token. No other master writes RAM
+/// while this CPU runs (debug writes require reset). All memory is ordered.
+/// Core starts only Decoder-validated A operations and holds operation until done.
+module AtomicLsu (
+    clk: input clock, rst_n: input reset_async_low,
+    start: input logic, cancel: input logic, consume: input logic,
+    invalidate: input logic,
+    address: input logic<64>, operation: input logic<5>, word_op: input logic,
+    source_value: input logic<64>, memory_value: input logic<64>, memory_done: input logic, store_done: input logic,
+    issue: output logic, store_issue: output logic,
+    written: output logic, write_value: output logic<64>,
+    amo_write_value: output logic<64>,
+    result: output logic<64>, done: output logic,
+    fault: output logic, fault_cause: output logic<4>,
+) {
+    const IDLE: u32 = 0;
+    const READ_ISSUE: u32 = 1;
+    const READ_WAIT: u32 = 2;
+    const ALU_START: u32 = 3;
+    const ALU_WAIT: u32 = 4;
+    const STORE_ISSUE: u32 = 5;
+    const STORE_WAIT: u32 = 6;
+    const DONE: u32 = 7;
+    var state_q: logic<3>;
+    var reserved_q: logic;
+    // Both LR and SC first pass the full address/alignment checks below.
+    // All permitted addresses share bits 63:18 and have zero bits 1:0.
+    var reserved_address_q: logic<16>;
+    var reserved_word_q: logic;
+    var is_lr: logic;
+    var is_sc: logic;
+    var aligned: logic;
+    var ram: logic;
+    var alu_ready: logic;
+    var alu_valid: logic;
+    var alu_write: logic<64>;
+    var alu_old: logic<64>;
+    var alu_illegal: logic;
+    var alu_start: logic;
+    var alu_consume: logic;
+    var reservation_matches: logic;
+    var result_update: logic;
+    var result_next: logic<64>;
+    var completion_set: logic;
+    var completion_clear: logic;
+    inst alu: AtomicAlu (
+        clk, rst_n, cancel,
+        request_valid: alu_start, request_ready: alu_ready,
+        operation, word_op, memory_value: result, source_value,
+        response_valid: alu_valid, response_ready: alu_consume,
+        write_value: alu_write, rd_value: alu_old, illegal: alu_illegal,
+    );
+    always_comb {
+        // Decoder has rejected reserved funct5 encodings. Among legal A
+        // operations, low bits 10/11 identify LR/SC; AMOs use 00 or 01.
+        is_lr = operation[1:0] == 2'd2;
+        is_sc = operation[1:0] == 2'd3;
+        aligned = (address[1:0] == 2'd0) && (word_op || !address[2]);
+        // Atomic PMA: only the high 252 KiB RAM, never reset aliases or MMIO.
+        ram = (address[63:18] == 46'h2000) && (address[17:12] != 6'h3f);
+        reservation_matches = reserved_q && !invalidate
+            && (reserved_address_q == address[17:2]) && (reserved_word_q == word_op);
+        result_update = !cancel && (((state_q == IDLE) && start)
+            || ((state_q == READ_WAIT) && memory_done));
+        result_next = memory_value;
+        if word_op { result_next = {memory_value[31] repeat 32, memory_value[31:0]}; }
+        if state_q == IDLE {
+            result_next = 64'd0;
+            if aligned && ram && (is_sc) && !reservation_matches {
+                result_next = 64'd1;
+            }
+        }
+        issue = ((state_q == READ_ISSUE) || (state_q == STORE_ISSUE)) && !cancel;
+        store_issue = (state_q == STORE_ISSUE) && !cancel;
+        // Core captures this into its ordinary CM write-data register on the
+        // store-issue edge. The ALU's registered response remains stable after
+        // consumption, so a second 64-bit write buffer is unnecessary.
+        write_value = alu_write;
+        if is_sc { write_value = source_value; }
+        amo_write_value = alu_write;
+        // Completion is registered, so the memory acknowledgment never
+        // traverses the frontend hold/redirect logic in the same CPU cycle.
+        alu_start = (state_q == ALU_START) && !cancel;
+        alu_consume = state_q == ALU_WAIT;
+        // Decode completion events directly, without a priority mux through
+        // every FSM state on the SC reservation-comparison path.
+        completion_set = ((state_q == IDLE) && start
+                && (!aligned || !ram || ((is_sc) && !reservation_matches)))
+            || ((state_q == READ_WAIT) && memory_done && (is_lr))
+            || ((state_q == STORE_WAIT) && store_done);
+        completion_clear = ((state_q == IDLE) && start) || ((state_q == DONE) && consume);
+    }
+    always_ff {
+        if_reset { done = 1'b0; }
+        else if cancel { done = 1'b0; }
+        else if completion_set { done = 1'b1; }
+        else if completion_clear { done = 1'b0; }
+    }
+    always_ff {
+        if_reset {
+            state_q = IDLE;
+            reserved_q = 1'b0;
+            reserved_address_q = 16'd0;
+            reserved_word_q = 1'b0;
+            written = 1'b0;
+            fault = 1'b0;
+            fault_cause = 4'd0;
+        } else {
+            if invalidate { reserved_q = 1'b0; }
+            if cancel {
+                state_q = IDLE;
+                written = 1'b0;
+                // Wrong-path cancellation need not destroy an older LR.
+            } else {
+                case state_q {
+                    IDLE: if start {
+                        written = 1'b0;
+                        fault = !aligned || !ram;
+                        fault_cause = 4'd7;
+                        if is_lr { fault_cause = 4'd5; }
+                        if !aligned {
+                            fault_cause = 4'd6;
+                            if is_lr { fault_cause = 4'd4; }
+                        }
+                        // LR replaces the previous reservation; every SC and
+                        // AMO clears it even when permission/alignment fails.
+                        reserved_q = 1'b0;
+                        if !aligned || !ram {
+                            state_q = DONE;
+                        } else if is_sc {
+                            if reservation_matches {
+                                state_q = STORE_ISSUE;
+                            } else {
+                                state_q = DONE;
+                            }
+                        } else {
+                            state_q = READ_ISSUE;
+                        }
+                    }
+                    READ_ISSUE: state_q = READ_WAIT;
+                    READ_WAIT: if memory_done {
+                        if is_lr {
+                            reserved_q = !invalidate;
+                            reserved_address_q = address[17:2];
+                            reserved_word_q = word_op;
+                            state_q = DONE;
+                        } else { state_q = ALU_START; }
+                    }
+                    ALU_START: if alu_ready { state_q = ALU_WAIT; }
+                    ALU_WAIT: if alu_valid {
+                        state_q = STORE_ISSUE;
+                    }
+                    STORE_ISSUE: {
+                        written = 1'b1;
+                        state_q = STORE_WAIT;
+                    }
+                    STORE_WAIT: if store_done {
+                        state_q = DONE;
+                    }
+                    DONE: if consume { state_q = IDLE; written = 1'b0; }
+                    default: state_q = IDLE;
+                }
+            }
+        }
+    }
+    // A separate enabled register avoids a state-machine feedback mux on
+    // every result bit; the externally visible update edges are unchanged.
+    always_ff {
+        if_reset { result = 64'd0; }
+        else if result_update { result = result_next; }
+    }
+}

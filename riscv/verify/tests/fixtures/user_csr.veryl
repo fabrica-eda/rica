@@ -1,0 +1,46 @@
+module UserCsrTest(clk: input clock, rst_n: input reset,
+index: input logic<5>,
+write_index: input logic<5>,
+write_enable: input logic,
+write_op: input logic<2>,
+write_source: input logic<64>,
+trap_enter: input logic,
+mret: input logic,
+machine_interrupts: input logic<3>,
+read_data: output logic<64>,
+user_mode: output logic,
+data_user: output logic,
+interrupt_pending: output logic,
+) {
+ inst b: CsrBus;
+ inst c: CsrFile #(ENABLE_U:1, ENABLE_INTERRUPTS:1, FULL_ADDRESS:1)(clk,rst_n,csr:b);
+ always_comb {
+b.index = index;
+b.write_index = write_index;
+b.write_enable = write_enable;
+b.write_op = write_op;
+b.write_source = write_source;
+b.retire = 0;
+b.stall_dependency = 0;
+b.stall_memory_wait = 0;
+b.stall_redirect = 0;
+b.stall_frontend_empty = 0;
+b.predictor_conditional_resolved = 0;
+b.predictor_direction_wrong = 0;
+b.predictor_btb_miss = 0;
+b.predictor_ras_fallback = 0;
+b.predictor_repair = 0;
+b.counter_freeze = 0;
+b.debug_counter_index = 0;
+b.trap_enter = trap_enter;
+b.trap_pc = 0;
+b.trap_cause = 0;
+b.trap_value = 0;
+b.mret = mret;
+b.machine_interrupts = machine_interrupts;
+read_data = b.read_data;
+user_mode = b.user_mode;
+data_user = b.data_user;
+interrupt_pending = b.interrupt_pending;
+}
+}

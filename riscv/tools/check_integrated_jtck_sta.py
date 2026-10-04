@@ -5,6 +5,8 @@ Both passes use the saved routed delays and the existing Texo STA engine.
 This checks model integration and the board's JTAG structure, not independent
 delay characterization or reset/CDC timing sign-off.
 """
+from checkpoint_io import load_checkpoint
+from user_platform import check_checkpoint_clocks
 import argparse
 import hashlib
 import json
@@ -28,14 +30,16 @@ def main():
     parser.add_argument("checkpoint", type=Path)
     parser.add_argument("--architecture", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--platform-profile", type=Path,
+                        help="Check a redesigned platform's physical PLL and periods")
     parser.add_argument("--supplemental-binary", type=Path,
-                        default=ROOT / "target/jtag-route-probe/release/jtag-sta")
+                        default=ROOT / "target/release/jtag-sta")
     args = parser.parse_args()
     supplemental = args.output.with_suffix(".supplemental.json")
     require(not args.output.exists() and not supplemental.exists(), "refusing to overwrite a saved audit")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     checkpoint_sha = digest(args.checkpoint)
-    cp = json.loads(args.checkpoint.read_text())
+    cp = load_checkpoint(args.checkpoint)
     timing = cp["timing"]
     reserve = timing.get("setup_uncertainty_ps", 0)
     hold_reserve = timing.get("hold_uncertainty_ps", 0)
@@ -47,8 +51,11 @@ def main():
     require(timing["worst_slack_ps"] >= 0 and timing["worst_hold_slack_ps"] >= 0, "native setup/hold failed")
     require(timing["clock_constraints"] == [{"cell": "jtagg", "pin": "JTCK", "period_ps": 166666}],
             "expected explicit 6 MHz JTCK source constraint")
-    require(sorted(c["period_ps"] for c in cp["packing"]["generated_clock_periods_ps"]) == [8013, 16026, 166666],
-            "expected fixed 124.8/62.4 MHz CPU/memory and 6 MHz JTCK")
+    if args.platform_profile:
+        check_checkpoint_clocks(cp, args.platform_profile)
+    else:
+        require(sorted(c["period_ps"] for c in cp["packing"]["generated_clock_periods_ps"]) == [8013, 16026, 166666],
+                "expected fixed 124.8/62.4 MHz CPU/memory and 6 MHz JTCK")
     expected = {
         ("ff_board.jtag_debug_transport.shift_high[63]", "DI", "no_synchronous_launch"),
         ("ff_board.jtag_debug_transport.shift_enable_q", "DI", "no_synchronous_launch"),
@@ -79,6 +86,13 @@ def main():
     audit = json.loads(supplemental.read_text())
     require(result.returncode == 0 and audit["structural_and_internal_timing_gate"],
             "supplemental board structure/STA failed: " + result.stdout + result.stderr)
+    measured = cp["target"].get("measured_timing")
+    if measured:
+        installed = audit.get("measured_timing") or {}
+        require(installed.get("sha256") == measured["sha256"]
+                and installed.get("legacy_table_fallback") is False
+                and installed.get("lut_input_timing") == "routed_physical_pin",
+                "supplemental STA did not use the checkpoint's measured cell library")
 
     counts = {}
     for kind in ("setup_checks", "hold_checks"):
@@ -108,6 +122,7 @@ def main():
         "native_unchecked": unchecked, "supplemental_command": command,
         "supplemental_binary_sha256": digest(args.supplemental_binary),
         "supplemental_report_sha256": digest(supplemental),
+        "measured_timing_sha256": measured["sha256"] if measured else None,
         "jtck_nominal_slacks_and_edges_match": True, "structural_and_internal_timing_gate": True,
         "external_boundaries_not_characterized": audit["external_boundaries_not_characterized"],
     }

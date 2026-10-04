@@ -1,5 +1,31 @@
 # RISC-V implementation
 
+The saved timing-closed U/PMP reference now uses **84 MHz CPU and 84 MHz memory**.
+It passes 536 native runs, the simultaneous U kernel, 31 simultaneous memory
+tests, and measured STA at **setup +26 ps / hold +1 ps**, retaining the measured
+library, 194 ps guards and four reviewed timing exceptions. Route ownership and
+515 JTCK setup/hold checks pass. On 2026-10-04 the bitstream passed all 268
+validation ELFs on the FPGA, including the U kernel, whose mcycle/minstret
+equal the simultaneous-clock model. The matching source, PLL, software,
+checkpoint and hardware logs are archived under
+`toolchain/measurements/2026-10-03-rv64-u-84`.
+The clock increase from the preserved 78 MHz reference is 7.7%; same-work RTL
+execution takes about 7% less time. This is a simulation comparison, not a board
+measurement. Details are in [RV64_USER_PLATFORM.md](RV64_USER_PLATFORM.md).
+
+The working U profile now prioritizes the CPU at **104 MHz CPU and 52 MHz memory**.
+It precomputes PMP range validity, caches return-stack tops on the existing update
+edge, shortens CSR write gating, and replaces bulk RAS recovery copies with eight
+sharing flags. When retirement later overwrites a shared entry, the speculative
+register saves its old value first. All 536 native runs, the simultaneous U kernel,
+31 simultaneous memory cases, 61 predictor-recovery tests and 11 RAS/predictor
+tests pass. All 268 ELF cycle counts match the preceding 104/52 MHz RTL in both
+native clock orders. Physical implementation is in progress; this source is
+**not timing qualified**. The earlier 104/104 MHz best was −2,241/−15 ps.
+The 84 MHz result applies to its archived source and checkpoint; changing this
+development profile's clock alone does not reproduce that implementation.
+The earlier 78 MHz archive remains unchanged.
+
 See [RV64_ARCHITECTURE_PLAN.md](RV64_ARCHITECTURE_PLAN.md) for the ECP5
 architecture study. The current board is **scalar RV64 with full M and B
 (Zba/Zbb/Zbs)**, integer compressed instructions (Zca), Zicsr and Zifencei.
@@ -66,6 +92,10 @@ Add `--timed-clocks` for coincident CPU/memory edges. The no-flag Core/model
 retains the legacy comparison configuration. The default hardware image is
 `build/riscv-hardware-compact-access-faults-124p8-20260910.bit`, SHA-256
 `e100548bbb96f8739d2126c560c4789cd6679a62a6fdf198d33aba6b04996912`.
+
+`verify-riscv --project PATH` reads RTL and the U-platform profile from an
+explicit project snapshot. ELF paths remain explicit, so archived candidates
+can be checked without replacing the working project's RTL or clock settings.
 
 The custom OS target is **M/S/U modes and Sv39**. The [OS/ISA plan](RV64_OS_ISA_PLAN.md)
 continues from the qualified interrupt/access-fault foundation to external I/O,
@@ -352,7 +382,7 @@ This checks Struo's proof-signed internal mapping transformations, but it is
 not a complete mapped functional comparison. Passing `--post-map` additionally
 runs the expensive ECP5-primitive simulation. The old deterministic
 true-dual-port rejection and 512-way read-mux overflow have focused fixes; the
-current Struo integration pin is `eff404dff0c4806064e2a4e0f59564b1079c001d`.
+current Struo integration pin is recorded in the root `Cargo.toml`.
 An interactive complete release-mode post-map native build was stopped after
 more than five minutes without a bounded completion signal; it is not a
 required default gate and is tracked conservatively by STR-007 in
@@ -463,10 +493,10 @@ dedicated fixture. This is a decompressor check, not proof that the complete
 CPU meets the same frequency:
 
 ```sh
-target/texo-git/bin/texo pnr riscv --top CompressedDecoderTimingTop \
+riscv/tools/texo pnr riscv --top CompressedDecoderTimingTop \
   --package CABGA381 --speed 8 --lpf riscv/core-126.lpf \
   --allow-unconstrained-io --synthesis-goal-mhz 126 \
-  --output riscv/build/compressed-decoder-126.texo.json
+  --output riscv/build/compressed-decoder-126.txcp
 ```
 
 The last recorded fixture result was +0.607 ns setup WNS and +0.323 ns hold

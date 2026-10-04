@@ -177,10 +177,10 @@ cargo run --locked --offline -p verify-riscv --bin verify-riscv -- \
   third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i/I/*.elf \
   third_party/riscv-arch-test/work/rica-rv64i/elfs/rv64i/Zca/*.elf
 cargo build --release --locked --offline -p verify-riscv --bin nextpnr-riscv
-target/release/nextpnr-riscv HardwareStaticTestTop
-target/release/nextpnr-riscv HardwareCached2KTestTop
-target/release/nextpnr-riscv HardwareCached4KTestTop
-target/release/nextpnr-riscv HardwareCached8KTestTop
+target/release/nextpnr-riscv HardwareStaticTestTop --nextpnr-json
+target/release/nextpnr-riscv HardwareCached2KTestTop --nextpnr-json
+target/release/nextpnr-riscv HardwareCached4KTestTop --nextpnr-json
+target/release/nextpnr-riscv HardwareCached8KTestTop --nextpnr-json
 python3 riscv/tools/run_rv64_architecture_ab.py \
   --static riscv/build/riscv-hardware-static-test-125.nextpnr.json \
   --cache2k riscv/build/riscv-hardware-cached-2k-test-125.nextpnr.json \

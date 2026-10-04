@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use celox::{NativeBackend, Simulator, SimulatorBuilder};
 
@@ -206,6 +206,82 @@ fn machine_interrupt_csrs_decode_all_forms_only_when_enabled() {
                     // MIP pending bits are read-only, but its CSR address is
                     // writable: all six instructions are legal when enabled.
                     assert_eq!(write, matches!(funct3, 1 | 5) || source != 0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn csr_decode_recognizes_exact_address_set_and_write_permissions() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+    let source = [
+        fs::read_to_string(root.join("PipelineInterfaces.veryl")).unwrap(),
+        fs::read_to_string(root.join("Decoder.veryl")).unwrap(),
+        r#"module CsrDecodeTest #(param U: bit = 0, param IRQ: bit = 0) (
+            instr: input logic<32>, illegal: output logic,
+            prefetched_illegal: output logic,
+            csr_index: output logic<5>, prefetched_csr_index: output logic<5>,
+        ) {
+            inst d: DecodeBus;
+            inst decoder: Decoder #(ENABLE_U: U, ENABLE_INTERRUPTS: IRQ) (decode: d);
+            inst pre: DecodeBus;
+            var known: logic;
+            var writable: logic;
+            inst classify: CsrAddressClass #(ENABLE_U: U, ENABLE_INTERRUPTS: IRQ) (
+                address: instr[31:20], known, writable,
+            );
+            inst prefetched: DecoderWithCsrClass #(USE_CSR_CLASS: 1, ENABLE_U: U, ENABLE_INTERRUPTS: IRQ) (
+                decode: pre, csr_known: known, csr_writable: writable,
+            );
+            assign d.instr = instr;
+            assign pre.instr = instr;
+            assign illegal = d.illegal;
+            assign prefetched_illegal = pre.illegal;
+            assign csr_index = d.csr_index;
+            assign prefetched_csr_index = pre.csr_index;
+        }"#
+        .to_owned(),
+    ]
+    .join("\n");
+    for user in [false, true] {
+        for irq in [false, true] {
+            let mut sim = SimulatorBuilder::new(&source, "CsrDecodeTest")
+                .param("U", u64::from(user))
+                .param("IRQ", u64::from(irq))
+                .build_native()
+                .unwrap();
+            let instr = sim.signal("instr");
+            let illegal = sim.signal("illegal");
+            let prefetched_illegal = sim.signal("prefetched_illegal");
+            let csr_index = sim.signal("csr_index");
+            let prefetched_csr_index = sim.signal("prefetched_csr_index");
+            for address in 0..4096_u32 {
+                let known = matches!(address,
+                    0x300 | 0x301 | 0x305 | 0x340..=0x343 | 0xf11..=0xf14
+                    | 0xb00 | 0xb02 | 0xc00 | 0xc02 | 0x7c0 | 0x7c1)
+                    || (irq && matches!(address, 0x304 | 0x344))
+                    || (user && matches!(address, 0x306 | 0x30a | 0x3a0 | 0x3a2 | 0x3b0..=0x3bf));
+                for funct3 in [1_u32, 2, 3, 5, 6, 7] {
+                    for source in [0_u32, 1] {
+                        let word = address << 20 | source << 15 | funct3 << 12 | 0x73;
+                        sim.modify(|io| io.set(instr, word)).unwrap();
+                        let writes = funct3 & 3 == 1 || source != 0;
+                        let expected = !known || (writes && address >> 10 == 3);
+                        let actual = sim
+                            .get(illegal)
+                            .to_u64_digits()
+                            .first()
+                            .copied()
+                            .unwrap_or(0)
+                            != 0;
+                        assert_eq!(
+                            actual, expected,
+                            "U={user} IRQ={irq} instruction={word:08x}"
+                        );
+                        assert_eq!(sim.get(prefetched_illegal), sim.get(illegal));
+                        assert_eq!(sim.get(prefetched_csr_index), sim.get(csr_index));
+                    }
                 }
             }
         }

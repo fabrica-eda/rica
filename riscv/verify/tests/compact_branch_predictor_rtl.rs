@@ -272,6 +272,49 @@ fn full_token_window_waits_for_retirement_without_overwriting_predictions() {
 }
 
 #[test]
+fn retiring_next_token_with_response_accept_preserves_reuse_through_wraparound() {
+    for bits in [5, 6] {
+        let mut d = Driver::new(false, bits);
+        for token in 0..8 {
+            assert_eq!(
+                d.predict(0x2000 + token * 4, 0x2004 + token * 4).token,
+                token
+            );
+        }
+        d.offer(0x4000, 0x4004);
+        d.tick();
+        assert_eq!(d.get("response_valid"), 0);
+        d.retiring(0, 0x2000, 0, 0, 0, 0x2004);
+        d.tick();
+        d.set("retire_valid", 0);
+        assert_eq!(d.get("response_valid"), 1);
+
+        for step in 0..16 {
+            let next = (step + 1) & 7;
+            let pc = 0x4004 + step * 4;
+            d.offer(pc, pc + 4);
+            d.retiring(next, 0x2000 + next * 4, 0, 0, 0, 0x2004 + next * 4);
+            let consumed = d.accept();
+            d.set("retire_valid", 0);
+            assert_eq!(consumed.token, step & 7);
+            assert_eq!(d.get("response_valid"), 1);
+            assert_eq!(d.get("response_token"), u64::from(next));
+            assert_eq!(d.get("response_next_pc"), u64::from(pc + 4));
+        }
+
+        d.set("response_accept", 1);
+        d.set("discard_all", 1);
+        d.retiring(1, 0x2004, 0, 0, 0, 0x2008);
+        d.tick();
+        d.set("response_accept", 0);
+        d.set("discard_all", 0);
+        d.set("retire_valid", 0);
+        assert_eq!(d.get("slot_valid_q"), 0);
+        assert_eq!(d.predict(0x8000, 0x8004).token, 0);
+    }
+}
+
+#[test]
 fn taken_response_cancels_the_younger_sequential_lookup() {
     let mut d = Driver::new(false, 6);
     let initial = d.predict(0x1000, 0x1004);
@@ -427,6 +470,135 @@ fn ras_matches_architectural_stack_through_back_to_back_actions() {
         );
         if let Some(&top) = speculative.last() {
             assert_eq!(d.get("top"), u64::from(top), "cycle {cycle}");
+        }
+    }
+}
+
+#[test]
+fn ras_native_and_mapped_match_reset_restore_and_concurrent_actions() {
+    fn action(stack: &mut Vec<u32>, valid: bool, kind: u32, pc: u32) {
+        if !valid {
+            return;
+        }
+        if kind == 5 || kind == 6 {
+            stack.pop();
+        }
+        if kind == 4 || kind == 6 {
+            if stack.len() == 8 {
+                stack.remove(0);
+            }
+            stack.push(pc);
+        }
+    }
+    fn check(d: &mut Driver, expected: &[u32], mapped: bool, cycle: u32) {
+        assert_eq!(
+            d.get("empty"),
+            u64::from(expected.is_empty()),
+            "mapped={mapped} cycle={cycle}"
+        );
+        if let Some(&top) = expected.last() {
+            assert_eq!(
+                d.get("top"),
+                u64::from(top),
+                "mapped={mapped} cycle={cycle}"
+            );
+        }
+    }
+    for mapped in [false, true] {
+        let mut d = if mapped {
+            let rtl = struo_frontend_veryl::analyze_and_lower(
+                SOURCE,
+                "ras_actions_test",
+                "CompactReturnStack",
+            )
+            .unwrap();
+            let netlist = struo_target_ecp5::map_to_ecp5_with_options(
+                &struo_synth::synthesize(&rtl).unwrap().netlist,
+                Default::default(),
+            )
+            .unwrap();
+            Driver(
+                struo_celox::ecp5_simulator(&netlist)
+                    .unwrap()
+                    .build_native()
+                    .unwrap(),
+            )
+        } else {
+            Driver::new(true, 0)
+        };
+        let mut committed = Vec::new();
+        let mut speculative = Vec::new();
+        let mut random = 0x619f_95a3_u32;
+        for cycle in 0..32_768_u32 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            let reset = cycle % 509 == 0;
+            // Long push/pop bursts exercise wrap, saturation and underflow;
+            // mixed phases include every kind and simultaneous retirement.
+            let phase = cycle % 128;
+            let mut retire_valid = phase < 64 || random & 1 != 0;
+            let mut predict_valid = phase < 64 || random & 2 != 0;
+            let mut restore = phase == 63 || (phase >= 64 && random & 0x1c == 0);
+            let kind = |mixed| {
+                if phase < 32 {
+                    4
+                } else if phase < 48 {
+                    6
+                } else if phase < 64 {
+                    5
+                } else {
+                    mixed
+                }
+            };
+            let mut retire_kind = kind((random >> 5) & 7);
+            let mut predict_kind = kind((random >> 8) & 7);
+            if (1..124).contains(&cycle) {
+                // Pin a restored snapshot while retirement wraps six times,
+                // then pop every saved entry. Reverse the roles next: wrap
+                // speculation six times, restore and pop the committed stack.
+                // Sharing live backing data instead of pinned versions fails.
+                retire_valid = (1..=8).contains(&cycle) || (10..=57).contains(&cycle);
+                predict_valid = (58..=65).contains(&cycle)
+                    || (67..=114).contains(&cycle)
+                    || (116..=123).contains(&cycle);
+                restore = matches!(cycle, 9 | 66 | 115);
+                retire_kind = 4;
+                predict_kind = if (67..=114).contains(&cycle) { 4 } else { 5 };
+            }
+            let retired_pc = random.rotate_left(9) & !1;
+            let predicted_pc = random.rotate_right(7) & !1;
+            if cycle != 0 {
+                check(&mut d, &speculative, mapped, cycle);
+            }
+            for (name, value) in [
+                ("rst_n", u32::from(!reset)),
+                ("retire_valid", u32::from(retire_valid)),
+                ("predict_valid", u32::from(predict_valid)),
+                ("restore", u32::from(restore)),
+                ("retire_kind", retire_kind),
+                ("predict_kind", predict_kind),
+                ("retire_fallthrough", retired_pc),
+                ("predict_fallthrough", predicted_pc),
+            ] {
+                d.set(name, value);
+            }
+            if !reset {
+                // New inputs must not change the current prediction before
+                // the accepting edge.
+                check(&mut d, &speculative, mapped, cycle);
+                action(&mut committed, retire_valid, retire_kind, retired_pc);
+                if restore {
+                    speculative.clone_from(&committed);
+                } else {
+                    action(&mut speculative, predict_valid, predict_kind, predicted_pc);
+                }
+            } else {
+                committed.clear();
+                speculative.clear();
+            }
+            d.tick();
+            check(&mut d, &speculative, mapped, cycle);
         }
     }
 }

@@ -1,0 +1,302 @@
+/// Decode stable PMP range registers once for the instruction and data checks.
+module PmpRanges (
+    pmp_config: input logic<8> [4], pmp_address: input logic<30> [4],
+    lower: output logic<33> [4], upper: output logic<33> [4],
+) {
+    var mask: logic<32> [4];
+    var next_address: logic<30> [4];
+    always_comb {
+        for entry in 0..4 {
+            next_address[entry] = pmp_address[entry] + 30'd1;
+            mask[entry] = ({pmp_address[entry], 2'b00} ^ {next_address[entry], 2'b00}) | 32'd3;
+            lower[entry] = {1'b0, pmp_address[entry], 2'b00};
+            upper[entry] = lower[entry] + 33'd4;
+            if pmp_config[entry][4:3] == 2'd1 {
+                upper[entry] = lower[entry];
+                lower[entry] = 33'd0;
+                if entry >: 0 { lower[entry] = {1'b0, pmp_address[(entry + 3) % 4], 2'b00}; }
+            } else if pmp_config[entry][4:3] == 2'd3 {
+                lower[entry] = {1'b0, ({pmp_address[entry], 2'b00} & ~mask[entry])};
+                // lower and mask have disjoint bits; OR avoids a redundant adder.
+                upper[entry] = {1'b0, ({pmp_address[entry], 2'b00} | mask[entry])} + 33'd1;
+            }
+        }
+    }
+}
+
+/// Two-stage derived bounds. PMP CSR writes serialize the core and flush
+/// younger instructions before any instruction can consume the new bounds.
+/// Configuration travels with its bounds, including OFF and lock bits.
+module PmpRegisteredRanges (
+    clk: input clock, rst_n: input reset,
+    pmp_config: input logic<8> [4], pmp_address: input logic<30> [4],
+    decoded_config: output logic<8> [4],
+    lower: output logic<33> [4], upper: output logic<33> [4],
+    nonempty: output logic<4>,
+) {
+    var config_q: logic<8> [4];
+    var address_q: logic<30> [4];
+    var mask_q: logic<32> [4];
+    var next_address: logic<30> [4];
+    var lower_next: logic<33> [4];
+    var upper_next: logic<33> [4];
+    var nonempty_next: logic<4>;
+    always_comb {
+        for entry in 0..4 {
+            next_address[entry] = pmp_address[entry] + 30'd1;
+            // NA4 and NAPOT always describe a nonempty interval. TOR compares
+            // the unshifted CSR addresses alongside bound generation, keeping
+            // this stable range predicate off each access's permission path.
+            nonempty_next[entry] = 1'b1;
+            lower_next[entry] = {1'b0, address_q[entry], 2'b00};
+            upper_next[entry] = lower_next[entry] + 33'd4;
+            if config_q[entry][4:3] == 2'd1 {
+                nonempty_next[entry] = address_q[entry] != 30'd0;
+                upper_next[entry] = lower_next[entry];
+                lower_next[entry] = 33'd0;
+                if entry >: 0 {
+                    lower_next[entry] = {1'b0, address_q[(entry + 3) % 4], 2'b00};
+                    nonempty_next[entry] = address_q[(entry + 3) % 4] <: address_q[entry];
+                }
+            } else if config_q[entry][4:3] == 2'd3 {
+                lower_next[entry] = {1'b0, ({address_q[entry], 2'b00} & ~mask_q[entry])};
+                upper_next[entry] = {1'b0, ({address_q[entry], 2'b00} | mask_q[entry])} + 33'd1;
+            }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            for entry in 0..4 {
+                config_q[entry] = 8'd0;
+                address_q[entry] = 30'd0;
+                mask_q[entry] = 32'd0;
+                decoded_config[entry] = 8'd0;
+                lower[entry] = 33'd0;
+                upper[entry] = 33'd0;
+                nonempty[entry] = 1'b0;
+            }
+        } else {
+            for entry in 0..4 {
+                config_q[entry] = pmp_config[entry];
+                address_q[entry] = pmp_address[entry];
+                mask_q[entry] = ({pmp_address[entry], 2'b00} ^ {next_address[entry], 2'b00}) | 32'd3;
+                decoded_config[entry] = config_q[entry];
+                lower[entry] = lower_next[entry];
+                upper[entry] = upper_next[entry];
+                nonempty[entry] = nonempty_next[entry];
+            }
+        }
+    }
+}
+
+/// Compute end addresses independently so pipeline owners can capture them
+/// before the range-comparison stage. Keep the carry beyond physical bit 31.
+module PmpAccessEnd (
+    address: input logic<64>, size: input logic<2>,
+    last: output logic<33>, first_last: output logic<33>,
+) {
+    // Only the low three bits receive a nonzero addend. Compute short
+    // upper increments independently, then select them with parallel prefix
+    // carries instead of a second full-width carry chain after the LSU sum.
+    var physical: logic<33>;
+    var lane_sum: logic<4>;
+    var incremented: logic<6> [5];
+    var carry: logic [5];
+    assign physical = {1'b0, address[31:0]};
+    assign lane_sum = {1'b0, address[2:0]}
+        + {1'b0, (size == 2'd3), size[1], (size != 2'd0)};
+    always_comb {
+        carry[0] = lane_sum[3];
+        carry[1] = lane_sum[3] && (&physical[8:3]);
+        carry[2] = lane_sum[3] && (&physical[14:3]);
+        carry[3] = lane_sum[3] && (&physical[20:3]);
+        carry[4] = lane_sum[3] && (&physical[26:3]);
+        last[2:0] = lane_sum[2:0];
+        for group in 0..5 {
+            incremented[group] = physical[group * 6 + 3+:6] + 6'd1;
+            last[group * 6 + 3+:6] = if carry[group] ? incremented[group] : physical[group * 6 + 3+:6];
+        }
+    }
+    assign first_last = {1'b0, address[31:0]} + 33'd1;
+}
+
+/// Decode instruction length after the two fixed endpoint sums are ready.
+/// Both paths retain carries beyond physical bit 31, including odd addresses.
+module PmpFetchAccessEnd (
+    address: input logic<64>, full_instruction: input logic,
+    last: output logic<33>, first_last: output logic<33>,
+) {
+    var word_last: logic<33>;
+    var half_first_unused: logic<33>;
+    var word_first_unused: logic<33>;
+    inst half_end: PmpAccessEnd (
+        address, size: 2'd1, last: first_last, first_last: half_first_unused,
+    );
+    inst word_end: PmpAccessEnd (
+        address, size: 2'd2, last: word_last, first_last: word_first_unused,
+    );
+    assign last = if full_instruction ? word_last : first_last;
+}
+
+/// Compute a data endpoint in parallel with the effective-address adder.
+/// Loads/stores use a signed 12-bit offset. Add the byte mask to that stable
+/// offset before the late forwarded base arrives, keeping two short sum slices.
+module PmpOffsetAccessEnd (
+    base: input logic<64>, offset: input logic<12>, size: input logic<2>,
+    last: output logic<33>, high: output logic,
+) {
+    var byte_mask: logic<3>;
+    var adjusted_offset: logic<13>;
+    var extended_offset: logic<32>;
+    var low_sum: logic<17>;
+    var high_zero: logic<16>;
+    var high_one: logic<16>;
+    var end_low: logic<32>;
+    var page_sum: logic<13>;
+    var upper_zero: logic;
+    var crossing_up: logic;
+    var crossing_down: logic;
+    always_comb {
+        // A signed 12-bit displacement can change the upper 32 bits only at
+        // the two adjacent 4 KiB pages. Decode those boundaries alongside the
+        // low 12-bit carry instead of reducing a completed 64-bit address sum.
+        page_sum = {1'b0, base[11:0]} + {1'b0, offset};
+        crossing_up = !offset[11] && page_sum[12] && (&base[31:12]);
+        crossing_down = offset[11] && !page_sum[12] && (base[31:12] == 20'd0);
+        upper_zero = base[63:32] == 32'd0;
+        high = !((upper_zero && !crossing_up && !crossing_down)
+            || ((base[63:32] == 32'hffff_ffff) && crossing_up)
+            || ((base[63:32] == 32'd1) && crossing_down));
+        byte_mask = {size[1] && size[0], size[1], size != 2'd0};
+        adjusted_offset = {offset[11], offset} + {10'd0, byte_mask};
+        extended_offset = {adjusted_offset[12] repeat 19, adjusted_offset};
+        low_sum = {1'b0, base[15:0]} + {1'b0, extended_offset[15:0]};
+        high_zero = base[31:16] + extended_offset[31:16];
+        high_one = base[31:16] + extended_offset[31:16] + 16'd1;
+        end_low = {if low_sum[16] ? high_one : high_zero, low_sum[15:0]};
+        last[31:0] = end_low;
+        // Discard overflow of base+offset, as the effective physical address
+        // is its low 32 bits. Retain only overflow from adding the byte mask:
+        // ((effective + mask) mod 2^32) < mask iff that second addition wraps.
+        last[32] = (end_low[31:3] == 29'd0) && (end_low[2:0] <: byte_mask);
+    }
+}
+
+/// Combinational reference interface; the core captures the end addresses
+/// with the access owner and uses PmpPermissionEnd directly.
+module PmpPermission #(param CHECK_FIRST_PARCEL: bit = 1) (
+    address: input logic<64>, size: input logic<2>,
+    user_access: input logic,
+    read_access: input logic, write_access: input logic, execute_access: input logic,
+    pmp_config: input logic<8> [4],
+    lower: input logic<33> [4], upper: input logic<33> [4],
+    allowed: output logic, first_parcel_allowed: output logic,
+) {
+    var last: logic<33>;
+    var first_last: logic<33>;
+    inst end_address: PmpAccessEnd (address, size, last, first_last);
+    inst permission: PmpPermissionEnd #(CHECK_FIRST_PARCEL: CHECK_FIRST_PARCEL) (
+        address, last, first_last, user_access, read_access, write_access, execute_access,
+        pmp_config, lower, upper, allowed, first_parcel_allowed,
+    );
+}
+
+/// Generic bounds retain a combinational nonempty check for standalone users.
+module PmpPermissionEnd #(param CHECK_FIRST_PARCEL: bit = 1) (
+    address: input logic<64>, last: input logic<33>, first_last: input logic<33>,
+    user_access: input logic,
+    read_access: input logic, write_access: input logic, execute_access: input logic,
+    pmp_config: input logic<8> [4],
+    lower: input logic<33> [4], upper: input logic<33> [4],
+    allowed: output logic, first_parcel_allowed: output logic,
+) {
+    var nonempty: logic<4>;
+    always_comb {
+        for entry in 0..4 {
+            nonempty[entry] = lower[entry] <: upper[entry];
+        }
+    }
+    inst permission: PmpPermissionDecodedBounds #(CHECK_FIRST_PARCEL: CHECK_FIRST_PARCEL) (
+        address, last, first_last, user_access, read_access, write_access, execute_access,
+        pmp_config, lower, upper, nonempty, allowed, first_parcel_allowed,
+    );
+}
+
+/// The first overlapping entry owns the whole access, including partial matches.
+/// Nonempty must describe the same snapshot as the supplied bounds and config.
+module PmpPermissionDecodedBounds #(param CHECK_FIRST_PARCEL: bit = 1) (
+    address: input logic<64>, last: input logic<33>, first_last: input logic<33>,
+    user_access: input logic,
+    read_access: input logic, write_access: input logic, execute_access: input logic,
+    pmp_config: input logic<8> [4],
+    lower: input logic<33> [4], upper: input logic<33> [4], nonempty: input logic<4>,
+    allowed: output logic, first_parcel_allowed: output logic,
+) {
+    var before_lower: logic<4>;
+    var before_upper: logic<4>;
+    var last_before_lower: logic<4>;
+    var last_before_upper: logic<4>;
+    var access_permission: logic<4>;
+    var overlap: logic<4>;
+    var permit: logic<4>;
+    var first_permit: logic<4>;
+    var first_overlap: logic<4>;
+    var grants: logic<4>;
+    var first_grants: logic<4>;
+    always_comb {
+        for entry in 0..4 {
+            // Share the ordering predicates across overlap and containment;
+            // their complements do not need separate carry comparators.
+            before_lower[entry] = ({1'b0, address[31:0]} <: lower[entry]);
+            before_upper[entry] = ({1'b0, address[31:0]} <: upper[entry]);
+            last_before_lower[entry] = (last <: lower[entry]);
+            last_before_upper[entry] = (last <: upper[entry]);
+            access_permission[entry] = (!user_access && !pmp_config[entry][7])
+                || ((!read_access || pmp_config[entry][0]) && (!write_access || pmp_config[entry][1])
+                    && (!execute_access || pmp_config[entry][2]));
+            overlap[entry] = (pmp_config[entry][4:3] != 2'd0) && (address[63:32] == 32'd0)
+                && nonempty[entry] && before_upper[entry] && !last_before_lower[entry];
+            permit[entry] = !before_lower[entry] && last_before_upper[entry] && access_permission[entry];
+            first_overlap[entry] = 1'b0;
+            first_permit[entry] = 1'b0;
+            if CHECK_FIRST_PARCEL != 0 {
+                first_overlap[entry] = (pmp_config[entry][4:3] != 2'd0) && (address[63:32] == 32'd0)
+                    && nonempty[entry] && before_upper[entry] && (first_last >= lower[entry]);
+                first_permit[entry] = !before_lower[entry] && (first_last <: upper[entry])
+                    && ((!user_access && !pmp_config[entry][7]) || pmp_config[entry][2]);
+            }
+        }
+        // Decode the lowest-index owner independently, then OR its permission.
+        // This avoids a serial permission mux through all four entries.
+        grants[0] = overlap[0];
+        grants[1] = overlap[1] && !overlap[0];
+        grants[2] = overlap[2] && !(overlap[1:0] != 2'd0);
+        grants[3] = overlap[3] && !(overlap[2:0] != 3'd0);
+        first_grants[0] = first_overlap[0];
+        first_grants[1] = first_overlap[1] && !first_overlap[0];
+        first_grants[2] = first_overlap[2] && !(first_overlap[1:0] != 2'd0);
+        first_grants[3] = first_overlap[3] && !(first_overlap[2:0] != 3'd0);
+        allowed = ((grants & permit) != 4'd0) || ((overlap == 4'd0) && !user_access);
+        first_parcel_allowed = ((first_grants & first_permit) != 4'd0)
+            || ((first_overlap == 4'd0) && !user_access);
+    }
+}
+
+/// Four programmable PMP entries, 32-bit PA, four-byte grain. The first entry
+/// overlapping any byte owns the whole access, including partial overlaps.
+module PmpCheck (
+    address: input logic<64>, size: input logic<2>,
+    user_access: input logic,
+    read_access: input logic, write_access: input logic, execute_access: input logic,
+    pmp_config: input logic<8> [4], pmp_address: input logic<30> [4],
+    allowed: output logic,
+    first_parcel_allowed: output logic,
+) {
+    var lower: logic<33> [4];
+    var upper: logic<33> [4];
+    inst ranges: PmpRanges (pmp_config, pmp_address, lower, upper);
+    inst permission: PmpPermission (
+        address, size, user_access, read_access, write_access, execute_access,
+        pmp_config, lower, upper, allowed, first_parcel_allowed,
+    );
+}

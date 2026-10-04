@@ -723,6 +723,7 @@ fn verify_hardware_memory_elf(
     elf: &Path,
     label: &str,
     coincident_order: CoincidentEdgeOrder,
+    platform: verify_riscv::platform::PlatformTiming,
     kernel_console: bool,
     max_cycles: usize,
 ) -> Result<(), Box<dyn Error>> {
@@ -831,7 +832,9 @@ fn verify_hardware_memory_elf(
         // Manual tick handles one event at a time. These two serializations
         // stress request and response ordering; neither measures hardware
         // cycles. Use --timed-clocks for atomic coincident-edge diagnostics.
-        if cycle % 2 == 0 && matches!(coincident_order, CoincidentEdgeOrder::MemoryThenCpu) {
+        if cycle % platform.memory_divisor() == 0
+            && matches!(coincident_order, CoincidentEdgeOrder::MemoryThenCpu)
+        {
             simulator.tick(clk_mem)?;
         }
         // A request is architecturally complete only when HardwareMemory has
@@ -839,6 +842,7 @@ fn verify_hardware_memory_elf(
         // that consumes it: a preceding memory edge can produce the ACK and
         // the CPU edge can drop data_we again in the same serialized cycle.
         let store_acknowledged = value_native(&mut simulator, "data_we") != 0
+            && value_native(&mut simulator, "data_store_retire_ready") != 0
             && value_native(&mut simulator, "data_response_sequence")
                 == value_native(&mut simulator, "data_request_sequence");
         let store = store_acknowledged.then(|| {
@@ -849,7 +853,9 @@ fn verify_hardware_memory_elf(
             )
         });
         simulator.tick(clk_cpu)?;
-        if cycle % 2 == 0 && matches!(coincident_order, CoincidentEdgeOrder::CpuThenMemory) {
+        if cycle % platform.memory_divisor() == 0
+            && matches!(coincident_order, CoincidentEdgeOrder::CpuThenMemory)
+        {
             simulator.tick(clk_mem)?;
         }
         if value_native(&mut simulator, "commit_valid") != 0 {
@@ -974,6 +980,8 @@ struct HardwareModelConfig {
     early_divide: bool,
     machine_interrupts: bool,
     strict_memory: bool,
+    enable_a: bool,
+    enable_u: bool,
     machine_console: bool,
     kernel_console: bool,
 }
@@ -998,9 +1006,12 @@ fn verify_hardware_memory_rtl(
         early_divide,
         machine_interrupts,
         strict_memory,
+        enable_a,
+        enable_u,
         machine_console,
         kernel_console,
     } = config;
+    let platform = verify_riscv::platform::hardware_platform(project, enable_u)?;
     let hardware_memory = fs::read_to_string(project.join("src/HardwareMemory.veryl"))?;
     let source = [
         verify_riscv::core_source(project)?,
@@ -1011,6 +1022,10 @@ fn verify_hardware_memory_rtl(
     ]
     .join("\n");
     let model = SimulatorBuilder::new(&source, "HardwareCoreTestTop")
+        .param("PMP_DATA_STAGES", platform.pmp_data_stages)
+        .param("EARLY_ALU", u64::from(platform.early_alu))
+        .param("DIRECT_LOAD_RETURN", u64::from(platform.direct_load_return))
+        .param("MEMORY_HZ", platform.memory_hz)
         .param("PREDICTOR_MODE", predictor_config / 2)
         .param("ICACHE_INDEX_BITS", icache_index_bits)
         .param("FAST_LSU", fast_lsu)
@@ -1024,6 +1039,8 @@ fn verify_hardware_memory_rtl(
         .param("EARLY_DIVIDE", u64::from(early_divide))
         .param("ENABLE_INTERRUPTS", u64::from(machine_interrupts))
         .param("STRICT_MEMORY", u64::from(strict_memory))
+        .param("ENABLE_A", u64::from(enable_a))
+        .param("ENABLE_U", u64::from(enable_u))
         .param("ENABLE_CONSOLE", u64::from(machine_console))
         .compile_native()?
         .into_program_image();
@@ -1048,6 +1065,7 @@ fn verify_hardware_memory_rtl(
                     &project.join("build/rv64i-subset").join(&label),
                     &label,
                     order,
+                    platform,
                     kernel_console,
                     max_cycles,
                 )?;
@@ -1060,7 +1078,15 @@ fn verify_hardware_memory_rtl(
                 CoincidentEdgeOrder::MemoryThenCpu,
                 CoincidentEdgeOrder::CpuThenMemory,
             ] {
-                verify_hardware_memory_elf(&model, elf, &label, order, kernel_console, max_cycles)?;
+                verify_hardware_memory_elf(
+                    &model,
+                    elf,
+                    &label,
+                    order,
+                    platform,
+                    kernel_console,
+                    max_cycles,
+                )?;
             }
         }
     }
@@ -1504,6 +1530,24 @@ fn mapped_critical_sinks(cells: &[Ecp5Cell]) -> Vec<(usize, String)> {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let arguments = std::env::args().collect::<Vec<_>>();
+    let project_options = arguments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, argument)| (argument == "--project").then_some(index))
+        .collect::<Vec<_>>();
+    if project_options.len() > 1 {
+        return Err("--project may only be supplied once".into());
+    }
+    let project_option = project_options.first().copied();
+    let project_override = project_option
+        .map(|index| {
+            arguments
+                .get(index + 1)
+                .filter(|path| !path.starts_with("--"))
+                .map(Path::new)
+                .ok_or("--project requires a project directory")
+        })
+        .transpose()?;
     let rtl_only = arguments.iter().any(|argument| argument == "--rtl-only");
     let configs = arguments
         .iter()
@@ -1537,6 +1581,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let early_divide = arguments.iter().any(|arg| arg == "--early-divide");
     let machine_interrupts = arguments.iter().any(|arg| arg == "--machine-interrupts");
     let strict_memory = arguments.iter().any(|arg| arg == "--strict-memory");
+    let enable_u = arguments.iter().any(|arg| arg == "--u-mode");
+    if enable_u && !strict_memory {
+        return Err("--u-mode requires --strict-memory".into());
+    }
+    let enable_a = arguments.iter().any(|arg| arg == "--a-extension");
+    if enable_a && !strict_memory {
+        return Err("--a-extension requires --strict-memory and --hardware-memory-rtl".into());
+    }
     let kernel_console = arguments.iter().any(|arg| arg == "--kernel-console");
     let machine_console = kernel_console || arguments.iter().any(|arg| arg == "--machine-console");
     if machine_console && !machine_interrupts {
@@ -1640,7 +1692,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let register_file_only = arguments
         .iter()
         .any(|argument| argument == "--regfile-only");
-    let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let project =
+        project_override.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap());
     if arguments
         .iter()
         .any(|argument| argument == "--hardware-memory-rtl")
@@ -1652,6 +1705,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             .skip(1)
             .filter(|(index, argument)| {
                 verify_riscv::predictor_option(argument).is_none()
+                    && !project_option
+                        .is_some_and(|option| *index == option || *index == option + 1)
                     && !cache_option.is_some_and(|option| *index == option || *index == option + 1)
                     && argument.as_str() != "--m-extension"
                     && argument.as_str() != "--zba-extension"
@@ -1663,6 +1718,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--early-divide"
                     && argument.as_str() != "--machine-interrupts"
                     && argument.as_str() != "--strict-memory"
+                    && argument.as_str() != "--a-extension"
+                    && argument.as_str() != "--u-mode"
                     && argument.as_str() != "--kernel-console"
                     && argument.as_str() != "--machine-console"
                     && argument.as_str() != "--dsp-multiplier"
@@ -1701,6 +1758,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                         early_divide,
                         machine_interrupts,
                         strict_memory,
+                        enable_a,
+                        enable_u,
                         machine_console,
                         kernel_console,
                         trace: timed_trace,
@@ -1727,6 +1786,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 early_divide,
                 machine_interrupts,
                 strict_memory,
+                enable_a,
+                enable_u,
                 machine_console,
                 kernel_console,
             },

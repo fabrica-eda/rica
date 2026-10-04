@@ -13,6 +13,11 @@ const KIND_DIRECT: u64 = 2;
 const KIND_CALL: u64 = 4;
 
 fn project_path() -> PathBuf {
+    // Allow recovery regressions against an immutable RTL snapshot while a
+    // separate physical implementation continues using the working project.
+    if let Some(project) = std::env::var_os("RICA_CORE_RECOVERY_PROJECT") {
+        return PathBuf::from(project);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

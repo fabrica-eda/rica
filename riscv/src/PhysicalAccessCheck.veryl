@@ -16,8 +16,7 @@ module PhysicalAccessCheck #(
     var ram_region  : logic   ;
     var timer_region: logic   ;
     var aligned     : logic   ;
-    var byte_last   : logic<3>;
-    var end_lane    : logic<4>;
+    var lane_cross  : logic   ;
     var boot_cross  : logic   ;
     var ram_cross   : logic   ;
 
@@ -25,26 +24,28 @@ module PhysicalAccessCheck #(
         boot_region  = address[63:12] == 52'd0;
         ram_region   = (address[63:18] == 46'h0000_0000_2000) && (address[17:12] != 6'h3f);
         timer_region = ENABLE_TIMER && !instruction && (address[63:16] == 48'h0000_0000_0200);
-        byte_last    = 3'd0;
+        lane_cross   = 1'b0;
         aligned      = 1'b1;
         case size {
             2'd1: {
-                byte_last = 3'd1;
+                lane_cross = address[2:0] == 3'd7;
                 aligned   = address[0] == 1'b0;
             }
             2'd2: {
-                byte_last = 3'd3;
+                lane_cross = address[2] && (address[1] || address[0]);
                 aligned   = address[1:0] == 2'd0;
             }
             2'd3: {
-                byte_last = 3'd7;
+                lane_cross = address[2:0] != 3'd0;
                 aligned   = address[2:0] == 3'd0;
             }
             default: {}
         }
-        end_lane      = {1'b0, address[2:0]} + {1'b0, byte_last};
-        boot_cross    = boot_region && (address[11:3] == 9'h1ff) && end_lane[3];
-        ram_cross     = ram_region && (address[17:3] == 15'h7dff) && end_lane[3];
+        // Region ends are eight-byte aligned. Compare the starting lane with
+        // the last legal lane for each width, avoiding an instruction-length
+        // decoder followed by a carry chain on the fetch-valid path.
+        boot_cross    = boot_region && (address[11:3] == 9'h1ff) && lane_cross;
+        ram_cross     = ram_region && (address[17:3] == 15'h7dff) && lane_cross;
         crosses_bound = boot_cross || ram_cross;
         allowed       = ((boot_region || ram_region) && !crosses_bound) || (timer_region && aligned);
         fault_address = address;

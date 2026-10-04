@@ -54,6 +54,8 @@ pub struct ExecutionConfig<'a> {
     pub early_divide: bool,
     pub machine_interrupts: bool,
     pub strict_memory: bool,
+    pub enable_a: bool,
+    pub enable_u: bool,
     pub machine_console: bool,
     pub kernel_console: bool,
     pub trace: Option<TraceConfig<'a>>,
@@ -90,10 +92,17 @@ const TRACE_SIGNALS: &[&str] = &[
     "core.memory_wait",
     "core.muldiv_wait",
     "core.backend_wait",
+    "core.atomic_wait",
+    "core.atomic_done",
+    "core.atomic_issue",
+    "core.atomic_written",
+    "core.interrupt_drain",
+    "core.interrupt_event",
     "core.redirect_pending_q",
     "core.branch_redirect_valid",
     "data_addr",
     "data_we",
+    "data_store_retire_ready",
     "data_request_sequence",
     "data_response_sequence",
     "core_data_response_sequence",
@@ -131,6 +140,7 @@ pub fn run(
         })
         .transpose()?;
     let image = ElfImage::load(elf)?;
+    let platform = crate::platform::hardware_platform(project, execution.enable_u)?;
     let mut source = crate::core_source(project)?;
     for name in [
         "InstructionBuffer",
@@ -143,6 +153,10 @@ pub fn run(
         )?);
     }
     let mut sim = Simulation::builder(&source, "HardwareCoreTestTop")
+        .param("PMP_DATA_STAGES", platform.pmp_data_stages)
+        .param("EARLY_ALU", u64::from(platform.early_alu))
+        .param("DIRECT_LOAD_RETURN", u64::from(platform.direct_load_return))
+        .param("MEMORY_HZ", platform.memory_hz)
         .param("PREDICTOR_MODE", predictor_config / 2)
         .param("ICACHE_INDEX_BITS", memory.0)
         .param("FAST_LSU", memory.1)
@@ -156,6 +170,8 @@ pub fn run(
         .param("EARLY_DIVIDE", u64::from(execution.early_divide))
         .param("ENABLE_INTERRUPTS", u64::from(execution.machine_interrupts))
         .param("STRICT_MEMORY", u64::from(execution.strict_memory))
+        .param("ENABLE_A", u64::from(execution.enable_a))
+        .param("ENABLE_U", u64::from(execution.enable_u))
         .param("ENABLE_CONSOLE", u64::from(execution.machine_console))
         .build()?;
     let reset = sim.signal("rst_n");
@@ -237,7 +253,7 @@ pub fn run(
                 output,
                 "{cycle},{},{}",
                 sim.time(),
-                u8::from(cycle % 2 == 0)
+                u8::from(cycle % platform.memory_divisor() == 0)
             )?;
             for signal in TRACE_SIGNALS {
                 write!(output, ",{:x}", value(&mut sim, signal))?;
@@ -247,6 +263,7 @@ pub fn run(
         memory_wait += usize::from(value(&mut sim, "core.memory_wait") != 0);
         muldiv_wait += usize::from(value(&mut sim, "core.muldiv_wait") != 0);
         let store = value(&mut sim, "data_we") != 0
+            && value(&mut sim, "data_store_retire_ready") != 0
             && value(&mut sim, "data_request_sequence")
                 == value(&mut sim, "data_response_sequence");
         let mut mailbox = None;
@@ -264,7 +281,7 @@ pub fn run(
                 mailbox = Some(mailbox_low);
             }
         }
-        let clocks: &[&str] = if cycle % 2 == 0 {
+        let clocks: &[&str] = if cycle % platform.memory_divisor() == 0 {
             &["clk_cpu", "clk_mem"]
         } else {
             &["clk_cpu"]
@@ -293,6 +310,11 @@ pub fn run(
             }
             let report = serde_json::json!({
                 "elf": elf, "clock_order": "simultaneous", "cycles": cycle,
+                "cpu_hz": platform.cpu_hz, "memory_hz": platform.memory_hz,
+                "pmp_data_stages": platform.pmp_data_stages,
+                "early_alu": platform.early_alu,
+                "direct_load_return": platform.direct_load_return,
+                "elapsed_ps": platform.elapsed_ps(cycle),
                 "commits": commits, "memory_wait_pre_edge": memory_wait,
                 "muldiv_wait_pre_edge": muldiv_wait,
                 "mcycle": value(&mut sim, "core.csr_file.mcycle_value"),

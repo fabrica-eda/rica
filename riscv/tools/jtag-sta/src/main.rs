@@ -7,6 +7,7 @@ use std::{
     error::Error,
     fs::File,
     io::BufReader,
+    path::Path,
 };
 use texo_model::{CellPinId, Design, PinDirection, ResourceKind};
 use texo_target_ecp5::{DelayRangeRecord, read_architecture_cache};
@@ -27,8 +28,77 @@ fn delay(v: DelayRangeRecord) -> DelayRange {
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     assert_eq!(args.len(), 3, "ARCH CHECKPOINT OUTPUT");
-    let arch = read_architecture_cache(BufReader::new(File::open(&args[0])?))?;
-    let cp: Value = serde_json::from_reader(BufReader::new(File::open(&args[1])?))?;
+    let mut arch = read_architecture_cache(BufReader::new(File::open(&args[0])?))?;
+    let cp: Value = texo_cli::read_checkpoint(std::path::Path::new(&args[1]))?;
+    let measured = &cp["target"]["measured_timing"];
+    let installed = if measured.is_object() {
+        Some(texo_cli::measured_timing::install(
+            Path::new(
+                measured["path"]
+                    .as_str()
+                    .ok_or("missing measured library path")?,
+            ),
+            &mut arch,
+            cp["target"]["package"].as_str().ok_or("missing package")?,
+            Some(
+                measured["sha256"]
+                    .as_str()
+                    .ok_or("missing measured library hash")?,
+            ),
+        )?)
+    } else {
+        if cp["timing"]["delay_model"] == "measured_joint_cell_route_min_max_ps" {
+            return Err("measured checkpoint has no timing-library provenance".into());
+        }
+        None
+    };
+    let grade = cp["target"]["speed_grade"]
+        .as_str()
+        .ok_or("missing speed grade")?;
+    if installed
+        .as_ref()
+        .is_some_and(|record| record["timing_grade"] != grade)
+    {
+        return Err("measured timing grade differs from checkpoint".into());
+    }
+    // INIT permutation preserves Boolean behavior but not asymmetric physical
+    // input delays. Recover the used input from the actual routed PIP, rather
+    // than silently using its logical A/B/C/D label.
+    let mut permuted_inputs = BTreeMap::new();
+    for route in cp["routes"].as_array().ok_or("missing routes")? {
+        for pip in route["pips"].as_array().ok_or("missing route PIPs")? {
+            let flags = u(&pip["lutperm_flags"]);
+            if flags & 0x4000 != 0 {
+                permuted_inputs.insert(
+                    (u(&route["net_id"]), u(&pip["to_wire_id"])),
+                    ["A", "B", "C", "D"][(flags & 3) as usize],
+                );
+            }
+        }
+    }
+    let mut lut_input_wires = BTreeMap::new();
+    for cell in cp["placement"].as_array().ok_or("missing placement")? {
+        if cell["kind"] == "lut4" {
+            for pin in cell["bel_pins"].as_array().ok_or("missing BEL pins")? {
+                if matches!(s(&pin["name"]), "A" | "B" | "C" | "D") {
+                    lut_input_wires
+                        .insert((u(&cell["cell_id"]), s(&pin["name"])), u(&pin["wire_id"]));
+                }
+            }
+        }
+    }
+    let physical_inputs = cp["timing"]["net_delays"]
+        .as_array()
+        .ok_or("missing delays")?
+        .iter()
+        .filter_map(|arc| {
+            let key = (u(&arc["sink_cell_id"]), s(&arc["sink_pin"]));
+            let wire = lut_input_wires.get(&key)?;
+            permuted_inputs
+                .get(&(u(&arc["net_id"]), *wire))
+                .map(|&input| (key, input))
+        })
+        .collect::<BTreeMap<_, _>>();
     let metadata: BTreeMap<_, _> = cp["primitive_metadata"]
         .as_array()
         .unwrap()
@@ -107,7 +177,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     constraints.set_clock_period_ps(nets[source], 166_666);
     constraints.set_clock_period_ps(clock_net, 166_666);
     constraints.set_generated_clock(clock_net, nets[source], 1, 1, 0);
-    let records: BTreeMap<_, _> = arch.speed_grades()["8_5G"]
+    let records: BTreeMap<_, _> = arch.speed_grades()[grade]
         .cells
         .iter()
         .map(|r| (r.cell_type.as_str(), r))
@@ -119,8 +189,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(u)
         .collect();
     let constants: BTreeSet<_> = by_net
-        .iter()
-        .filter_map(|(_, ds)| {
+        .values()
+        .filter_map(|ds| {
             s(&ds[0]["driver_cell"])
                 .starts_with("$PACKER_")
                 .then_some(nets[&u(&ds[0]["net_id"])])
@@ -187,7 +257,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if on_jtck && arc.from_pin == "CLK" && arc.to_pin == "Q" {
                     model.add_clock_to_q(from, to, edge, delay(arc.delay))?;
                 } else {
-                    model.add_cell_arc(from, to, delay(arc.delay))?;
+                    let physical = physical_inputs.get(&(old, arc.from_pin.as_str()));
+                    let measured_arc = if let Some(input) = physical {
+                        record
+                            .arcs
+                            .iter()
+                            .find(|candidate| {
+                                candidate.from_pin == *input && candidate.to_pin == arc.to_pin
+                            })
+                            .ok_or("missing timing for routed physical LUT input")?
+                    } else {
+                        arc
+                    };
+                    model.add_cell_arc(from, to, delay(measured_arc.delay))?;
                 }
             }
             if on_jtck {
@@ -266,7 +348,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         && other_tap_clocks.is_empty()
         && boundary_coverage_ok
         && internal_coverage_ok;
-    let result = json!({"scope":"JTCK register-to-register only; original pinned Texo STA and routed delays",
+    let result = json!({"scope":"JTCK register-to-register only; pinned Texo STA, checkpoint-selected cell library and routed delays",
+        "measured_timing":installed,"routed_physical_lut_inputs":physical_inputs.len(),
         "external_boundaries_not_characterized":["JTAGG launch/capture arcs", "JRSTN recovery/removal", "JTCK-to-CPU bundled-data CDC"],
         "jtag_tck_hz":6_000_000,"boundary_coverage_ok":boundary_coverage_ok,"internal_coverage_ok":internal_coverage_ok,"jtck_register_count":selected.len(),"register_paths_met_timing":report.met_timing(),
         "falling_edge_structure_ok":rising.is_empty(),"separate_update_clock_absent":other_tap_clocks.is_empty(),

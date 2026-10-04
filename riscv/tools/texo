@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Build/run the Cargo.lock-pinned Texo through Rica's Nix/MBX environment.
+set -euo pipefail
+rica_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$rica_root"
+# These switches test presence, so setting them to 0 does not disable output.
+if [[ ${RICA_VERBOSE:-0} != 1 ]]; then
+    unset TEXO_METRICS TEXO_PNR_METRICS TEXO_PNR_VERBOSE_METRICS
+fi
+exec nix develop --command cargo run --locked --quiet --release \
+    --manifest-path "$rica_root/Cargo.toml" -p rica-texo -- "$@"

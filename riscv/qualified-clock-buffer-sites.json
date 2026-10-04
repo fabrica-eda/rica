@@ -1,0 +1,5 @@
+{
+  "pll.CLKOS": "R0C67/TDCC3",
+  "pll.CLKOS2": "R0C67/TDCC1",
+  "jtagg.JTCK": "R46C3/LDCC0"
+}

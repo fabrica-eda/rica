@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Route RV64 configurations with identical constraints and retain evidence.
 
-Build maps with nextpnr-riscv Hardware{,Bimodal,Static,Cached2K,Cached4K,Cached8K}TestTop first.
+Build maps with nextpnr-riscv Hardware{,Bimodal,Static,Cached2K,Cached4K,Cached8K}TestTop --nextpnr-json first.
 This runner never generates or programs a bitstream. A reported frequency
 ceiling is an STA estimate, not a qualified operating clock.
 """

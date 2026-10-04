@@ -11,6 +11,8 @@ publish = false
 [features]
 access-faults = []
 console = []
+syscalls = []
+atomics = ["syscalls"]
 
 [profile.release]
 panic = "abort"
@@ -22,5 +24,11 @@ debug = 1
 [[bin]]
 name = "rica-kernel"
 path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "rica-user"
+path = "src/user.rs"
 test = false
 bench = false

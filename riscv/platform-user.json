@@ -1,0 +1,13 @@
+{
+  "name": "user-cpu104-memory52",
+  "reference_hz": 12000000,
+  "vco_hz": 624000000,
+  "cpu_hz": 104000000,
+  "memory_hz": 52000000,
+  "pmp_data_stages": 2,
+  "setup_hold_guard_ps": 194,
+  "top": "HardwareCompactUserTestTop",
+  "pll": "pll-user.json",
+  "early_alu": false,
+  "direct_load_return": false
+}

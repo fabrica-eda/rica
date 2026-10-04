@@ -7,6 +7,51 @@
 
 ## 現在地
 
+2026-09-23: [STA表全体の実測モデルへの置換](characterization/STA_REPLACEMENT.md)を完了。
+全1,552項目を474経路（学習261・検証213）で検証し、旧数値表への補完は使わない。
+共通マージンを201 psから194 psへ減らし、温度余裕20%は維持した。
+CPU 124.8 MHz／メモリ62.4 MHzでsetup +2 ps／hold +1 ps、JTCK各515件一致、
+267実機試験、266件の命令数一致・サイクル差±1以内、コンソール686 byte一致を確認。
+[採用プロファイル](qualified-measured-sta.json)を既定入口へ反映した。
+以下は比較元となる段階別の記録。
+
+2026-09-22（JST）: `HardwareCompactAtomicTestTop` のA拡張とRust atomic OSを
+**CPU 124.8 MHz／メモリ62.4 MHz／JTCK 6 MHz** で実機認定した。
+setup/hold各200 ps予約後は **0/+90 ps**、JTCK各515検査も一致。
+A診断24件＋既存238件＋OS 5種類の **267実機実行が合格**した。
+同一ELFの既存238件は旧実機と命令数が一致し、サイクル差は全件±1以内。
+コンソール686 byteもモデルと一致した。AMO/LR/SCとそれを使うOSの段階を完了し、
+次はU/PMPによる隔離、続いてS/Sv39へ進む。
+[認定済みAイメージと実行手順](RV64_ATOMIC_PLATFORM.md#hardware-qualification-2026-09-22-jst)。
+実行時はA対応bitstreamを明示する。runnerの既定値は旧consoleイメージのまま。
+
+2026-09-22: [実測モデルをTexo本体の配置改善へ組み込んだ](characterization/REPLACEMENT.md)。
+Rica用の入口 `riscv/tools/texo-measured` で旧配置予測式を無効にし、実測入力のハッシュ検査、
+合法な配置候補の生成、再配線とSTA、悪化時の取消しを行う。
+CPUでLUT移動を採用し、124.8 MHz、setup/hold各200 ps予約、残余0/+90 psを維持した。
+新しいbitstreamで267試験に合格し、[採用プロファイル](qualified-measured-placement.json)に記録した。
+基板にはこのCPUを残し、最後のatomic OSはmcycle=127145 / minstret=41092で合格した。
+この段階ではSTA表の全面置換は未完了で、不足項目を `coverage-report.json` に明示した。
+現在は上記の追加測定・全表置換・実機認定によって置換済み。
+
+2026-09-22: [FPGA実測の配置コストモデル](characterization/README.md)を追加した。
+96経路・408測定から学習し、別の24経路で最大誤差4.25%。実測モデルが選んだ
+LUT移動を、旧配置予測を無効にしたPnRへ渡し、同じクロックと200 ps予約で
+setup 0 ps／hold +90 ps、JTCK各515検査の一致を確認した。
+これは配置候補の評価モデルであり、STA用の全タイミング表を置換したものではない。
+FPGAは従来の認定済みAイメージへ戻し、atomic OSを再確認済み。
+
+同日、[FF・BRAM・DSP・負荷配線の実測](characterization/PHASE_APERTURE.md)を追加した。
+PLL位相を約200 ps刻みで変え、新値・旧値・混合値を極性別に測定。
+114イメージから31経路の捕捉境界を採用し、温度分20%＋200 psの仮定マージンを
+加えた11種の経路予算は、学習に使わない16経路の検証にも合格した。
+モデルが選んだ早い側・遅い側の位相を各3回の再書込みで確認した。
+これはclock-to-Q・配線・setup/hold・クロックスキューを含む経路全体のモデルで、
+独立したSTAアークや電圧依存性の測定値へは分解しない。
+CPUの周波数・RTL・STAは変更せず、計測後のatomic OSも合格した。
+
+### 前工程のconsole認定（2026-09-11）
+
 認定済み基準を **`HardwareCompactConsoleTestTop`** に更新した。
 CPU **124.8 MHz**、メモリ62.4 MHz、JTCK 6 MHz。
 setup・hold各200 ps予約後で **setup +2 ps／hold +90 ps**、各19,690検査に合格した。
@@ -136,6 +181,13 @@ Rust kernelから起動・例外情報を観測できるようになったため
 
 ### 2. A拡張：OSのlockとコンパイラのatomic
 
+2026-09-21: AMO演算部、decode/LSUへの接続とLR/SCを実装し、opt-in構成で
+`misa.A` を公開する。Rust atomicを使うOS版とnative/ECP5 mapped試験も追加済み。
+2026-09-22（JST）に新しい構成も同じ124.8 MHzで物理・実機認定を完了した。
+[認定済みA構成の仕様・検証範囲](RV64_ATOMIC_PLATFORM.md)。
+OS側は既存の非ネストtrapを使うfetch-add syscallを追加し、認定済み124.8 MHz
+imageで動作を確認済み。[今回の検証と残作業](RV64_OS_ISA_PROGRESS_20260921.md)。
+
 `LR.W/D`、`SC.W/D` と全AMO.W/Dを実装し、Zaamo＋Zalrscが揃ってから `misa.A` を立てる。
 単一hartの初版はLSUで直列化し、`aq/rl` とFENCEの順序を維持する。
 reservationは物理アドレスで追跡し、SCの成功/失敗、word結果の符号拡張、alignment fault、
@@ -147,6 +199,11 @@ A対応後のソフトウェアターゲットは `rv64imac_zicsr_zifencei_zba_z
 現行image用ビルドにA命令を混ぜない。
 
 ### 3. U-modeと保護、その後S-mode＋Sv39
+
+2026-09-24: opt-in U/PMPと、隔離された2つのUタスクを実装中。
+CSR/PMPのnative・mapped検証とOSの機能モデル検証は合格。
+124.8 MHzでの配置配線・実機認定は継続中で、既定の認定imageは未変更。
+[U/PMPの仕様・検証範囲](RV64_USER_PLATFORM.md)。
 
 1. privilege stateとCSRアクセス権、MRETの権限遷移、U-mode ECALL、PMP。
    ユーザコードがCSRやkernel RAM/MMIOへ触れる負試験も用意する。

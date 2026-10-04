@@ -1,8 +1,40 @@
 # ECP5向けRV64アーキテクチャの検討結果と実装計画
 
+## 2026-10-02: Uモード向け再設計（78 MHzのSTA合格・性能改善未完了）
+
+周波数の引き下げは許容するが、その目標に合わせてパイプライン・メモリ・OSを
+再設計する。従来実装のPLLだけを下げる案は採用しない。現在の候補はCPU/メモリ
+78/78 MHz、PMPデータ判定2段、EX内でシフト・比較を完了して直後へ転送する構成。
+同期レジスタファイルの読み出しと、正確な例外・ロード・複数サイクル演算の
+リタイア境界はそれぞれの要件を確認して残す。OSの50 µs量子は実際のtimebaseから
+起動時に算出する。
+
+単一の `platform-user.json` からPLL/RTL定数を生成し、モデルのクロック順序と
+STA/bitstream検査を合わせる。実行サイクルだけでなく同一ELFの経過時間を比較し、
+実測モデル・194 psのsetup/holdガード・既存4例外で新しい配置配線を検査する。
+下記の旧周波数での実績をこの候補へ引き継がない。詳細と進捗は
+[RV64_USER_PLATFORM.md](RV64_USER_PLATFORM.md) を参照。
+78 MHz候補はsetup +33 ps / hold +1 ps、22,372件ずつの検査と配線所有権、
+JTAGの515件ずつの追加照合に合格した。536件のnative検証、同時クロックの
+Uカーネルと追加31件も合格し、ビットストリームを生成済み。
+同一ELF・同一コミット数258件の実行時間は旧構成比で中央値1.360倍、
+加重比1.396倍。これはRTLシミュレーションの比較であり、旧U構成は124.8 MHzでの
+STA未達、78 MHz候補も実機未検証。CPU周波数を37.5%下げたのに対し、
+実行サイクルの削減は中央値約15%に留まる。演算・分岐・呼出しの診断では
+サイクル数がほぼ変わらず、実行時間が約1.6倍になる。性能改善は未完了であり、
+78 MHz候補を再設計の完成形として扱わない。
+
+周波数回復に向けた配線後診断では、演算結果のcritical fan-inに277負荷のLUT出力
+（配線3,511 ps）、PMPのRXレジスタenableに6,342 psの配線が残る。
+タイマー応答レジスタへの経路にはconsole RX FIFOの読み出しも含まれる。
+これらは保存済みCPの等slack fan-in・配置・fanoutから確認した改善対象であり、
+改修後の周波数成立を保証する数値ではない。論理と配置の両方を改修し、
+同一ELFの経過時間と新しい配置配線のsetup/holdで評価を続ける。
+
+
 作成日: 2026-09-05。対象: **LFE5UM5G-85F / CABGA381 / speed 8**。
 
-## 必須条件と現在の構成
+## 2026-09時点の必須条件と構成
 
 **CPU 124.8 MHz／メモリ62.4 MHzのPLL設定を必須条件とする。**
 配置配線後のsetup/holdが成立しない構成は、サイクル数が少なくても採用しない。
@@ -332,9 +364,9 @@ cargo run --locked --offline -p verify-riscv --bin rv64-riscv-tests -- --static-
 
 ```sh
 cargo build --locked --offline --release -p verify-riscv --bin nextpnr-riscv
-target/release/nextpnr-riscv HardwareTestTop
-target/release/nextpnr-riscv HardwareBimodalTestTop
-target/release/nextpnr-riscv HardwareStaticTestTop
+target/release/nextpnr-riscv HardwareTestTop --nextpnr-json
+target/release/nextpnr-riscv HardwareBimodalTestTop --nextpnr-json
+target/release/nextpnr-riscv HardwareStaticTestTop --nextpnr-json
 python3 riscv/tools/run_rv64_architecture_ab.py \
   --tage riscv/build/riscv-hardware-test-125.nextpnr.json \
   --bimodal riscv/build/riscv-hardware-bimodal-test-125.nextpnr.json \

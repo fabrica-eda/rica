@@ -12,6 +12,7 @@ interface DecodeBus {
     var use_rs2      : logic    ;
     var write_enable : logic    ;
     var is_muldiv    : logic    ;
+    var is_atomic    : logic    ;
     var is_load      : logic    ;
     var load_size    : logic<2> ;
     var load_unsigned: logic    ;
@@ -51,6 +52,12 @@ interface DecodeBus {
 /// Machine interrupt levels are synchronous to the core clock. Bit order is
 /// {external, timer, software}; the platform owns acknowledgment of each level.
 interface CsrBus {
+    var user_mode: logic;
+    var data_user: logic;
+    var counter_enable: logic<3>;
+    var pmp_config: logic<8> [4];
+    var pmp_address: logic<30> [4];
+
     var index                         : logic<5> ;
     var write_index                   : logic<5> ;
     var read_data                     : logic<64>;
@@ -82,6 +89,12 @@ interface CsrBus {
     var interrupt_cause               : logic<4> ;
 
     modport core {
+        user_mode: input,
+        data_user: input,
+        counter_enable: input,
+        pmp_config: input,
+        pmp_address: input,
+
         index                         : output,
         write_index                   : output,
         write_enable                  : output,
@@ -114,6 +127,12 @@ interface CsrBus {
     }
 
     modport file {
+        user_mode: output,
+        data_user: output,
+        counter_enable: output,
+        pmp_config: output,
+        pmp_address: output,
+
         index                         : input ,
         write_index                   : input ,
         write_enable                  : input ,

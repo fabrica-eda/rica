@@ -11,6 +11,14 @@ module HardwareCoreTestTop #(
     param ENABLE_ZBS       : bit = 0,
     param EARLY_BITMANIP   : bit = 0,
     param EARLY_TAKEN_FETCH: bit = 0,
+    param ENABLE_U: bit = 0,
+    param PMP_DATA_STAGES: u32 = 3,
+    param EARLY_ALU: bit = 0,
+    // Related clocks at the same frequency can return the held BRAM result
+    // directly to CM; no request can retire before its response token.
+    param DIRECT_LOAD_RETURN: bit = 0,
+    param MEMORY_HZ: u64 = 62_400_000,
+    param ENABLE_A: bit = 0,
     param ENABLE_M         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
@@ -106,6 +114,7 @@ module HardwareCoreTestTop #(
     var core_machine_interrupts  : 'cpu    logic<3>;
     unsafe (cdc) {
         inst hardware_memory: HardwareMemory #(
+            MEMORY_HZ     : MEMORY_HZ,
             STRICT_MEMORY : STRICT_MEMORY    ,
             ENABLE_TIMER  : ENABLE_INTERRUPTS,
             ENABLE_CONSOLE: ENABLE_CONSOLE   ,
@@ -154,8 +163,10 @@ module HardwareCoreTestTop #(
     var data_load_size             : 'cpu logic<2> ;
     var data_load_unsigned         : 'cpu logic    ;
     var core_data_rdata            : 'cpu logic<64>;
+    var data_store_retire_ready: 'cpu logic;
     var core_data_response_sequence: 'cpu logic    ;
-    if (FAST_LSU == 4) || (FAST_LSU == 6) :g_load_return {
+    var core_load_response_sequence: 'cpu logic;
+    if !DIRECT_LOAD_RETURN && ((FAST_LSU == 4) || (FAST_LSU == 6)) :g_load_return {
         // CM holds the load descriptor until its response sequence matches.
         // Format before this existing response register: load extension no
         // longer precedes Core's forwarding mux, without another wait cycle.
@@ -168,6 +179,7 @@ module HardwareCoreTestTop #(
         );
         var load_sequence_q: 'cpu logic;
         assign core_data_response_sequence = if data_we ? data_response_sequence : load_sequence_q;
+        assign core_load_response_sequence = load_sequence_q;
         always_ff (clk_cpu, cpu_rst_n) {
             if_reset {
                 core_data_rdata = 64'd0;
@@ -180,10 +192,13 @@ module HardwareCoreTestTop #(
     } else {
         assign core_data_rdata             = data_rdata;
         assign core_data_response_sequence = data_response_sequence;
+        assign core_load_response_sequence = data_response_sequence;
     }
 
     inst core: Core #(
-        FORMATTED_LOAD_DATA    : (FAST_LSU == 4) || (FAST_LSU == 6),
+        PMP_DATA_STAGES: PMP_DATA_STAGES,
+        EARLY_ALU: EARLY_ALU,
+        FORMATTED_LOAD_DATA    : !DIRECT_LOAD_RETURN && ((FAST_LSU == 4) || (FAST_LSU == 6)),
         STRICT_MEMORY          : STRICT_MEMORY                     ,
         ENABLE_INTERRUPTS      : ENABLE_INTERRUPTS                 ,
         ENABLE_ZBA             : ENABLE_ZBA                        ,
@@ -198,6 +213,9 @@ module HardwareCoreTestTop #(
         SYNC_DATA_MEMORY       : 1                                 ,
         RELOCATE_LOW_DATA      : 1                                 ,
         BRANCH_PREDICTOR_CONFIG: 1 + 2 * PREDICTOR_MODE,
+        ENABLE_U: ENABLE_U,
+        ENABLE_A: ENABLE_A,
+        SPLIT_MEMORY_RESPONSES: ENABLE_A,
     ) (
         clk                   : clk_cpu                    ,
         rst_n                 : cpu_rst_n                  ,
@@ -206,6 +224,8 @@ module HardwareCoreTestTop #(
         instr_valid           : instruction_valid          ,
         data_rdata            : core_data_rdata            ,
         data_response_sequence: core_data_response_sequence,
+        data_load_response_sequence: core_load_response_sequence,
+        data_store_response_sequence: data_response_sequence,
         machine_interrupts    : core_machine_interrupts    ,
         counter_freeze        : 1'b0                       ,
         debug_counter_index   : 4'd0                       ,
@@ -216,6 +236,7 @@ module HardwareCoreTestTop #(
         data_wdata            : data_wdata                 ,
         data_wmask            : data_wmask                 ,
         data_we               : data_we                    ,
+        data_store_retire_ready: data_store_retire_ready,
         data_request_sequence : data_request_sequence      ,
         data_load_size        : data_load_size             ,
         data_load_unsigned    : data_load_unsigned         ,

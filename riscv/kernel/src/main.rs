@@ -11,9 +11,20 @@ global_asm!(include_str!("entry.S"));
 #[cfg(feature = "console")]
 mod console;
 
+#[cfg(feature = "atomics")]
+mod atomics;
+#[cfg(feature = "syscalls")]
+mod syscall;
+#[cfg(feature = "atomics")]
+static mut ATOMIC_SEEN: [u64; 2] = [0; 2];
+#[cfg(feature = "syscalls")]
+static mut SHARED_COUNT: u64 = 0;
+#[cfg(feature = "syscalls")]
+static mut SHARED_SEEN: [u64; 2] = [0; 2];
+
 const MTIMECMP: *mut u64 = 0x0200_4000 as *mut u64;
 const MTIME: *const u64 = 0x0200_bff8 as *const u64;
-const SLICE: u64 = 3000; // The platform timer runs at 62.4 MHz.
+const TIMEBASE_HZ: *const u64 = 0x0200_bff0 as *const u64;
 const STACK_SIZE: usize = 16 * 1024;
 
 #[repr(C, align(16))]
@@ -108,15 +119,21 @@ fn check(condition: bool, code: u64) {
 
 fn arm_timer() {
     unsafe {
-        write_volatile(MTIMECMP, read_volatile(MTIME).wrapping_add(SLICE));
+        write_volatile(MTIMECMP, read_volatile(MTIME).wrapping_add(SLICE_TICKS));
     }
 }
+
+// Fifty microseconds, computed at boot before interrupts are enabled.
+static mut SLICE_TICKS: u64 = 1;
 
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
     unsafe {
         write_volatile(MTIMECMP, u64::MAX);
+        SLICE_TICKS = (read_volatile(TIMEBASE_HZ) / 20_000).max(1);
     }
+    #[cfg(feature = "atomics")]
+    atomics::init();
     #[cfg(feature = "console")]
     console::init();
     #[cfg(feature = "access-faults")]
@@ -159,9 +176,28 @@ extern "C" fn kernel_main() -> ! {
 
 extern "C" fn task(id: usize) -> ! {
     check(id < 2, 10);
+    #[cfg(feature = "syscalls")]
+    syscall::probe(id);
+    #[cfg(feature = "syscalls")]
+    let mut seen = 0_u64;
+    #[cfg(feature = "atomics")]
+    let mut atomic_seen = 0_u64;
     let mut checksum = 0x1234_5678_9abc_def0_u64 ^ id as u64;
     let guard = [0x1122_3344_5566_7788_u64 ^ id as u64; 8];
     for round in 0..16_u64 {
+        #[cfg(feature = "atomics")]
+        {
+            let old = atomics::step();
+            check(old < 32 && atomic_seen & (1 << old) == 0, 56);
+            atomic_seen |= 1 << old;
+        }
+        #[cfg(feature = "syscalls")]
+        {
+            let old = syscall::call(syscall::FETCH_ADD, 1);
+            check(old < 32 && seen & (1 << old) == 0, 48);
+            seen |= 1 << old;
+            check(syscall::call(syscall::GET_ID, 0) == id as u64, 49);
+        }
         for inner in 0..32_u64 {
             checksum =
                 checksum.rotate_left(7).wrapping_mul(0x1000_0000_01b3) ^ (round * 32 + inner);
@@ -194,6 +230,10 @@ extern "C" fn task(id: usize) -> ! {
         core::hint::spin_loop();
     }
     unsafe {
+        #[cfg(feature = "atomics")]
+        write_volatile(addr_of_mut!(ATOMIC_SEEN).cast::<u64>().add(id), atomic_seen);
+        #[cfg(feature = "syscalls")]
+        write_volatile(addr_of_mut!(SHARED_SEEN).cast::<u64>().add(id), seen);
         asm!("ecall", in("a7") 1_u64, options(nostack));
     }
     finish(14)
@@ -234,6 +274,22 @@ unsafe extern "C" fn rust_trap(frame: *mut TrapFrame) -> *mut TrapFrame {
         match f.cause {
             11 => {
                 f.pc += 4; // ECALL has no compressed encoding.
+                #[cfg(feature = "syscalls")]
+                if f.x[17] >= 2 {
+                    f.x[10] = match f.x[17] {
+                        syscall::GET_ID => CURRENT as u64,
+                        syscall::FETCH_ADD => {
+                            let old = SHARED_COUNT;
+                            SHARED_COUNT = old.wrapping_add(f.x[10]);
+                            old
+                        }
+                        syscall::CLOCK => read_volatile(MTIME),
+                        _ => syscall::ENOSYS,
+                    };
+                    // Query/update calls resume the caller without resetting
+                    // its timer deadline or counting as a voluntary yield.
+                    return frame;
+                }
                 match f.x[17] {
                     0 => YIELDS += 1,
                     1 => DONE[CURRENT] = true,
@@ -249,6 +305,22 @@ unsafe extern "C" fn rust_trap(frame: *mut TrapFrame) -> *mut TrapFrame {
         }
         CONTEXTS[CURRENT] = frame;
         if DONE[0] && DONE[1] {
+            #[cfg(feature = "atomics")]
+            {
+                atomics::complete();
+                check(
+                    ATOMIC_SEEN[0] | ATOMIC_SEEN[1] == 0xffff_ffff
+                        && ATOMIC_SEEN[0] & ATOMIC_SEEN[1] == 0,
+                    57,
+                );
+            }
+            #[cfg(feature = "syscalls")]
+            check(
+                SHARED_COUNT == 32
+                    && SHARED_SEEN[0] | SHARED_SEEN[1] == 0xffff_ffff
+                    && SHARED_SEEN[0] & SHARED_SEEN[1] == 0,
+                52,
+            );
             check(COUNTS[0] == 16 && COUNTS[1] == 16 && YIELDS == 32, 28);
             check(TICKS >= 2 && TASK_TICKS[0] != 0 && TASK_TICKS[1] != 0, 29);
             #[cfg(feature = "access-faults")]

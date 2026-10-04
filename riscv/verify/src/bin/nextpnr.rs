@@ -413,7 +413,10 @@ fn validate_board_report(project: &Path, path: &Path) -> Result<(), Box<dyn Erro
 
 fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let mut arguments = env::args().skip(1).collect::<Vec<_>>().into_iter();
+    let mut arguments = env::args().skip(1).collect::<Vec<_>>();
+    let nextpnr_json = arguments.iter().any(|arg| arg == "--nextpnr-json");
+    arguments.retain(|arg| arg != "--nextpnr-json");
+    let mut arguments = arguments.into_iter();
     let top = arguments.next().unwrap_or_else(|| "Core".to_owned());
     if top == "--validate-board-report" {
         let report = arguments
@@ -426,7 +429,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let feedback_arguments = arguments.collect::<Vec<_>>();
     if feedback_arguments.len() % 2 != 0 {
-        return Err("each physical feedback step requires REPORT.json and PLACED.json".into());
+        return Err("each physical feedback step requires REPORT and PLACED artifact paths".into());
     }
     let (output_name, timing_goal_mhz) = match top.as_str() {
         "Core" => ("riscv-125.nextpnr.json", 125),
@@ -499,10 +502,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         mapped.bind_pll(&pll)?;
     }
     for [report, placed] in feedback_arguments.as_chunks::<2>().0 {
-        let feedback = PhysicalFeedback::from_nextpnr_json(
-            &fs::read_to_string(report)?,
-            &fs::read_to_string(placed)?,
-        )?;
+        let feedback = PhysicalFeedback::from_nextpnr_files(Path::new(report), Path::new(placed))?;
         mapped = mapped.apply_physical_feedback(&feedback);
     }
     if is_board {
@@ -537,11 +537,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    let output_name = if nextpnr_json {
+        output_name.to_owned()
+    } else {
+        output_name.replace(".nextpnr.json", ".stnet")
+    };
     let output = project.join("build").join(output_name);
     fs::create_dir_all(output.parent().unwrap())?;
-    fs::write(&output, mapped.to_nextpnr_json()?)?;
+    if nextpnr_json {
+        fs::write(&output, mapped.to_nextpnr_json()?)?;
+    } else {
+        mapped.write_artifact(&output)?;
+    }
     println!(
-        "Struo mapped nextpnr JSON: {} cells, retimed={}, data={} -> {} ps, overall={} -> {} ps, LUT depth={} -> {}, {}",
+        "Struo mapped artifact: {} cells, retimed={}, data={} -> {} ps, overall={} -> {} ps, LUT depth={} -> {}, {}",
         mapped.cells().len(),
         mapped.retiming().applied,
         mapped.retiming().original_period_ps,

@@ -124,6 +124,40 @@ Veryl native testbenches run on Celox with `cargo test --locked --offline -p ric
 see [test instructions](riscv/tests/README.md). The [MRE inventory](toolchain/mre/README.md)
 currently has no active reproducers; fixed cases are covered by upstream regressions.
 
+## Current synthesis tools and output formats
+
+The workspace pins Celox 0.8.1 and the Struo/Texo revisions in `Cargo.toml` and
+`Cargo.lock`. Run Texo through `riscv/tools/texo`; it builds the pinned CLI with
+Nix and MBX, sharing the workspace target directory. `riscv/tools/texo-measured`
+also supplies the hash-checked board measurement models and the 194 ps guard.
+Archived STA libraries and their evidence can be read directly from `.zst`;
+hash verification uses the original decompressed bytes without JSON staging.
+The old qualified executable is available only with `--historical-toolchain`;
+its qualification does not transfer to a new implementation.
+
+```sh
+riscv/tools/texo --version
+riscv/tools/texo-measured pnr riscv --top HardwareCompactUserTestTop \
+  --device LFE5UM5G-85F --package CABGA381 --speed 8 \
+  --lpf riscv/lfe5um5g-85f-evn.lpf --pll-binding riscv/pll-12-to-124p8.json \
+  --jtagg-prefix jtag --clock-constraints riscv/jtck-clock-constraints.json \
+  --timing-exceptions riscv/timing-coverage-exceptions.json \
+  --output riscv/build/current-user.txcp
+```
+
+New Texo checkpoints use `.txcp` (CBOR + Zstd). The `nextpnr-riscv` and
+`nextpnr-i2c` mapping helpers now write compressed `.stnet` files by default.
+Add `--nextpnr-json` only when exporting for external nextpnr; its input format
+is JSON. Physical feedback accepts both the compressed artifacts and old JSON.
+These formats describe different artifacts: a Struo `.stnet` is not a Texo
+PNR checkpoint. Old archived JSON remains readable.
+
+The Texo launcher disables `TEXO_METRICS`, `TEXO_PNR_METRICS`, and
+`TEXO_PNR_VERBOSE_METRICS` by default.
+Set `RICA_VERBOSE=1` to preserve explicitly enabled diagnostic logging. Historical
+measurement manifests and immutable experimental executables are retained for
+reproduction; do not copy their old dependency pins into new development builds.
+
 ## Nix development environment
 
 On x86_64 or aarch64 Linux (including WSL2), enter the pinned development shell:

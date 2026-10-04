@@ -1,5 +1,5 @@
 [workspace]
-members = ["i2c/verify", "riscv/verify", "toolchain/tb"]
+members = ["i2c/verify", "riscv/verify", "riscv/tools/jtag-sta", "toolchain/tb", "toolchain/texo"]
 default-members = ["riscv/verify", "toolchain/tb"]
 resolver = "3"
 
@@ -10,15 +10,18 @@ rust-version = "1.98.1"
 [workspace.dependencies]
 serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
-# Celox 0.4.7 after the release tag, including upstream parameter typing fix #787.
-celox = { version = "=0.4.7", git = "https://github.com/celox-sim/celox.git", rev = "ab63d6cf16ce702be7feed1c197808c30aad690d" }
-# Keep direct and Texo-transitive dependencies aligned (Struo #91 / Texo #73).
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "70058b6f6af4de25c7b075802692f371c914c01f" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
+# Current simulator and compressed-artifact synthesis stack.
+celox = "=0.8.1"
+# Keep direct and Texo-transitive Struo dependencies aligned.
+struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
+struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
+struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
+struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
+texo-model = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
+texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
+texo-timing = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
 
 [patch.crates-io]
 # Keep constant-folding metadata consistent with fitted constant storage.

@@ -35,13 +35,22 @@ module CompressedDecoder (
 
     // Disjoint instruction matches form a balanced OR tree. No instruction
     // field waits behind the priority chain of unrelated compressed opcodes.
-    var selected  : logic<32>     ;
-    var candidates: logic<32> [32];
-    var masked    : logic<32> [32];
-    var level0    : logic<32> [16];
-    var level1    : logic<32> [8] ;
-    var level2    : logic<32> [4] ;
-    var level3    : logic<32> [2] ;
+    var selected   : logic<32>     ;
+    var candidates : logic<32> [32];
+    var masked     : logic<32> [32];
+    var level0     : logic<32> [16];
+    var level1     : logic<32> [8] ;
+    var level2     : logic<32> [4] ;
+    var level3     : logic<32> [2] ;
+    var q0_legal   : logic         ;
+    var q1_legal   : logic         ;
+    var q2_legal   : logic         ;
+    var ci_nonzero : logic         ;
+    var cr_legal   : logic         ;
+    var q1_control : logic         ;
+    var q1_register: logic         ;
+    var q2_indirect: logic         ;
+    var opcode     : logic<7>      ;
 
     always_comb {
         quadrant  = compressed[1:0];
@@ -175,9 +184,36 @@ module CompressedDecoder (
         for i in 0..2 {
             level3[i] = level2[i * 2] | level2[i * 2 + 1];
         }
-        illegal = selected == 32'd0;
-        // Preserve the deterministic NOP for every illegal encoding, without
-        // gating the other 29 output bits behind the legality reduction.
-        instruction = level3[0] | level3[1] | ({illegal repeat 32} & 32'h0000_0013);
+        // Classify legality directly from the encoding groups. This avoids a
+        // wide reduction of all 32 expanded instruction matches.
+        ci_nonzero = {compressed[12], compressed[6:2]} != 6'd0;
+        cr_legal   = compressed[12] || (rd != 5'd0) || (rs2 != 5'd0);
+        q0_legal   = funct3[1] || ((funct3 == 3'b000) && (compressed[12:5] != 8'd0));
+        q1_legal   = !(((funct3 == 3'b001) && (rd == 5'd0)) || ((funct3 == 3'b011) && !ci_nonzero)
+            || ((funct3 == 3'b100) && (compressed[11:10] == 2'b11) && compressed[12] && compressed[6]));
+        q2_legal   = (funct3 == 3'b000) || ((funct3[2:1] == 2'b01) && (rd != 5'd0)) || ((funct3 == 3'b100) && cr_legal)
+            || (funct3[2:1] == 2'b11);
+        illegal    = !(((quadrant == 2'b00) && q0_legal) || ((quadrant == 2'b01) && q1_legal)
+            || ((quadrant == 2'b10) && q2_legal));
+
+        // Canonical RV64I opcodes, including the illegal-encoding NOP, end in
+        // 11. Decode the other five bits by instruction family rather than
+        // passing constant opcode fields through the full expansion tree.
+        q1_control       = (quadrant == 2'b01) && funct3[2] && (funct3[1] || funct3[0]);
+        q1_register      = (quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[11:10] == 2'b11)
+            && (!compressed[12] || !compressed[6]);
+        q2_indirect      = (quadrant == 2'b10) && (funct3 == 3'b100) && (rs2 == 5'd0) && (rd != 5'd0);
+        opcode[1:0]      = 2'b11;
+        opcode[2]        = selected[9] || selected[19] || q2_indirect;
+        opcode[3]        = selected[6] || selected[19]
+            || ((quadrant == 2'b01) && (funct3 == 3'b100) && (compressed[12:10] == 3'b111) && !compressed[6]);
+        opcode[4]        = !(((quadrant == 2'b00) && funct3[1]) || q1_control || q2_indirect
+            || ((quadrant == 2'b10) && ((funct3[2:1] == 2'b11) || ((funct3[2:1] == 2'b01) && (rd != 5'd0)))));
+        opcode[5]        = ((quadrant == 2'b00) && (funct3[2:1] == 2'b11)) || selected[9] || q1_register || q1_control
+            || ((quadrant == 2'b10) && ((funct3[2:1] == 2'b11) || ((funct3 == 3'b100) && cr_legal)));
+        opcode[6]        = q1_control
+            || ((quadrant == 2'b10) && (funct3 == 3'b100) && (rs2 == 5'd0) && (compressed[12] || (rd != 5'd0)));
+        instruction      = level3[0] | level3[1];
+        instruction[6:0] = opcode;
     }
 }

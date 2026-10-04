@@ -5,30 +5,23 @@ module LoadFormat (
     unsigned_load: input  logic    ,
     formatted    : output logic<64>,
 ) {
+    var byte_sign: logic;
+    var half_sign: logic;
+    var word_sign: logic;
+
     always_comb {
-        case size {
-            2'b00: {
-                if unsigned_load {
-                    formatted = {56'd0, value[7:0]};
-                } else {
-                    formatted = {value[7] repeat 56, value[7:0]};
-                }
-            }
-            2'b01: {
-                if unsigned_load {
-                    formatted = {48'd0, value[15:0]};
-                } else {
-                    formatted = {value[15] repeat 48, value[15:0]};
-                }
-            }
-            2'b10: {
-                if unsigned_load {
-                    formatted = {32'd0, value[31:0]};
-                } else {
-                    formatted = {value[31] repeat 32, value[31:0]};
-                }
-            }
-            default: formatted = value;
-        }
+        // Disjoint size terms let data selection and sign extension run in
+        // parallel, instead of selecting a complete 64-bit result in series.
+        byte_sign = (size == 2'b00) && !unsigned_load && value[7];
+        half_sign = (size == 2'b01) && !unsigned_load && value[15];
+        word_sign = (size == 2'b10) && !unsigned_load && value[31];
+
+        formatted[7:0] = value[7:0];
+        formatted[15:8] = (value[15:8] & {(size != 2'b00) repeat 8})
+            | {byte_sign repeat 8};
+        formatted[31:16] = (value[31:16] & {size[1] repeat 16})
+            | {(byte_sign || half_sign) repeat 16};
+        formatted[63:32] = (value[63:32] & {(size == 2'b11) repeat 32})
+            | {(byte_sign || half_sign || word_sign) repeat 32};
     }
 }

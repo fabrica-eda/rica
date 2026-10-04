@@ -7,9 +7,11 @@ use celox::{NativeBackend, NativeProgramImage, Simulator, SimulatorBuilder};
 use object::{Architecture, Object, ObjectSegment, ObjectSymbol};
 
 pub mod console_host;
+pub mod platform;
 pub mod timed_memory;
 
-const CORE_SOURCES: [&str; 24] = [
+const CORE_SOURCES: [&str; 28] = [
+    "UserPlatform.veryl",
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
     "CompressedDecoder.veryl",
@@ -21,6 +23,7 @@ const CORE_SOURCES: [&str; 24] = [
     "TageDirectionPredictor.veryl",
     "BranchPredictor.veryl",
     "CsrFile.veryl",
+    "PmpCheck.veryl",
     "ExecuteUnit.veryl",
     "BitManipUnit.veryl",
     "MulDivUnit.veryl",
@@ -31,6 +34,8 @@ const CORE_SOURCES: [&str; 24] = [
     "CompletionUnit.veryl",
     "PhysicalAccessCheck.veryl",
     "PhysicalOffsetAccessCheck.veryl",
+    "AtomicAlu.veryl",
+    "AtomicLsu.veryl",
     "Core.veryl",
     "StaticBranchPredictor.veryl",
     "CompactBranchPredictor.veryl",

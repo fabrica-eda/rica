@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 OUT = HERE.parent / "build/rust-kernel"
 TARGET = "riscv64im-unknown-none-elf"
+ATOMIC_TARGET = "riscv64imac-unknown-none-elf"
 TOOLCHAIN = "1.98.1"
 OBJDUMP = Path("/usr/lib/llvm-20/bin/llvm-objdump")
 
@@ -22,7 +23,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def audit(text):
+def audit(text, allow_a=False):
     # Explicit integer-only allow-list, in addition to the encoding checks.
     # In particular, the usual riscv64gc target would introduce A/F/D here.
     base = set("""lui auipc jal jalr beq bne blt bge bltu bgeu
@@ -34,6 +35,9 @@ def audit(text):
     compressed = {"c." + name for name in """addi4spn lw ld sw sd nop addi addiw li
         addi16sp lui srli srai andi sub xor or and subw addw j beqz bnez slli
         lwsp ldsp jr mv ebreak jalr add swsp sdsp""".split()}
+    if allow_a:
+        base |= {op + suffix for op in ["amoadd.d", "lr.d", "sc.d"]
+                 for suffix in ["", ".aq", ".rl", ".aqrl"]}
     counts = {}
     for match in re.finditer(r"^\s*[0-9a-f]+:\s+([0-9a-f]{4}|[0-9a-f]{8})\s+(\S+)", text, re.M):
         encoding, mnemonic = match.groups()
@@ -47,10 +51,12 @@ def audit(text):
             assert instruction & 0x7f in {
                 0x03, 0x0f, 0x13, 0x17, 0x1b, 0x23, 0x33, 0x37,
                 0x3b, 0x63, 0x67, 0x6f, 0x73,
-            }, match.group(0)
+            } | ({0x2f} if allow_a else set()), match.group(0)
         else:
             assert mnemonic in compressed, match.group(0)
         counts[mnemonic] = counts.get(mnemonic, 0) + 1
+    if allow_a:
+        assert all(counts.get(op, 0) for op in ["amoadd.d.aqrl", "lr.d.aq", "sc.d.rl"])
     assert counts.get("mret", 0) and counts.get("ecall", 0)
     assert sum(v for k, v in counts.items() if k.startswith("c.")) > 0
     return counts
@@ -72,23 +78,28 @@ def main():
     records, elfs = {}, {}
     for name, features in [("kernel-tasks", []),
                            ("kernel-access-faults", ["--features", "access-faults"]),
-                           ("kernel-console", ["--features", "access-faults,console"])]:
-        cmd = ["cargo", "+" + TOOLCHAIN, "build", "--release", "--locked", "--offline",
-               "-Z", "build-std=core", "--target-dir", "../build/kernel-target"] + features
+                           ("kernel-console", ["--features", "access-faults,console"]),
+                           ("kernel-syscalls", ["--features", "access-faults,syscalls"]),
+                           ("kernel-atomics", ["--features", "access-faults,atomics"])]:
+        target = ATOMIC_TARGET if name == "kernel-atomics" else TARGET
+        cmd = ["rustup", "run", TOOLCHAIN, "cargo", "build", "--release", "--locked", "--offline",
+               "-Z", "build-std=core", "--target", target, "--target-dir", "../build/kernel-target", "--bin", "rica-kernel"] + features
         # Scope the unstable build-std opt-in to this exact pinned command. No
         # global toolchain switch and no forced/emulated atomics are used.
-        subprocess.run(cmd, cwd=HERE, env={**os.environ, "RUSTC_BOOTSTRAP": "1"}, check=True)
+        subprocess.run(cmd, cwd=HERE, env={**os.environ, "RUSTC_BOOTSTRAP": "1",
+                       "RUSTC": str(sysroot / "bin/rustc"),
+                       "RUSTDOC": str(sysroot / "bin/rustdoc")}, check=True)
         elf = OUT / (name + ".elf")
-        shutil.copy2(HERE.parent / "build/kernel-target" / TARGET / "release/rica-kernel", elf)
+        shutil.copy2(HERE.parent / "build/kernel-target" / target / "release/rica-kernel", elf)
         header = elf.read_bytes()[:64]
         assert header[:6] == b"\x7fELF\x02\x01"  # ELF64, little-endian
         assert struct.unpack_from("<H", header, 18)[0] == 243  # EM_RISCV
         flags = struct.unpack_from("<I", header, 48)[0]
         assert flags & 1 and flags & 6 == 0  # RVC, soft-float LP64 ABI
-        dump = subprocess.check_output([OBJDUMP, "-d", "-M", "no-aliases", elf], text=True)
-        counts = audit(dump)
+        dump = subprocess.check_output([OBJDUMP, "-d", "-M", "no-aliases", *(["--mattr=+a"] if name == "kernel-atomics" else []), elf], text=True)
+        counts = audit(dump, allow_a=name == "kernel-atomics")
         (OUT / (name + ".disasm")).write_text(dump)
-        records[name] = {"command": cmd, "elf_flags": flags, "instruction_counts": counts}
+        records[name] = {"command": cmd, "target": target, "elf_flags": flags, "instruction_counts": counts}
         elfs[str(elf.relative_to(ROOT))] = digest(elf)
     workload = []
     for task in range(2):

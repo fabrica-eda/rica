@@ -1,16 +1,16 @@
 [package]
 name = "jtag-route-probe"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
 publish = false
 
-[workspace]
-
 [dependencies]
-serde_json = "1"
-texo-model = { git = "https://github.com/fabrica-eda/texo", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
-texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
-texo-timing = { git = "https://github.com/fabrica-eda/texo", rev = "c48afcd6485055b868321904d5d780f1a14412c7" }
+serde_json.workspace = true
+texo-cli.workspace = true
+texo-model.workspace = true
+texo-target-ecp5.workspace = true
+texo-timing.workspace = true
 
 [[bin]]
 name = "jtag-sta"

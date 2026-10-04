@@ -1,0 +1,44 @@
+{
+  "reference_clock_port": "clk",
+  "output_clock_port": "clk_cpu",
+  "locked_port": "pll_locked",
+  "fabric_output": "CLKOS",
+  "additional_output_clock_ports": {
+    "clk_mem": "CLKOS2"
+  },
+  "feedback_output": "CLKINTFB",
+  "parameters": {
+    "PLLRST_ENA": "DISABLED",
+    "INTFB_WAKE": "DISABLED",
+    "STDBY_ENABLE": "DISABLED",
+    "DPHASE_SOURCE": "DISABLED",
+    "OUTDIVIDER_MUXA": "DIVA",
+    "OUTDIVIDER_MUXB": "DIVB",
+    "OUTDIVIDER_MUXC": "DIVC",
+    "OUTDIVIDER_MUXD": "DIVD",
+    "CLKI_DIV": "1",
+    "CLKOP_ENABLE": "ENABLED",
+    "CLKOP_DIV": "52",
+    "CLKOP_CPHASE": "9",
+    "CLKOP_FPHASE": "0",
+    "CLKOS_ENABLE": "ENABLED",
+    "CLKOS_DIV": "6",
+    "CLKOS_CPHASE": "0",
+    "CLKOS_FPHASE": "0",
+    "CLKOS2_ENABLE": "ENABLED",
+    "CLKOS2_DIV": "12",
+    "CLKOS2_CPHASE": "0",
+    "CLKOS2_FPHASE": "0",
+    "FEEDBK_PATH": "INT_OP",
+    "CLKFB_DIV": "1"
+  },
+  "attributes": {
+    "FREQUENCY_PIN_CLKI": "12",
+    "FREQUENCY_PIN_CLKOS": "104",
+    "FREQUENCY_PIN_CLKOS2": "52",
+    "ICP_CURRENT": "12",
+    "LPF_RESISTOR": "8",
+    "MFG_ENABLE_FILTEROPAMP": "1",
+    "MFG_GMCREF_SEL": "2"
+  }
+}

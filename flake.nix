@@ -84,7 +84,7 @@
               git
               curl
               jq
-              python3
+              (python3.withPackages (ps: [ ps.cbor2 ps.zstandard ]))
               fuse-overlayfs
               direnv
               nix-direnv

@@ -1,0 +1,149 @@
+/// Registered Zaamo arithmetic; AtomicLsu owns memory ordering and exceptions.
+/// Capture operands, register arithmetic/comparison, decode selection, respond.
+/// W writes expose only the low word; rd is always sign-extended from memory.
+module AtomicAlu (
+    clk           : input clock,
+    rst_n         : input reset_async_low,
+    cancel        : input logic,
+    request_valid : input logic,
+    request_ready : output logic,
+    operation     : input logic<5>, // instruction funct5 (aq/rl handled by LSU)
+    word_op       : input logic,
+    memory_value  : input logic<64>,
+    source_value  : input logic<64>,
+    response_valid: output logic,
+    response_ready: input logic,
+    write_value   : output logic<64>,
+    rd_value      : output logic<64>,
+    illegal       : output logic,
+) {
+    var state_q: logic<3>;
+    var operation_q: logic<5>;
+    var word_q: logic;
+    var memory_q: logic<64>;
+    var source_q: logic<64>;
+    var sum_q: logic<64>;
+    var less_unsigned_q: logic;
+    var less_signed_q: logic;
+    var bitwise_q: logic<64>;
+    var select_sum_q: logic;
+    var select_bitwise_q: logic;
+    var select_a_q: logic;
+    var select_b_q: logic;
+    var a: logic<64>;
+    var b: logic<64>;
+    var sign_a: logic;
+    var sign_b: logic;
+    var less_signed: logic;
+    var result: logic<64>;
+    var bitwise_value: logic<64>;
+    var select_sum: logic;
+    var select_bitwise: logic;
+    var select_a: logic;
+    var select_b: logic;
+    var minmax: logic;
+    var choose_memory: logic;
+    var legal: logic;
+    always_comb {
+        request_ready = state_q == 3'd0;
+        response_valid = state_q == 3'd4;
+        // The captured operand stays unchanged while the response is valid.
+        // Reuse it for rd instead of copying it into another 64-bit register.
+        rd_value = memory_q;
+        if word_q { rd_value = {memory_q[31] repeat 32, memory_q[31:0]}; }
+        a = memory_q;
+        b = source_q;
+        sign_a = memory_q[63];
+        sign_b = source_q[63];
+        if word_q {
+            sign_a = memory_q[31];
+            sign_b = source_q[31];
+        }
+        less_signed = a <: b;
+        if sign_a != sign_b { less_signed = sign_a; }
+        // Only XOR/OR/AND select this value. Their two distinguishing opcode
+        // bits keep the bitwise data path independent of full legality decode.
+        bitwise_value = a ^ b;
+        if operation_q[3] {
+            bitwise_value = a | b;
+            if operation_q[2] { bitwise_value = a & b; }
+        }
+        // Eight operations share funct5[1:0]=00; SWAP is the sole exception.
+        // Factor MIN/MAX instead of building a priority chain of opcode cases.
+        legal = (operation_q[1:0] == 2'd0) || (operation_q == 5'd1);
+        select_sum = operation_q == 5'd0;
+        select_bitwise = !operation_q[4] && (operation_q[3] || operation_q[2])
+            && (operation_q[1:0] == 2'd0);
+        minmax = operation_q[4] && (operation_q[1:0] == 2'd0);
+        choose_memory = less_signed_q ^ operation_q[2];
+        if operation_q[3] { choose_memory = less_unsigned_q ^ operation_q[2]; }
+        select_a = minmax && choose_memory;
+        select_b = (operation_q == 5'd1) || (minmax && !choose_memory);
+        // The final data selection has no opcode decoder or comparison in
+        // front of it. Illegal operations have all selectors clear.
+        result = (sum_q & {select_sum_q repeat 64})
+            | (bitwise_q & {select_bitwise_q repeat 64})
+            | (a & {select_a_q repeat 64})
+            | (b & {select_b_q repeat 64});
+    }
+    always_ff {
+        if_reset {
+            state_q = 3'd0;
+            operation_q = 5'd0;
+            word_q = 1'b0;
+            memory_q = 64'd0;
+            source_q = 64'd0;
+            write_value = 64'd0;
+            illegal = 1'b0;
+            sum_q = 64'd0;
+            less_unsigned_q = 1'b0;
+            less_signed_q = 1'b0;
+            bitwise_q = 64'd0;
+            select_sum_q = 1'b0;
+            select_bitwise_q = 1'b0;
+            select_a_q = 1'b0;
+            select_b_q = 1'b0;
+        } else if cancel {
+            state_q = 3'd0;
+        } else {
+            case state_q {
+                3'd0: if request_valid {
+                    operation_q = operation;
+                    word_q = word_op;
+                    memory_q = memory_value;
+                    source_q = source_value;
+                    // Mask before the arithmetic stage, off its carry path.
+                    if word_op {
+                        memory_q = {32'd0, memory_value[31:0]};
+                        source_q = {32'd0, source_value[31:0]};
+                    }
+                    state_q = 3'd1;
+                }
+                3'd1: {
+                    sum_q = a + b;
+                    less_unsigned_q = a <: b;
+                    less_signed_q = less_signed;
+                    state_q = 3'd2;
+                }
+                3'd2: {
+                    bitwise_q = bitwise_value;
+                    select_sum_q = select_sum;
+                    select_bitwise_q = select_bitwise;
+                    select_a_q = select_a;
+                    select_b_q = select_b;
+                    illegal = !legal;
+                    state_q = 3'd3;
+                }
+                3'd3: {
+                    write_value = result;
+                    if word_q {
+                        write_value = {32'd0, result[31:0]};
+                    }
+                    state_q = 3'd4;
+                }
+                3'd4: if response_ready { state_q = 3'd0; }
+                default: state_q = 3'd0;
+            }
+        }
+    }
+}

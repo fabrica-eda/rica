@@ -1,11 +1,13 @@
 /// Machine-mode CSR bank for precise traps and optional machine interrupts.
 ///
-/// Rica currently has one hart and no lower privilege modes.
+/// Rica has one hart; ENABLE_U adds user privilege and PMP.
 /// The implemented state is nevertheless architectural: trap entry records
 /// MEPC/MCAUSE/MTVAL and updates MSTATUS, while MRET restores the interrupt
 /// enable stack and returns to the aligned MEPC value.
 module CsrFile #(
     param ENABLE_M         : bit = 0,
+    param ENABLE_U: bit = 0,
+    param ENABLE_A         : bit = 0,
     param ENABLE_B         : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
     param FULL_ADDRESS     : bit = 0,
@@ -19,6 +21,10 @@ module CsrFile #(
     // Keep only implemented WARL/WLRL fields in flops; CSR reads expand them
     // to XLEN. This avoids routing 64-bit write muxes to mostly constant state.
     // {MPP[1:0], MPIE, MIE}
+    var user_q: logic;
+    var mprv_q: logic;
+    var counter_enable_q: logic<3>;
+    var mstatus_write: logic<64>;
     var mstatus_q         : logic<4>               ;
     var mtvec_q           : logic<ADDRESS_BITS - 2>;
     var mscratch_q        : logic<64>              ;
@@ -52,6 +58,9 @@ module CsrFile #(
     var csr_mux_level0                     : logic<64> [8];
     var csr_mux_level1                     : logic<64> [4];
     var csr_mux_level2                     : logic<64> [2];
+    var csr_upper_level0: logic<64> [8];
+    var csr_upper_level1: logic<64> [4];
+    var csr_upper_level2: logic<64> [2];
     var mstatus_read_value                 : logic<64>    ;
     var event_dependency_q                 : logic        ;
     var event_memory_wait_q                : logic        ;
@@ -248,6 +257,17 @@ module CsrFile #(
         mstatus_read_value[3]     = mstatus_q[0];
         mstatus_read_value[7]     = mstatus_q[1];
         mstatus_read_value[12:11] = mstatus_q[3:2];
+        if ENABLE_U {
+            mstatus_read_value[33:32] = 2'd2;
+            mstatus_read_value[17] = mprv_q;
+        }
+        mstatus_write = csr.write_source;
+        if csr.write_op == 2'd1 { mstatus_write = mstatus_read_value | csr.write_source; }
+        else if csr.write_op == 2'd2 { mstatus_write = mstatus_read_value & ~csr.write_source; }
+        csr.user_mode = ENABLE_U && user_q;
+        csr.data_user = ENABLE_U && (user_q || (mprv_q && (mstatus_q[3:2] == 2'd0)));
+        csr.counter_enable = counter_enable_q;
+
 
         if csr.index[0] {
             csr_mux_level0[0] = mstatus_read_value;
@@ -262,6 +282,8 @@ module CsrFile #(
             csr_mux_level0[0] = 64'd0;
             // RV64 with fixed base-integer and compressed extensions.
             csr_mux_level0[1] = 64'h8000_0000_0000_0104;
+            if ENABLE_U { csr_mux_level0[1][20] = 1'b1; }
+            if ENABLE_A { csr_mux_level0[1][0] = 1'b1; }
             if ENABLE_M {
                 csr_mux_level0[1][12] = 1'b1;
             }
@@ -312,15 +334,40 @@ module CsrFile #(
             mip_read[3]       = csr.machine_interrupts[0];
             interrupt_enabled = mie_q & csr.machine_interrupts;
         }
+        // Keep the U/PMP bank off the lower-bank read path. A binary tree
+        // avoids a priority chain through every newly implemented CSR.
+        for i in 0..8 { csr_upper_level0[i] = 64'd0; }
+        if csr.index[0] {
+            csr_upper_level0[0] = mip_read;
+            csr_upper_level0[2] = {34'd0, csr.pmp_address[1]};
+            csr_upper_level0[3] = {34'd0, csr.pmp_address[3]};
+            csr_upper_level0[4] = {61'd0, counter_enable_q};
+        } else {
+            csr_upper_level0[0] = mie_read;
+            csr_upper_level0[1] = {32'd0, csr.pmp_config[3], csr.pmp_config[2], csr.pmp_config[1], csr.pmp_config[0]};
+            csr_upper_level0[2] = {34'd0, csr.pmp_address[0]};
+            csr_upper_level0[3] = {34'd0, csr.pmp_address[2]};
+        }
+        for i in 0..4 {
+            csr_upper_level1[i] = csr_upper_level0[2*i];
+            if csr.index[1] { csr_upper_level1[i] = csr_upper_level0[2*i+1]; }
+        }
+        for i in 0..2 {
+            csr_upper_level2[i] = csr_upper_level1[2*i];
+            if csr.index[2] { csr_upper_level2[i] = csr_upper_level1[2*i+1]; }
+        }
         if csr.index[4] {
             csr.read_data = 64'd0;
-            if csr.index == 5'd16 {
+            if ENABLE_U {
+                csr.read_data = csr_upper_level2[0];
+                if csr.index[3] { csr.read_data = csr_upper_level2[1]; }
+            } else if csr.index == 5'd16 {
                 csr.read_data = mie_read;
             } else if csr.index == 5'd17 {
                 csr.read_data = mip_read;
             }
         }
-        csr.interrupt_pending = mstatus_q[0] && (interrupt_enabled != 3'd0);
+        csr.interrupt_pending = (mstatus_q[0] || (ENABLE_U && user_q)) && (interrupt_enabled != 3'd0);
         // The architectural priority is external > software > timer.
         csr.interrupt_cause = 4'd7;
         if interrupt_enabled[2] {
@@ -404,30 +451,84 @@ module CsrFile #(
     }
 
     always_ff (clk, rst_n) {
-        if_reset {
-            // This M-only hart implements M as the sole WARL value of MPP.
-            mstatus_q = 4'b1100;
-        } else if csr.trap_enter || csr.mret
-            || (csr.write_enable && (csr.write_index == 4'd1) && (csr.write_op != 2'd3)) {
-            // Express every real update below one self-hold boundary. Struo
-            // can map that boundary to the ECP5 FF clock enable instead of
-            // putting trap/CSR control through every bit's D-input mux.
+        if_reset { mstatus_q = 4'b1100; }
+        else if csr.trap_enter || csr.mret
+            || (csr.write_enable && (csr.write_index == 5'd1) && (csr.write_op != 2'd3)) {
             if csr.trap_enter {
-                // MPIE <- MIE, MIE <- 0, MPP <- M-mode.
-                mstatus_q[1]   = mstatus_q[0];
-                mstatus_q[0]   = 1'b0;
+                mstatus_q[1] = mstatus_q[0];
+                mstatus_q[0] = 1'b0;
                 mstatus_q[3:2] = 2'b11;
+                if ENABLE_U && user_q { mstatus_q[3:2] = 2'b00; }
             } else if csr.mret {
-                // MIE <- MPIE, MPIE <- 1, MPP <- the least implemented mode (M).
-                mstatus_q[0]   = mstatus_q[1];
-                mstatus_q[1]   = 1'b1;
+                mstatus_q[0] = mstatus_q[1];
+                mstatus_q[1] = 1'b1;
                 mstatus_q[3:2] = 2'b11;
-            } else if csr.write_op == 2'd0 {
-                mstatus_q = {2'b11, csr.write_source[7], csr.write_source[3]};
-            } else if csr.write_op == 2'd1 {
-                mstatus_q = mstatus_q | {2'b00, csr.write_source[7], csr.write_source[3]};
+                if ENABLE_U { mstatus_q[3:2] = 2'b00; }
             } else {
-                mstatus_q = mstatus_q & ~{2'b00, csr.write_source[7], csr.write_source[3]};
+                mstatus_q = {2'b11, mstatus_write[7], mstatus_write[3]};
+                if ENABLE_U && (mstatus_write[12:11] != 2'b11) { mstatus_q[3:2] = 2'b00; }
+            }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset { user_q = 1'b0; }
+        else if csr.trap_enter || csr.mret {
+            if csr.trap_enter { user_q = 1'b0; }
+            else { user_q = ENABLE_U && (mstatus_q[3:2] == 2'b00); }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset { mprv_q = 1'b0; }
+        else if ENABLE_U && ((csr.mret && (mstatus_q[3:2] == 2'b00))
+            || (csr.write_enable && (csr.write_index == 5'd1) && (csr.write_op != 2'd3))) {
+            if csr.mret { mprv_q = 1'b0; }
+            else { mprv_q = mstatus_write[17]; }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset { counter_enable_q = 3'd0; }
+        else if ENABLE_U && csr.write_enable && (csr.write_index == 5'd25) && (csr.write_op != 2'd3) {
+            if csr.write_op == 2'd0 { counter_enable_q = csr.write_source[2:0] & 3'b101; }
+            else if csr.write_op == 2'd1 { counter_enable_q = counter_enable_q | (csr.write_source[2:0] & 3'b101); }
+            else { counter_enable_q = counter_enable_q & ~csr.write_source[2:0]; }
+        }
+    }
+
+    // Sixteen architectural entries, four programmable; entries 4..15 are
+    // read-only OFF/zero. Four-byte grain, 32-bit physical address space.
+    for entry in 0..4 :g_pmp {
+        var next_config: logic<8>;
+        var next_address: logic<30>;
+        var address_locked: logic;
+        always_comb {
+            next_config = csr.write_source[entry * 8 +: 8];
+            next_address = csr.write_source[29:0];
+            if csr.write_op == 2'd1 {
+                next_config = csr.pmp_config[entry] | next_config;
+                next_address = csr.pmp_address[entry] | next_address;
+            } else if csr.write_op == 2'd2 {
+                next_config = csr.pmp_config[entry] & ~next_config;
+                next_address = csr.pmp_address[entry] & ~next_address;
+            }
+            next_config[6:5] = 2'd0;
+            if !next_config[0] { next_config[1] = 1'b0; }
+            address_locked = csr.pmp_config[entry][7];
+            if entry <: 3 {
+                address_locked = address_locked || (csr.pmp_config[(entry + 1) % 4][7]
+                    && (csr.pmp_config[(entry + 1) % 4][4:3] == 2'd1));
+            }
+        }
+        always_ff (clk, rst_n) {
+            if_reset {
+                csr.pmp_config[entry] = 8'd0;
+                csr.pmp_address[entry] = 30'd0;
+            } else if ENABLE_U && csr.write_enable && (csr.write_op != 2'd3) {
+                if (csr.write_index == 5'd18) && !csr.pmp_config[entry][7] {
+                    csr.pmp_config[entry] = next_config;
+                }
+                if (csr.write_index == (20 + entry)) && !address_locked {
+                    csr.pmp_address[entry] = next_address;
+                }
             }
         }
     }

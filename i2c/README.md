@@ -95,19 +95,15 @@ through Texo's public Cargo API. The hardware SVF passed after SRAM programming:
 scratch write `0xa5`, ID `0x52`, protocol `0x02`, PLL lock, synchronized reset
 release, activity, ratio-window completion, and the measured 250/12 ratio.
 
-The workspace uses git-pinned Cargo dependencies because a release artifact is
-unavailable. Texo 0.1.6 `f8c57e09` includes Struo `69e7ec13`, the required PLL
-binding, the fix for releasing stale routes when hold ECO rebinds a packed FF
-physical pin, and the timing-driven placement portfolio.
+The workspace pins the current synthesis stack in the root `Cargo.toml` and
+`Cargo.lock`. Use the repository launcher to build and run that exact Texo with
+Nix/MBX. New checkpoints use compressed `.txcp` files.
 
 ```sh
 cargo run --locked --offline -p verify-i2c
-cargo install --git https://github.com/fabrica-eda/texo.git \
-  --rev f8c57e09bbc0b96825652dc3b76ac5e9e1e9661d \
-  --root target/texo-git --locked texo-cli
-target/texo-git/bin/texo pnr i2c --package CABGA381 --speed 8 \
+riscv/tools/texo pnr i2c --package CABGA381 --speed 8 \
   --lpf i2c/lfe5um5g-85f-evn-250.lpf \
-  --output i2c/build/jtag-i2c-target-250.texo.json \
+  --output i2c/build/jtag-i2c-target-250.txcp \
   --synthesis-goal-mhz 400 --jtagg-prefix jtag \
   --pll-binding i2c/pll-12-to-250.json
 cargo run --locked --offline -p verify-i2c --bin bitgen-i2c

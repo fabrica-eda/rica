@@ -31,7 +31,6 @@ module PhysicalOffsetAccessCheck #(
     var timer         : logic    ;
     var aligned       : logic    ;
     var byte_last     : logic<3> ;
-    var end_lane      : logic<4> ;
     var crossing      : logic    ;
     var upper_zero    : logic    ;
     var wrapped_boot  : logic    ;
@@ -76,25 +75,17 @@ module PhysicalOffsetAccessCheck #(
             end_page = end_previous;
             timer    = timer_previous;
         }
-        byte_last = 3'd0;
-        aligned   = 1'b1;
-        case size {
-            2'd1: {
-                byte_last = 3'd1;
-                aligned   = low_sum[0] == 1'b0;
-            }
-            2'd2: {
-                byte_last = 3'd3;
-                aligned   = low_sum[1:0] == 2'd0;
-            }
-            2'd3: {
-                byte_last = 3'd7;
-                aligned   = low_sum[2:0] == 3'd0;
-            }
-            default: {}
-        }
-        end_lane      = {1'b0, low_sum[2:0]} + {1'b0, byte_last};
-        crossing      = (low_sum[11:3] == 9'h1ff) && end_lane[3];
+        // For 1/2/4/8 bytes, the alignment mask is 0/1/3/7. Decode its
+        // bits in parallel so the low-address sum does not cross a size
+        // selection chain before the timer permission result is available.
+        byte_last = {size[1] && size[0], size[1], size != 2'd0};
+        aligned   = (low_sum[2:0] & byte_last) == 3'd0;
+        // Carry out of lane + (access_bytes - 1), decoded directly for
+        // 1/2/4/8 bytes instead of a second ripple addition after low_sum.
+        crossing = (low_sum[11:3] == 9'h1ff)
+            && ((size[0] && (low_sum[2:0] == 3'd7))
+                || (size[1] && low_sum[2] && (low_sum[1:0] != 2'd0))
+                || (size[1] && size[0] && (low_sum[2:0] != 3'd0)));
         boot_crossing = boot && crossing;
         ram_crossing  = end_page && crossing;
         boot_boundary = upper_zero && boot_crossing;

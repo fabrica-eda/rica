@@ -1,4 +1,7 @@
 .include "test_macros.inc"
+#ifndef PLATFORM_TIMEBASE_HZ
+#define PLATFORM_TIMEBASE_HZ 62400000
+#endif
 .section .text.init, "ax", @progbits
 .globl _start
 _start:
@@ -15,7 +18,7 @@ _start:
     li s1, 0x02004000
     li s2, 0x0200bff8
     ld t0, -8(s2)
-    li t1, 62400000
+    li t1, PLATFORM_TIMEBASE_HZ
     bne t0, t1, fail_1
     ld t0, 0(s2)
     nop

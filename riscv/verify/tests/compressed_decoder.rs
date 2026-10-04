@@ -66,14 +66,39 @@ fn value(simulator: &mut Simulator<NativeBackend>, name: &str) -> u64 {
 }
 
 fn decoder() -> Simulator<NativeBackend> {
+    decoder_backend(false)
+}
+
+fn decoder_backend(mapped: bool) -> Simulator<NativeBackend> {
     let riscv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .to_owned();
     let source = fs::read_to_string(riscv.join("src/CompressedDecoder.veryl")).unwrap();
-    SimulatorBuilder::new(&source, "CompressedDecoder")
-        .build_native()
-        .unwrap()
+    if mapped {
+        let rtl = struo_frontend_veryl::analyze_and_lower(
+            &source,
+            "compressed_decoder_exhaustive",
+            "CompressedDecoder",
+        )
+        .unwrap();
+        let netlist = struo_target_ecp5::map_to_ecp5_with_options(
+            &struo_synth::synthesize(&rtl).unwrap().netlist,
+            struo_target_ecp5::MappingOptions {
+                retiming: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        struo_celox::ecp5_simulator(&netlist)
+            .unwrap()
+            .build_native()
+            .unwrap()
+    } else {
+        SimulatorBuilder::new(&source, "CompressedDecoder")
+            .build_native()
+            .unwrap()
+    }
 }
 
 fn decode(simulator: &mut Simulator<NativeBackend>, raw: u16) -> (u32, bool) {
@@ -160,40 +185,42 @@ fn rv64c_hint_code_points_remain_legal_no_ops() {
 
 #[test]
 fn all_compressed_code_points_are_deterministic_and_canonical() {
-    let mut simulator = decoder();
-    let mut legal = 0;
-    let mut digest = 0xcbf29ce484222325_u64;
-    for raw in 0_u16..=u16::MAX {
-        let (instruction, illegal) = decode(&mut simulator, raw);
-        for byte in instruction
-            .to_le_bytes()
-            .into_iter()
-            .chain([u8::from(illegal)])
-        {
-            digest = (digest ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+    for mapped in [false, true] {
+        let mut simulator = decoder_backend(mapped);
+        let mut legal = 0;
+        let mut digest = 0xcbf29ce484222325_u64;
+        for raw in 0_u16..=u16::MAX {
+            let (instruction, illegal) = decode(&mut simulator, raw);
+            for byte in instruction
+                .to_le_bytes()
+                .into_iter()
+                .chain([u8::from(illegal)])
+            {
+                digest = (digest ^ u64::from(byte)).wrapping_mul(0x100000001b3);
+            }
+            if illegal {
+                assert_eq!(
+                    instruction, 0x0000_0013,
+                    "illegal 0x{raw:04x} did not produce the deterministic NOP value"
+                );
+            } else {
+                legal += 1;
+                assert_ne!(raw & 3, 3, "non-compressed 0x{raw:04x} was accepted");
+                assert_eq!(
+                    instruction & 3,
+                    3,
+                    "0x{raw:04x} expanded to a noncanonical instruction"
+                );
+            }
         }
-        if illegal {
-            assert_eq!(
-                instruction, 0x0000_0013,
-                "illegal 0x{raw:04x} did not produce the deterministic NOP value"
-            );
-        } else {
-            legal += 1;
-            assert_ne!(raw & 3, 3, "non-compressed 0x{raw:04x} was accepted");
-            assert_eq!(
-                instruction & 3,
-                3,
-                "0x{raw:04x} expanded to a noncanonical instruction"
-            );
-        }
+        // This count fixes the intended RV64C/Zca integer subset, including HINT
+        // encodings and excluding floating-point and reserved code points.
+        assert_eq!(legal, 38_551);
+        // FNV-1a of every little-endian expansion and illegal byte, measured on
+        // the pre-timing-repair decoder. This also checks every immediate/register
+        // bit, which the legality count and canonical opcode checks cannot cover.
+        assert_eq!(digest, 0x1c2f7a0300eecc23);
     }
-    // This count fixes the intended RV64C/Zca integer subset, including HINT
-    // encodings and excluding floating-point and reserved code points.
-    assert_eq!(legal, 38_551);
-    // FNV-1a of every little-endian expansion and illegal byte, measured on
-    // the pre-timing-repair decoder. This also checks every immediate/register
-    // bit, which the legality count and canonical opcode checks cannot cover.
-    assert_eq!(digest, 0x1c2f7a0300eecc23);
 }
 
 #[test]

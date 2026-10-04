@@ -74,6 +74,8 @@ module CompactBranchPredictor #(
     var response_fire        : logic                   ;
     var flush                : logic                   ;
     var allocation_q         : logic<3>                ;
+    var allocation_next      : logic<3>                ;
+    var allocation_busy_q    : logic                   ;
     var slot_available       : logic                   ;
     var slot_valid_q         : logic<8>                ;
     var slot_taken_q         : logic<8>                ;
@@ -86,7 +88,7 @@ module CompactBranchPredictor #(
     var retire_value         : logic<6>                ;
     var available_mux0       : logic             [4]   ;
     var available_mux1       : logic             [2]   ;
-    var allocation_busy      : logic                   ;
+    var allocation_next_busy : logic                   ;
     var retire_slot_valid    : logic                   ;
     var retire_slot_taken    : logic                   ;
     var retire_slot_ras      : logic                   ;
@@ -148,13 +150,14 @@ module CompactBranchPredictor #(
                 slot_valid_q[slot], slot_taken_q[slot], slot_hit_q[slot], slot_ras_q[slot], slot_counter_q[slot]
             };
         }
+        allocation_next = allocation_q + 3'd1;
         for pair in 0..4 {
             if retire_token[0] {
                 retire_mux0[pair] = slot_value[pair * 2 + 1];
             } else {
                 retire_mux0[pair] = slot_value[pair * 2];
             }
-            if allocation_q[0] {
+            if allocation_next[0] {
                 available_mux0[pair] = slot_valid_q[pair * 2 + 1];
             } else {
                 available_mux0[pair] = slot_valid_q[pair * 2];
@@ -166,7 +169,7 @@ module CompactBranchPredictor #(
             } else {
                 retire_mux1[pair] = retire_mux0[pair * 2];
             }
-            if allocation_q[1] {
+            if allocation_next[1] {
                 available_mux1[pair] = available_mux0[pair * 2 + 1];
             } else {
                 available_mux1[pair] = available_mux0[pair * 2];
@@ -177,14 +180,14 @@ module CompactBranchPredictor #(
         } else {
             retire_value = retire_mux1[0];
         }
-        if allocation_q[2] {
-            allocation_busy = available_mux1[1];
+        if allocation_next[2] {
+            allocation_next_busy = available_mux1[1];
         } else {
-            allocation_busy = available_mux1[0];
+            allocation_next_busy = available_mux1[0];
         }
         // A retired token becomes reusable on the following clock. Eight slots
         // cover the scalar pipeline without a retire-to-fetch combinational bypass.
-        slot_available        = !allocation_busy;
+        slot_available        = !allocation_busy_q;
         retire_slot_valid     = retire_value[5];
         retire_slot_taken     = retire_value[4];
         retire_hit            = retire_value[5] && retire_value[3];
@@ -200,9 +203,14 @@ module CompactBranchPredictor #(
         response_fire         = response_valid && response_accept;
         lookup_transfer       = lookup_valid_q && (!response_present_q || response_fire) && !flush
             && !(response_fire && decoded_taken_q);
-        lookup_capacity       = !lookup_valid_q || lookup_transfer;
-        request_ready         = !scrub_q && !flush && lookup_capacity && !(response_fire && decoded_taken_q);
-        request_accept        = request_valid && request_ready;
+        // A flush or taken response discards the old lookup. Reading a
+        // speculative replacement on that edge is harmless: only request_accept
+        // makes it valid. Keep cancellation guards off the RAM read enable.
+        lookup_capacity = !lookup_valid_q || !response_present_q || response_fire;
+        // Request acceptance still applies every flush and taken guard.
+        request_ready  = !scrub_q && !flush && (!lookup_valid_q || !response_present_q || response_fire)
+            && !(response_fire && decoded_taken_q);
+        request_accept = request_valid && request_ready;
 
         old_counter = 2'b01;
         if retire_hit {
@@ -238,6 +246,22 @@ module CompactBranchPredictor #(
         btb_miss_event             = retire_valid && (retire_kind != 3'd0) && !retire_hit;
         ras_fallback_event         = retire_valid && ((retire_kind == 3'd5) || (retire_kind == 3'd6))
             && retire_slot_valid && retire_slot_ras;
+    }
+    // Predict the occupancy of the allocation cursor after this edge. A new
+    // response marks the old token busy and advances to a different token;
+    // retirement on that same edge may free the next token. This preserves
+    // the one-edge retirement-to-reuse rule without an eight-way slot lookup
+    // on response_valid and the Core's fetch request handshake.
+    always_ff (clk, rst_n) {
+        if_reset {
+            allocation_busy_q = 1'b0;
+        } else if flush {
+            allocation_busy_q = 1'b0;
+        } else if response_fire {
+            allocation_busy_q = allocation_next_busy && !(retire_valid && (retire_token == allocation_next));
+        } else if retire_valid && (retire_token == allocation_q) {
+            allocation_busy_q = 1'b0;
+        }
     }
 
     // Speculative RAM reads into a free slot keep the I-cache handshake off
@@ -350,70 +374,81 @@ module CompactReturnStack (
     top                : output logic<32>,
     empty              : output logic    ,
 ) {
-    var committed_q     : logic<32> [8];
-    var committed_next  : logic<32> [8];
-    var committed_sp_q  : logic<3>     ;
-    var committed_sp    : logic<3>     ;
-    var committed_n_q   : logic<4>     ;
-    var committed_n     : logic<4>     ;
-    var speculative_q   : logic<32> [8];
-    var speculative     : logic<32> [8];
-    var speculative_sp_q: logic<3>     ;
-    var speculative_sp  : logic<3>     ;
-    var speculative_n_q : logic<4>     ;
-    var speculative_n   : logic<4>     ;
-    var action_valid    : logic        ;
-    var action_kind     : logic<3>     ;
-    var action_pc       : logic<32>    ;
-    var top_candidate   : logic<32> [8];
-    var top_mux0        : logic<32> [4];
-    var top_mux1        : logic<32> [2];
-    var committed_pop   : logic        ;
-    var committed_push  : logic        ;
-    var speculative_pop : logic        ;
-    var speculative_push: logic        ;
-    var base_sp         : logic<3>     ;
-    var base_n          : logic<4>     ;
+    var committed_q                 : logic<32> [8];
+    var committed_next              : logic<32> [8];
+    var committed_sp_q              : logic<8>     ;
+    var committed_sp                : logic<8>     ;
+    var committed_n_q               : logic<4>     ;
+    var committed_n                 : logic<4>     ;
+    var speculative_q               : logic<32> [8];
+    var speculative                 : logic<32> [8];
+    var speculative_shared_q        : logic<8>     ;
+    var committed_write             : logic     [8];
+    var speculative_write           : logic     [8];
+    var speculative_sp_q            : logic<8>     ;
+    var speculative_sp              : logic<8>     ;
+    var speculative_n_q             : logic<4>     ;
+    var speculative_n               : logic<4>     ;
+    var action_valid                : logic        ;
+    var action_kind                 : logic<3>     ;
+    var action_pc                   : logic<32>    ;
+    var committed_top_q             : logic<32>    ;
+    var committed_top               : logic<32>    ;
+    var speculative_top_q           : logic<32>    ;
+    var speculative_top             : logic<32>    ;
+    var committed_second_candidate  : logic<32> [8];
+    var speculative_second_candidate: logic<32> [8];
+    var committed_second_mux0       : logic<32> [4];
+    var speculative_second_mux0     : logic<32> [4];
+    var committed_second_mux1       : logic<32> [2];
+    var speculative_second_mux1     : logic<32> [2];
+    var committed_second            : logic<32>    ;
+    var speculative_second          : logic<32>    ;
+    var committed_pop               : logic        ;
+    var committed_push              : logic        ;
+    var speculative_pop             : logic        ;
+    var speculative_push            : logic        ;
+    var base_sp                     : logic<8>     ;
+    var base_n                      : logic<4>     ;
 
     always_comb {
-        // Rotate the leaves instead of subtracting before the address mux.
-        // Explicit binary stages avoid a priority chain in the FPGA mapper.
-        top_candidate[0] = speculative_q[7];
-        for i in 1..8 {
-            top_candidate[i] = speculative_q[i - 1];
-        }
+        // Keep the current top alongside each stack. A pop selects the old
+        // second entry, a push bypasses its new value, and restore includes
+        // this edge's retirement. The external top is therefore available
+        // directly from registers without an extra prediction cycle.
         for pair in 0..4 {
-            if speculative_sp_q[0] {
-                top_mux0[pair] = top_candidate[pair * 2 + 1];
-            } else {
-                top_mux0[pair] = top_candidate[pair * 2];
-            }
+            committed_second_mux0[pair]   = committed_second_candidate[pair * 2]
+                | committed_second_candidate[pair * 2 + 1];
+            speculative_second_mux0[pair] = speculative_second_candidate[pair * 2]
+                | speculative_second_candidate[pair * 2 + 1];
         }
         for pair in 0..2 {
-            if speculative_sp_q[1] {
-                top_mux1[pair] = top_mux0[pair * 2 + 1];
-            } else {
-                top_mux1[pair] = top_mux0[pair * 2];
-            }
+            committed_second_mux1[pair]   = committed_second_mux0[pair * 2] | committed_second_mux0[pair * 2 + 1];
+            speculative_second_mux1[pair] = speculative_second_mux0[pair * 2] | speculative_second_mux0[pair * 2 + 1];
         }
-        if speculative_sp_q[2] {
-            top = top_mux1[1];
-        } else {
-            top = top_mux1[0];
-        }
-        empty          = speculative_n_q == 4'd0;
-        committed_pop  = retire_valid && ((retire_kind == 3'd5) || (retire_kind == 3'd6)) && (committed_n_q != 4'd0);
-        committed_push = retire_valid && ((retire_kind == 3'd4) || (retire_kind == 3'd6));
-        committed_sp   = committed_sp_q;
-        committed_n    = committed_n_q;
+        committed_second   = committed_second_mux1[0] | committed_second_mux1[1];
+        speculative_second = speculative_second_mux1[0] | speculative_second_mux1[1];
+        top                = speculative_top_q;
+        empty              = speculative_n_q == 4'd0;
+        committed_pop      = retire_valid && ((retire_kind == 3'd5) || (retire_kind == 3'd6))
+            && (committed_n_q != 4'd0);
+        committed_push     = retire_valid && ((retire_kind == 3'd4) || (retire_kind == 3'd6));
+        committed_sp       = committed_sp_q;
+        committed_n        = committed_n_q;
         if committed_push && !committed_pop {
-            committed_sp = committed_sp_q + 3'd1;
+            committed_sp = {committed_sp_q[6:0], committed_sp_q[7]};
             if committed_n_q != 4'd8 {
                 committed_n = committed_n_q + 4'd1;
             }
         } else if committed_pop && !committed_push {
-            committed_sp = committed_sp_q - 3'd1;
+            committed_sp = {committed_sp_q[0], committed_sp_q[7:1]};
             committed_n  = committed_n_q - 4'd1;
+        }
+        committed_top = committed_top_q;
+        if committed_push {
+            committed_top = retire_fallthrough;
+        } else if committed_pop {
+            committed_top = committed_second;
         }
         base_sp          = speculative_sp_q;
         base_n           = speculative_n_q;
@@ -425,38 +460,73 @@ module CompactReturnStack (
         speculative_sp   = base_sp;
         speculative_n    = base_n;
         if speculative_push && !speculative_pop {
-            speculative_sp = base_sp + 3'd1;
+            speculative_sp = {base_sp[6:0], base_sp[7]};
             if base_n != 4'd8 {
                 speculative_n = base_n + 4'd1;
             }
         } else if speculative_pop && !speculative_push {
-            speculative_sp = base_sp - 3'd1;
+            speculative_sp = {base_sp[0], base_sp[7:1]};
             speculative_n  = base_n - 4'd1;
         }
+        speculative_top = speculative_top_q;
+        if speculative_push {
+            speculative_top = action_pc;
+        } else if speculative_pop {
+            speculative_top = speculative_second;
+        }
         if restore {
-            speculative_sp = committed_sp;
-            speculative_n  = committed_n;
+            speculative_sp  = committed_sp;
+            speculative_n   = committed_n;
+            speculative_top = committed_top;
         }
     }
     // These are elaboration constants. Keeping the rotated slot number out of
     // procedural arithmetic avoids constant-only carry chains in the mapper.
     for i in 0..8 :g_slot {
-        const NEXT_SP: logic<3> = (i + 1) as 3;
+        const NEXT_POINTER_BIT  : u32   = (i + 1) % 8;
+        const SECOND_POINTER_BIT: u32   = (i + 2) % 8;
+        var   committed_slot    : logic;
+        var   speculative_slot  : logic;
         always_comb {
-            committed_next[i] = committed_q[i];
-            if committed_push
-                && (((committed_sp_q == i as 3) && !committed_pop)
-                    || ((committed_sp_q == NEXT_SP) && committed_pop)) {
+            committed_second_candidate[i]   = 32'd0;
+            speculative_second_candidate[i] = 32'd0;
+            if committed_sp_q[SECOND_POINTER_BIT] {
+                committed_second_candidate[i] = committed_q[i];
+            }
+            if speculative_sp_q[SECOND_POINTER_BIT] {
+                speculative_second_candidate[i] = speculative_q[i];
+                if speculative_shared_q[i] {
+                    speculative_second_candidate[i] = committed_q[i];
+                }
+            }
+            // Decode the destination before the late valid signal arrives.
+            // A call writes SP; a pop/push writes SP-1 when the stack is
+            // nonempty. Valid must not also pass through the pop selection.
+            committed_slot       = ((retire_kind == 3'd4) && committed_sp_q[i])
+                || ((retire_kind == 3'd6)
+                    && (((committed_n_q == 4'd0) && committed_sp_q[i])
+                        || ((committed_n_q != 4'd0) && committed_sp_q[NEXT_POINTER_BIT])));
+            speculative_slot     = ((action_kind == 3'd4) && base_sp[i])
+                || ((action_kind == 3'd6)
+                    && (((base_n == 4'd0) && base_sp[i]) || ((base_n != 4'd0) && base_sp[NEXT_POINTER_BIT])));
+            committed_write[i]   = retire_valid && committed_slot;
+            speculative_write[i] = action_valid && speculative_slot;
+            committed_next[i]    = committed_q[i];
+            if committed_write[i] {
                 committed_next[i] = retire_fallthrough;
             }
+            // Recovery aliases committed data instead of copying all words.
+            // Before retirement overwrites an aliased word, preserve its old
+            // value. A simultaneous speculative push supersedes that copy.
             speculative[i] = speculative_q[i];
-            if speculative_push
-                && (((base_sp == i as 3) && !speculative_pop) || ((base_sp == NEXT_SP) && speculative_pop)) {
+            if committed_write[i] && speculative_shared_q[i] {
+                speculative[i] = committed_q[i];
+            }
+            if speculative_write[i] {
                 speculative[i] = action_pc;
             }
-            if restore {
-                speculative[i] = committed_next[i];
-            }
+            // Data writes during restore are harmless: all sharing flags are
+            // set below, so only the updated committed words are observable.
         }
     }
     always_ff (clk) {
@@ -467,15 +537,27 @@ module CompactReturnStack (
     }
     always_ff (clk, rst_n) {
         if_reset {
-            committed_sp_q   = 3'd0;
-            committed_n_q    = 4'd0;
-            speculative_sp_q = 3'd0;
-            speculative_n_q  = 4'd0;
+            committed_sp_q       = 8'b0000_0001;
+            committed_n_q        = 4'd0;
+            speculative_sp_q     = 8'b0000_0001;
+            speculative_n_q      = 4'd0;
+            committed_top_q      = 32'd0;
+            speculative_top_q    = 32'd0;
+            speculative_shared_q = 8'd0;
         } else {
-            committed_sp_q   = committed_sp;
-            committed_n_q    = committed_n;
-            speculative_sp_q = speculative_sp;
-            speculative_n_q  = speculative_n;
+            committed_sp_q    = committed_sp;
+            committed_n_q     = committed_n;
+            speculative_sp_q  = speculative_sp;
+            speculative_n_q   = speculative_n;
+            committed_top_q   = committed_top;
+            speculative_top_q = speculative_top;
+            for i in 0..8 {
+                if restore {
+                    speculative_shared_q[i] = 1'b1;
+                } else if committed_write[i] || speculative_write[i] {
+                    speculative_shared_q[i] = 1'b0;
+                }
+            }
         }
     }
 }

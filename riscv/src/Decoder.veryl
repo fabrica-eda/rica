@@ -1,12 +1,38 @@
-/// RV64 integer decoder with optional M, Zba, Zbb and Zbs extensions.
+/// RV64 decoder with combinational CSR address classification.
 module Decoder #(
     param ENABLE_M         : bit = 0,
+    param ENABLE_U: bit = 0,
+    param ENABLE_A         : bit = 0,
     param ENABLE_ZBA       : bit = 0,
     param ENABLE_ZBB       : bit = 0,
     param ENABLE_ZBS       : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
 ) (
     decode: modport DecodeBus::decoder,
+) {
+    inst unit: DecoderWithCsrClass #(
+        ENABLE_M: ENABLE_M, ENABLE_U: ENABLE_U, ENABLE_A: ENABLE_A,
+        ENABLE_ZBA: ENABLE_ZBA, ENABLE_ZBB: ENABLE_ZBB, ENABLE_ZBS: ENABLE_ZBS,
+        ENABLE_INTERRUPTS: ENABLE_INTERRUPTS,
+    ) (
+        decode, csr_known: 1'b0, csr_writable: 1'b0,
+    );
+}
+
+/// RV64 integer decoder with optional M, Zba, Zbb and Zbs extensions.
+module DecoderWithCsrClass #(
+    param USE_CSR_CLASS: bit = 0,
+    param ENABLE_M         : bit = 0,
+    param ENABLE_U: bit = 0,
+    param ENABLE_A         : bit = 0,
+    param ENABLE_ZBA       : bit = 0,
+    param ENABLE_ZBB       : bit = 0,
+    param ENABLE_ZBS       : bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
+) (
+    decode: modport DecodeBus::decoder,
+    csr_known: input logic,
+    csr_writable: input logic,
 ) {
     var opcode              : logic<7> ;
     var base_alu_op         : logic<6> ;
@@ -48,6 +74,7 @@ module Decoder #(
     var csr_address_known   : logic    ;
     var csr_address_writable: logic    ;
     var csr_write_requested : logic    ;
+    var csr_user_address: logic;
     var csr_known_group0    : logic    ;
     var csr_known_group1    : logic    ;
     var csr_known_group2    : logic    ;
@@ -142,6 +169,29 @@ module Decoder #(
         // are read-only levels owned by the platform. Writes are legal NOPs.
         csr_address_writable = (csr_writable_group0 || csr_writable_group1) || csr_writable_group2
             || decode.csr_index[4];
+        // Recognize the U/PMP CSR address set directly. Feeding legality
+        // through the encoded index adds a priority mux and magnitude compare.
+        csr_user_address = ENABLE_U && ((decode.instr[31:20] == 12'h3a0)
+            || (decode.instr[31:20] == 12'h3a2) || (decode.instr[31:24] == 8'h3b)
+            || (decode.instr[31:20] == 12'h306) || (decode.instr[31:20] == 12'h30a));
+        if ENABLE_U {
+            if decode.instr[31:20] == 12'h3a0 { decode.csr_index = 5'd18; }
+            else if decode.instr[31:20] == 12'h3a2 { decode.csr_index = 5'd19; }
+            else if decode.instr[31:22] == 10'h0ec {
+                decode.csr_index = {3'b101, decode.instr[21:20]};
+            } else if (decode.instr[31:24] == 8'h3b) && (decode.instr[23:22] != 2'd0) {
+                decode.csr_index = 5'd24;
+            } else if decode.instr[31:20] == 12'h306 { decode.csr_index = 5'd25; }
+            else if decode.instr[31:20] == 12'h30a { decode.csr_index = 5'd26; }
+            csr_address_known = csr_address_known || csr_user_address;
+            csr_address_writable = csr_address_writable || csr_user_address;
+        }
+        // Core may supply stable address properties registered with fd_q.
+        // Operand-dependent write intent remains in this decode stage.
+        if USE_CSR_CLASS {
+            csr_address_known = csr_known;
+            csr_address_writable = csr_writable;
+        }
         csr_write_requested  = (funct3[1:0] == 2'b01) || ((funct3[1:0] != 2'b00) && (decode.rs1 != 5'd0));
         decode.is_ecall      = 1'b0;
         decode.is_ebreak     = 1'b0;
@@ -691,6 +741,33 @@ module Decoder #(
             decode.word_op      = opcode[3];
             decode.illegal      = 1'b0;
         }
+        // A operations use the LSU address base with a zero offset. Mark all
+        // as loads for dependency interlocks, and non-LR as stores for rs2.
+        // Select the zero offset by major opcode, independently of funct5/rs2
+        // legality. Invalid A encodings still trap; their immediate is unused.
+        // Keep that legality reduction off the ordinary sign-extension path.
+        if ENABLE_A && (opcode == 7'h2f) {
+            decode.immediate = 64'd0;
+        }
+        // Eight AMOs have funct5[1:0]=00. The remaining operations are SWAP,
+        // LR and SC (funct5=1,2,3); only LR requires rs2=x0.
+        decode.is_atomic = ENABLE_A && (opcode == 7'h2f)
+            && ((funct3 == 3'd2) || (funct3 == 3'd3))
+            && ((decode.instr[28:27] == 2'd0)
+                || ((decode.instr[31:29] == 3'd0)
+                    && ((decode.instr[28:27] != 2'd2) || (decode.rs2 == 5'd0))));
+        if decode.is_atomic {
+            decode.use_immediate = 1'b1;
+            decode.use_rs1 = 1'b1;
+            decode.use_rs2 = decode.instr[31:27] != 5'd2;
+            decode.is_load = 1'b1;
+            decode.is_store = decode.instr[31:27] != 5'd2;
+            decode.load_size = funct3[1:0];
+            decode.store_size = funct3[1:0];
+            decode.load_unsigned = 1'b0;
+            decode.write_enable = 1'b1;
+            decode.illegal = 1'b0;
+        }
         // ISA groups are disjoint. In particular each asserted Zbb low tag
         // bit already proves that a Zbb encoding matched; a second legal_zbb
         // mux would add redundant selection to the instruction-to-RX path.
@@ -698,5 +775,31 @@ module Decoder #(
         zbs_op        = {4'b1101, decode.instr[29], funct3[2] || !decode.instr[30]} & {legal_zbs repeat 6};
         decode.alu_op = (base_alu_op & {use_base_op repeat 6}) | zba_op
             | {legal_zbb, (zbb_op & {(ENABLE_ZBB != 1'b0) repeat 5})} | zbs_op;
+    }
+}
+
+/// Stable CSR address properties, independent of operands and privilege state.
+module CsrAddressClass #(
+    param ENABLE_U: bit = 0,
+    param ENABLE_INTERRUPTS: bit = 0,
+) (
+    address: input logic<12>,
+    known: output logic,
+    writable: output logic,
+) {
+    var extended: logic;
+    always_comb {
+        extended = (ENABLE_INTERRUPTS && ((address == 12'h304) || (address == 12'h344)))
+            || (ENABLE_U && ((address == 12'h3a0) || (address == 12'h3a2)
+                || (address[11:4] == 8'h3b) || (address == 12'h306) || (address == 12'h30a)));
+        known = (address == 12'h300) || (address == 12'h301) || (address == 12'h305) || (address == 12'h340)
+            || (address == 12'h341) || (address == 12'h342) || (address == 12'h343)
+            || (address == 12'hf11) || (address == 12'hf12) || (address == 12'hf13) || (address == 12'hf14)
+            || (address == 12'hb00) || (address == 12'hc00) || (address == 12'hb02) || (address == 12'hc02)
+            || (address == 12'h7c0) || (address == 12'h7c1) || extended;
+        writable = (address == 12'h300) || (address == 12'h301) || (address == 12'h305) || (address == 12'h340)
+            || (address == 12'h341) || (address == 12'h342) || (address == 12'h343)
+            || (address == 12'hb00) || (address == 12'hb02)
+            || (address == 12'h7c0) || (address == 12'h7c1) || extended;
     }
 }

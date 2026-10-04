@@ -1,9 +1,10 @@
-/// Overlapped in-order RV64IC-subset core for the 125 MHz timing target.
+/// Overlapped in-order RV64IC-subset core with configurable PMP capture depth.
 ///
 /// Fetch/decode, synchronous register read, EX1, common completion/EX2, and
 /// writeback overlap. The LSU is one completion source rather than the owner of
 /// EX2. Consecutive dependent ALU instructions use a registered EX bypass;
-/// load-use plus two-stage shift/compare dependencies stall once.
+/// load-use dependencies stall once. EARLY_ALU finishes shifts/comparisons in
+/// EX; otherwise their two-stage dependencies also stall once.
 module Core #(
     param COMMIT_PAYLOAD   : bit = 1,
     param ENABLE_ZBA       : bit = 0,
@@ -12,6 +13,10 @@ module Core #(
     param EARLY_BITMANIP   : bit = 0,
     param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_M         : bit = 0,
+    param ENABLE_U: bit = 0,
+    param PMP_DATA_STAGES: u32 = 3,
+    param EARLY_ALU: bit = 0,
+    param ENABLE_A         : bit = 0,
     param M_USE_DSP        : bit = 0,
     param EARLY_DIVIDE     : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
@@ -20,6 +25,8 @@ module Core #(
     // Raw asynchronous/direct model ports keep formatting in CompletionUnit.
     param FORMATTED_LOAD_DATA: bit = 0,
     param SYNC_DATA_MEMORY   : bit = 0,
+    // Separate registered load/store acknowledgments avoid data_we feedback.
+    param SPLIT_MEMORY_RESPONSES: bit = 0,
     param RELOCATE_LOW_DATA  : bit = 0,
     // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
     // its 32-entry variant, bit 5 disables RAS, bit 6 disables direction prediction.
@@ -32,6 +39,8 @@ module Core #(
     instr_valid           : input  logic    ,
     data_rdata            : input  logic<64>,
     data_response_sequence: input  logic    ,
+    data_load_response_sequence: input logic,
+    data_store_response_sequence: input logic,
     machine_interrupts    : input  logic<3> ,
     pc                    : output logic<64>,
     data_addr             : output logic<64>,
@@ -39,6 +48,7 @@ module Core #(
     data_wdata            : output logic<64>,
     data_wmask            : output logic<8> ,
     data_we               : output logic    ,
+    data_store_retire_ready: output logic,
     data_request_sequence : output logic    ,
     data_load_size        : output logic<2> ,
     data_load_unsigned    : output logic    ,
@@ -61,6 +71,7 @@ module Core #(
     // Strict physical memory retains full architectural PC/trap values while
     // admitting execution only in the platform RAM/reset regions. The predictor
     // still indexes physical PCs; invalid full-width targets become fetch faults.
+    const ACTIVE_A: bit = ENABLE_A && SYNC_DATA_MEMORY && STRICT_MEMORY;
     const ADDRESS_BITS       : u32 = 32 + 32 * (STRICT_MEMORY as u32);
     const TARGET_MATCH_SLICES: u32 = ADDRESS_BITS / 16;
     // FetchPayload is the registered boundary after instruction-line selection;
@@ -102,6 +113,12 @@ module Core #(
     var fetch_address            : logic       <ADDRESS_BITS>    ;
     var taken_fetch_valid_q      : logic                         ;
     var taken_fetch_pc_q         : logic       <ADDRESS_BITS>    ;
+    var fetch_line_write: logic;
+    var fetch_parcel_write: logic;
+    var fetch_cursor_prediction: logic;
+    var fetch_cursor_redirect: logic;
+    var fetch_line_next: logic<ADDRESS_BITS - 3>;
+    var fetch_parcel_next: logic<2>;
     var fetch_line_plus_one      : logic       <ADDRESS_BITS - 3>;
     var fetch_next_parcel        : logic       <2>               ;
     var fetch_cross_line         : logic                         ;
@@ -138,6 +155,7 @@ module Core #(
     var rx_use_rs2_q          : logic              ;
     var rx_write_enable_q     : logic              ;
     var rx_is_load_q          : logic              ;
+    var rx_is_atomic_q: logic;
     var rx_load_size_q        : logic<2>           ;
     var rx_load_unsigned_q    : logic              ;
     var rx_is_store_q         : logic              ;
@@ -174,6 +192,7 @@ module Core #(
     var ex_write_enable_q       : logic              ;
     var ex_can_bypass_q         : logic              ;
     var ex_is_load_q            : logic              ;
+    var ex_is_atomic_q: logic;
     var ex_load_size_q          : logic<2>           ;
     var ex_load_unsigned_q      : logic              ;
     var ex_is_store_q           : logic              ;
@@ -194,6 +213,8 @@ module Core #(
     var ex_is_ebreak_q          : logic              ;
     var ex_is_mret_q            : logic              ;
     var ex_is_fence_i_q         : logic              ;
+    var ex_frontend_block_q     : logic              ;
+    var ex_normal_memory_q: logic;
     var ex_illegal_q            : logic              ;
     var ex_prediction_token_q   : logic<3>           ;
     var ex_predicted_kind_q     : logic<3>           ;
@@ -220,6 +241,11 @@ module Core #(
     var cm_rd_q                 : logic<5>                  ;
     var cm_write_enable_q       : logic                     ;
     var cm_is_load_q            : logic                     ;
+    var cm_is_atomic_q: logic;
+    // Predecode CM ownership on entry, off the frontend hold path.
+    var cm_atomic_active_q: logic;
+    var cm_memory_active_q: logic;
+    var cm_system_block_q: logic;
     var cm_load_size_q          : logic<2>                  ;
     var cm_load_unsigned_q      : logic                     ;
     var cm_is_store_q           : logic                     ;
@@ -343,6 +369,10 @@ module Core #(
     var decode_execution_hazard : logic                  ;
     var rx_execution_hazard_q   : logic                  ;
     var backend_wait            : logic                  ;
+    var backend_pending         : logic                  ;
+    var memory_pending          : logic                  ;
+    var muldiv_pending          : logic                  ;
+    var atomic_pending          : logic                  ;
     var memory_wait             : logic                  ;
     var muldiv_wait             : logic                  ;
     var muldiv_start            : logic                  ;
@@ -387,6 +417,7 @@ module Core #(
     var cm_system_redirect      : logic                  ;
     var ex_irq_fence            : logic                  ;
     var ex_system_barrier       : logic                  ;
+    var ex_frontend_block       : logic                  ;
     var cm_irq_fence_event      : logic                  ;
     var interrupt_drain         : logic                  ;
     var interrupt_drain_q       : logic                  ;
@@ -416,6 +447,7 @@ module Core #(
     var fetch_payload_capture          : logic    ;
     var fetch_queue_push_valid         : logic    ;
     var fetch_queue_advance            : logic    ;
+    var predictor_response_ready       : logic    ;
     var predictor_response_accept      : logic    ;
     var predictor_response_valid       : logic    ;
     var predictor_response_token       : logic<3> ;
@@ -498,14 +530,29 @@ module Core #(
         assign muldiv_result = 64'd0;
     }
 
-    inst decoder: Decoder #(
+    var fd_csr_known_q: logic;
+    var fd_csr_writable_q: logic;
+    var fetched_csr_known: logic;
+    var fetched_csr_writable: logic;
+    inst csr_class: CsrAddressClass #(ENABLE_U: ENABLE_U, ENABLE_INTERRUPTS: ENABLE_INTERRUPTS) (
+        address: fetch_q.raw_instruction[31:20],
+        known: fetched_csr_known, writable: fetched_csr_writable,
+    );
+    // RV64C has no CSR access encoding; C.EBREAK does not consult these flags.
+    // Capture them under the same hold/flush condition as the fetch bundle.
+    inst decoder: DecoderWithCsrClass #(
+        USE_CSR_CLASS: 1,
+
         ENABLE_INTERRUPTS: ENABLE_INTERRUPTS,
         ENABLE_ZBB       : ENABLE_ZBB       ,
         ENABLE_ZBS       : ENABLE_ZBS       ,
         ENABLE_ZBA       : ENABLE_ZBA       ,
         ENABLE_M         : ENABLE_M         ,
+        ENABLE_U: ENABLE_U,
+        ENABLE_A         : ACTIVE_A         ,
     ) (
         decode: decode_bus,
+        csr_known: fd_csr_known_q, csr_writable: fd_csr_writable_q,
     );
 
     inst compressed_decoder: CompressedDecoder (
@@ -519,6 +566,8 @@ module Core #(
         FULL_ADDRESS     : STRICT_MEMORY                         ,
         ENABLE_INTERRUPTS: ENABLE_INTERRUPTS                     ,
         ENABLE_M         : ENABLE_M                              ,
+        ENABLE_U: ENABLE_U,
+        ENABLE_A         : ACTIVE_A                              ,
         ENABLE_B         : ENABLE_ZBA && ENABLE_ZBB && ENABLE_ZBS,
     ) (
         clk  : clk    ,
@@ -533,10 +582,108 @@ module Core #(
         execute: execute_bus,
     );
 
+    var atomic_issue: logic;
+    var atomic_store_issue: logic;
+    var atomic_written: logic;
+    var atomic_write_value: logic<64>;
+    var atomic_memory_write_value_unused: logic<64>;
+    var cm_write_data_enable: logic;
+    var cm_write_data_next: logic<64>;
+    var atomic_write_data_update: logic;
+    var atomic_result: logic<64>;
+    var atomic_done: logic;
+    var atomic_fault_raw: logic;
+    var atomic_fault: logic;
+    var atomic_cause: logic<4>;
+    var atomic_wait: logic;
+    var normal_memory_issue: logic;
+    var pmp_data_wait: logic;
+    if ACTIVE_A :g_atomic {
+        var invalidate_q: logic;
+        // No atomic request starts on the retiring ordinary store's edge.
+        // The following CM transaction observes this pulse before SC checks
+        // its reservation. Trap/MRET flushes likewise precede any new request.
+        // Registering the pulse breaks done -> trap -> reservation -> done.
+        always_ff (clk, rst_n) {
+            if_reset { invalidate_q = 1'b0; }
+            else {
+                invalidate_q = csr_bus.trap_enter || csr_bus.mret
+                    || (cm_retire_event && cm_is_store_q && !cm_is_atomic_q);
+            }
+        }
+        inst lsu: AtomicLsu (
+            clk, rst_n,
+            start: cm_atomic_active_q && !redirect_discards_cm,
+            cancel: redirect_discards_cm,
+            // Consume is inspected only in DONE. A valid atomic then has no
+            // ordinary memory/MDU wait. Successful retirement may preserve CM
+            // across a redirect; a fault must wait until no redirect is pending.
+            // Cancel takes priority inside the LSU for discarded CM work.
+            consume: cm_atomic_active_q && !pmp_data_wait
+                && (!redirect_pending_q || (!redirect_flush_wb_q && !atomic_fault_raw)),
+            invalidate: invalidate_q,
+            address: cm_lsu_address_q,
+            operation: cm_raw_instr_q[31:27], word_op: cm_load_size_q == 2'd2,
+            source_value: cm_lsu_wdata_q, memory_value: data_rdata,
+            memory_done: (if SPLIT_MEMORY_RESPONSES ? data_load_response_sequence : data_response_sequence) == data_request_sequence_q,
+            store_done: (if SPLIT_MEMORY_RESPONSES ? data_store_response_sequence : data_response_sequence) == data_request_sequence_q,
+            issue: atomic_issue, store_issue: atomic_store_issue,
+            written: atomic_written, write_value: atomic_memory_write_value_unused,
+            amo_write_value: atomic_write_value,
+            result: atomic_result, done: atomic_done, fault: atomic_fault_raw, fault_cause: atomic_cause,
+        );
+    } else :g_no_atomic {
+        assign atomic_issue = 1'b0;
+        assign atomic_store_issue = 1'b0;
+        assign atomic_written = 1'b0;
+        assign atomic_write_value = 64'd0;
+        assign atomic_memory_write_value_unused = 64'd0;
+        assign atomic_result = 64'd0;
+        assign atomic_done = 1'b0;
+        assign atomic_fault_raw = 1'b0;
+        assign atomic_cause = 4'd0;
+    }
+
     inst completion_bus : CompletionBus;
     inst completion_unit: CompletionUnit (
         completion: completion_bus,
     );
+
+    // At the lower-frequency platform target, finish base-ISA shifts and
+    // comparisons in EX. The existing CM logic register then forwards the
+    // complete value to the next instruction, without a completion bubble.
+    var early_alu_result: logic<64>;
+    if EARLY_ALU :g_early_alu {
+        inst bus: CompletionBus;
+        inst unit: CompletionUnit (completion: bus);
+        always_comb {
+            // Arithmetic uses cm_arithmetic_q independently. Do not add an
+            // unused arithmetic select to the logic/shift forwarding path.
+            bus.arithmetic = 64'd0;
+            bus.logic_result = execute_bus.logic_result;
+            bus.use_logic = 1'b1;
+            bus.shift_low = execute_bus.shift_result;
+            bus.shift_amount = if ex_word_op_q ? {1'b0, alu_operand_b[4:3]} : alu_operand_b[5:3];
+            bus.shift_arithmetic = ex_alu_op_q == 4'd8;
+            bus.shift_left = (ex_alu_op_q == 4'd6) || (ex_alu_op_q == 6'd16);
+            bus.shift_word = ex_word_op_q;
+            bus.use_shift = execute_bus.result_use_shift;
+            bus.compare_equal = execute_bus.compare_equal;
+            bus.compare_less = execute_bus.compare_less;
+            bus.compare_sign_a = execute_bus.compare_sign_a;
+            bus.compare_sign_b = execute_bus.compare_sign_b;
+            bus.compare_signed = ex_alu_op_q == 4'd9;
+            bus.use_compare = execute_bus.result_use_compare;
+            bus.load_data = 64'd0;
+            bus.load_size = 2'd0;
+            bus.load_unsigned = 1'b0;
+            bus.use_load = 1'b0;
+            bus.store_size = 2'd0;
+            early_alu_result = bus.result;
+        }
+    } else {
+        assign early_alu_result = 64'd0;
+    }
 
     if ENABLE_ZBB || ENABLE_ZBS :g_bitmanip {
         var partial    : logic<64>;
@@ -620,7 +767,7 @@ module Core #(
             request_accept            : predictor_request_accept       ,
             request_pc                : fetch_packet.pc                ,
             request_fallthrough       : fetch_fallthrough              ,
-            response_accept           : predictor_response_accept      ,
+            response_accept           : predictor_response_ready       ,
             response_valid            : predictor_response_valid       ,
             response_token            : predictor_response_token       ,
             response_kind             : predictor_response_kind        ,
@@ -714,6 +861,97 @@ module Core #(
             btb_miss_event            : predictor_btb_miss_event       ,
             ras_fallback_event        : predictor_ras_fallback_event   ,
         );
+    }
+
+    var rx_user_illegal: logic;
+    var ex_pmp_fetch_fault_q: logic;
+    var ex_pmp_second_parcel_q: logic;
+    var pmp_fetch_allowed: logic;
+    var pmp_data_allowed: logic;
+    var pmp_data_comb_allowed: logic;
+    var pmp_data_address_q: logic<64>;
+    var pmp_data_stage_q: logic<2>;
+    var ex_pmp_pending_q: logic;
+    var pmp_data_allowed_q: logic;
+    var pmp_first_parcel_allowed: logic;
+    var pmp_data_first_unused: logic;
+    var pmp_fetch_last_next: logic<33>;
+    var pmp_fetch_first_last_next: logic<33>;
+    var rx_pmp_high_q: logic;
+    var rx_pmp_last_q: logic<33>;
+    var rx_pmp_first_last_q: logic<33>;
+    var pmp_data_last_next: logic<33>;
+    var pmp_data_last_q: logic<33>;
+    var pmp_data_high_next: logic;
+    var pmp_data_high_q: logic;
+    var pmp_data_first_last_unused: logic<33>;
+    var pmp_read: logic;
+    var ex_pmp_read_q: logic;
+    var ex_pmp_write_q: logic;
+    var pmp_write: logic;
+    always_comb {
+        pmp_read = ex_pmp_read_q;
+        pmp_write = ex_pmp_write_q;
+        rx_user_illegal = ENABLE_U && csr_bus.user_mode
+            && (rx_is_mret_q || (rx_raw_instr_q == 32'h10500073)
+                || (rx_is_csr_q && ((rx_raw_instr_q[29:28] != 2'd0)
+                    || ((rx_raw_instr_q[31:20] == 12'hc00) && !csr_bus.counter_enable[0])
+                    || ((rx_raw_instr_q[31:20] == 12'hc02) && !csr_bus.counter_enable[2]))));
+    }
+    if ENABLE_U :g_pmp {
+        var lower: logic<33> [4];
+        var upper: logic<33> [4];
+        var decoded_config: logic<8> [4];
+        var range_nonempty: logic<4>;
+        inst ranges: PmpRegisteredRanges (
+            clk, rst_n, decoded_config, nonempty: range_nonempty,
+            pmp_config: csr_bus.pmp_config, pmp_address: csr_bus.pmp_address, lower, upper,
+        );
+        inst fetch_end: PmpFetchAccessEnd (
+            address: fd_q.pc, full_instruction: fd_q.raw_instruction[1:0] == 2'b11,
+            last: pmp_fetch_last_next, first_last: pmp_fetch_first_last_next,
+        );
+        if (PMP_DATA_STAGES == 2) && STRICT_MEMORY :g_offset_end {
+            inst data_end: PmpOffsetAccessEnd (
+                base: alu_operand_a, offset: ex_redirect_offset_q[11:0],
+                size: lsu_access_size, last: pmp_data_last_next,
+                high: pmp_data_high_next,
+            );
+            assign pmp_data_first_last_unused = 33'd0;
+        } else :g_address_end {
+            assign pmp_data_high_next = lsu_address[63:32] != 32'd0;
+            inst data_end: PmpAccessEnd (
+                address: if PMP_DATA_STAGES == 2 ? lsu_address : pmp_data_address_q,
+                size: lsu_access_size,
+                last: pmp_data_last_next, first_last: pmp_data_first_last_unused,
+            );
+        }
+        inst fetch_check: PmpPermissionDecodedBounds (
+            address: {31'd0, rx_pmp_high_q, rx_pc_q[31:0]}, last: rx_pmp_last_q, first_last: rx_pmp_first_last_q,
+            user_access: csr_bus.user_mode,
+            read_access: 1'b0, write_access: 1'b0, execute_access: 1'b1,
+            pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
+            allowed: pmp_fetch_allowed, first_parcel_allowed: pmp_first_parcel_allowed,
+        );
+        inst data_check: PmpPermissionDecodedBounds #(CHECK_FIRST_PARCEL: 0) (
+            address: {31'd0, pmp_data_high_q, pmp_data_address_q[31:0]}, last: pmp_data_last_q, first_last: 33'd0,
+            user_access: csr_bus.data_user,
+            read_access: pmp_read, write_access: pmp_write, execute_access: 1'b0,
+            pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
+            allowed: pmp_data_comb_allowed, first_parcel_allowed: pmp_data_first_unused,
+        );
+        assign pmp_data_allowed = pmp_data_allowed_q;
+    } else :g_no_pmp {
+        assign pmp_fetch_last_next = 33'd0;
+        assign pmp_fetch_first_last_next = 33'd0;
+        assign pmp_data_last_next = 33'd0;
+        assign pmp_data_high_next = 1'b0;
+        assign pmp_data_first_last_unused = 33'd0;
+        assign pmp_first_parcel_allowed = 1'b1;
+        assign pmp_data_first_unused = 1'b1;
+        assign pmp_fetch_allowed = 1'b1;
+        assign pmp_data_allowed = 1'b1;
+        assign pmp_data_comb_allowed = 1'b1;
     }
 
     inst fetch_access: PhysicalAccessCheck (
@@ -868,6 +1106,16 @@ module Core #(
             completion_bus.load_size     = 2'b11;
             completion_bus.load_unsigned = 1'b0;
         }
+        // Every Decoder-validated A operation carries the load-result tag.
+        // Select its already formatted result on that input, so ordinary
+        // arithmetic/shift/compare forwarding need not cross another 64-bit
+        // mux after CompletionUnit. Force XLEN formatting for SC status and
+        // the already sign-extended AMO.W/LR.W result in every configuration.
+        if ACTIVE_A && cm_is_atomic_q {
+            completion_bus.load_data = atomic_result;
+            completion_bus.load_size = 2'b11;
+            completion_bus.load_unsigned = 1'b0;
+        }
         completion_bus.use_load   = cm_is_load_q;
         completion_bus.store_size = cm_store_size_q;
         cm_forward_data           = completion_bus.result;
@@ -988,7 +1236,9 @@ module Core #(
                 lsu_timer_region   = lsu_timer_regions[1];
             }
         }
-        lsu_access_fault  = STRICT_MEMORY && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
+        lsu_access_allowed = lsu_access_allowed && pmp_data_allowed;
+        lsu_access_fault  = STRICT_MEMORY && !(ACTIVE_A && ex_is_atomic_q) && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
+        if ENABLE_U && ex_is_atomic_q && ex_valid_q && !pmp_data_allowed { lsu_access_fault = 1'b1; }
         lsu_fault_address = lsu_address;
         if lsu_boot_boundary {
             lsu_fault_address = 64'h0000_0000_0000_1000;
@@ -1008,9 +1258,10 @@ module Core #(
             csr_source = alu_operand_a;
         }
         ex_exception = ex_valid_q
-            && (ex_illegal_q || ex_is_ecall_q || ex_is_ebreak_q || (STRICT_MEMORY && ex_fetch_fault_q));
+            && (ex_illegal_q || ex_pmp_fetch_fault_q || ex_is_ecall_q || ex_is_ebreak_q || (STRICT_MEMORY && ex_fetch_fault_q));
         if ex_is_ecall_q {
             ex_exception_cause = 64'd11;
+            if ENABLE_U && csr_bus.user_mode { ex_exception_cause = 64'd8; }
         } else if ex_is_ebreak_q {
             ex_exception_cause = 64'd3;
         } else {
@@ -1030,6 +1281,11 @@ module Core #(
                     ex_exception_value = 64'h0000_0000_8003_f000;
                 }
             }
+        }
+        if ex_pmp_fetch_fault_q {
+            ex_exception_cause = 64'd1;
+            ex_exception_value = ex_pc_q;
+            if ex_pmp_second_parcel_q { ex_exception_value = ex_pc_q + 64'd2; }
         }
         // Dynamic prediction keeps its EX direction result. Static prediction
         // finishes the reduction from the same registered compare slices as
@@ -1218,10 +1474,29 @@ module Core #(
         // A pending older redirect makes the current completion-stage memory
         // operation wrong-path work. It must be flushed immediately instead
         // of stalling the pipeline and thereby dropping the redirect.
-        memory_wait  = SYNC_DATA_MEMORY && !redirect_discards_cm && cm_valid_q && (cm_is_load_q || cm_is_store_q)
-            && (data_response_sequence != data_request_sequence_q);
-        muldiv_wait  = ENABLE_M && cm_valid_q && cm_muldiv_pending_q && !redirect_discards_cm;
-        backend_wait = memory_wait || muldiv_wait;
+        memory_pending = SYNC_DATA_MEMORY
+            && (if ACTIVE_A ? cm_memory_active_q : cm_valid_q && (cm_is_load_q || cm_is_store_q))
+            && ((if SPLIT_MEMORY_RESPONSES ? (if cm_is_store_q ? data_store_response_sequence : data_load_response_sequence) : data_response_sequence) != data_request_sequence_q);
+        muldiv_pending = ENABLE_M && cm_valid_q && cm_muldiv_pending_q;
+        atomic_pending = ACTIVE_A && cm_atomic_active_q && !atomic_done;
+        memory_wait = memory_pending && !redirect_discards_cm;
+        muldiv_wait = muldiv_pending && !redirect_discards_cm;
+        atomic_wait = atomic_pending && !redirect_discards_cm;
+        atomic_fault = ACTIVE_A && cm_is_atomic_q && atomic_done && atomic_fault_raw;
+        // Hold the current EX owner while its effective address, end byte
+        // and permission are registered. CM also stays put, so forwarding sources,
+        // privilege and PMP configuration cannot change under this check.
+        // The pending bit belongs to the EX owner and is cleared when its
+        // permission is captured. Keep stage decoding off global backpressure.
+        pmp_data_wait = ENABLE_U && ex_pmp_pending_q && !redirect_pending_q;
+        backend_wait = memory_wait || muldiv_wait || atomic_wait || pmp_data_wait;
+        // Consumers gated by !redirect_pending_q or !redirect_discards_cm may
+        // use the raw pending work: no CM work is discarded while either
+        // gate is open.
+        // Keep the cancellation-qualified waits for pipeline recovery and
+        // counters, where a pending redirect must still be able to drain CM.
+        backend_pending = backend_wait;
+        if ACTIVE_A { backend_pending = memory_pending || muldiv_pending || atomic_pending || pmp_data_wait; }
 
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
@@ -1240,30 +1515,49 @@ module Core #(
         // Changes to the interrupt predicate serialize younger work. Their
         // CM write is followed by a redirect to fallthrough, so the new state
         // is evaluated before a successor can execute, just as after MRET.
-        ex_irq_fence       = ENABLE_INTERRUPTS && ex_valid_q && ex_is_csr_q && ex_csr_write_q
-            && ((ex_csr_index_q == 5'd1) || (ex_csr_index_q == 5'd16) || (ex_csr_index_q == 5'd17));
+        ex_irq_fence       = (ENABLE_INTERRUPTS || ENABLE_U) && ex_valid_q && ex_is_csr_q && ex_csr_write_q
+            && ((ex_csr_index_q == 5'd1) || (ex_csr_index_q == 5'd16) || (ex_csr_index_q == 5'd17) || (ENABLE_U && (ex_csr_index_q >= 5'd18)));
         ex_system_barrier  = (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) || ex_irq_fence;
-        cm_irq_fence_event = ENABLE_INTERRUPTS && cm_valid_q && cm_is_csr_q && cm_csr_write_q
-            && ((cm_csr_index_q == 5'd1) || (cm_csr_index_q == 5'd16) || (cm_csr_index_q == 5'd17)) && !cm_exception_q
-            && !backend_wait && !redirect_pending_q;
-        cm_trap_event      = cm_valid_q && cm_exception_q && !backend_wait && !redirect_pending_q;
-        cm_mret_event      = cm_valid_q && cm_is_mret_q && !backend_wait && !redirect_pending_q;
-        cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_wait && !redirect_pending_q;
+        ex_frontend_block = ex_exception || ex_system_barrier;
+        if ACTIVE_A { ex_frontend_block = ex_valid_q && ex_frontend_block_q; }
+        cm_irq_fence_event = (ENABLE_INTERRUPTS || ENABLE_U) && cm_valid_q && cm_is_csr_q && cm_csr_write_q
+            && ((cm_csr_index_q == 5'd1) || (cm_csr_index_q == 5'd16) || (cm_csr_index_q == 5'd17) || (ENABLE_U && (cm_csr_index_q >= 5'd18))) && !cm_exception_q
+            && !backend_pending && !redirect_pending_q;
+        cm_trap_event      = cm_valid_q && (cm_exception_q || atomic_fault) && !backend_pending && !redirect_pending_q;
+        cm_mret_event      = cm_valid_q && cm_is_mret_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
+        cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
         instruction_flush  = cm_fence_i_event;
         cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event || cm_irq_fence_event
             || interrupt_event;
+        normal_memory_issue = !backend_pending && ex_valid_q && (ex_is_load_q || ex_is_store_q)
+            && !(ACTIVE_A && ex_is_atomic_q) && !ex_exception && !lsu_access_fault
+            && !branch_redirect_valid && !cm_system_redirect && !redirect_pending_q;
+        if ACTIVE_A {
+            // EX ownership/exception tags and CM system serialization are
+            // captured with their payloads. With no backend wait or pending
+            // redirect, the live system-event predicate reduces to these
+            // tags plus the atomic fault and claimed interrupt. Keep repeated
+            // tag qualification off the late permission-to-request path.
+            normal_memory_issue = !backend_pending && !redirect_pending_q
+                && ex_valid_q && ex_normal_memory_q && lsu_access_allowed
+                && !branch_redirect_valid && !interrupt_event
+                && !(cm_valid_q && (cm_system_block_q || atomic_fault));
+        }
         // The registered redirect cancels a wrong-path M request in PREPARE,
         // before it can produce a result. Keep the late CM branch comparison
         // off the MDU state input; architectural ownership remains in CM.
-        muldiv_start = ENABLE_M && ex_valid_q && ex_is_muldiv_q && !backend_wait && !redirect_pending_q;
+        muldiv_start = ENABLE_M && ex_valid_q && ex_is_muldiv_q && !backend_pending && !redirect_pending_q;
 
         // This is the architectural retirement boundary: a successful CM
         // instruction transfers to WB here. A pending taken branch explicitly
         // discards its wrong-path CM follower; JAL itself remains retireable.
-        cm_retire_event      = cm_valid_q && !cm_exception_q && !backend_wait
+        cm_retire_event      = cm_valid_q && !cm_exception_q && !atomic_fault && !backend_wait
             && !(redirect_pending_q && redirect_flush_wb_q);
         csr_bus.write_index  = cm_csr_index_q;
-        csr_bus.write_enable = cm_valid_q && cm_is_csr_q && cm_csr_write_q && !cm_exception_q && !backend_wait
+        // The final discard gate also qualifies the pending work. Using the
+        // raw pending flags here avoids routing cancellation through both the
+        // wait reduction and the CSR side-effect enable.
+        csr_bus.write_enable = cm_valid_q && cm_is_csr_q && cm_csr_write_q && !cm_exception_q && !backend_pending
             && !redirect_discards_cm;
         // CSR read/modify/write operates on the value captured for this
         // instruction in EX, not on a free-running counter's newer CM value.
@@ -1282,13 +1576,17 @@ module Core #(
         csr_bus.trap_cause   = cm_exception_cause_q;
         csr_bus.trap_value   = cm_exception_value_q;
         csr_bus.mret         = cm_mret_event;
+        if atomic_fault {
+            csr_bus.trap_cause = {60'd0, atomic_cause};
+            csr_bus.trap_value = cm_lsu_address_q;
+        }
         if interrupt_event {
             csr_bus.trap_pc    = interrupt_resume_pc_q;
             csr_bus.trap_cause = {1'b1, 59'd0, interrupt_cause_q};
             csr_bus.trap_value = 64'd0;
         }
 
-        redirect_valid = !backend_wait && !redirect_pending_q
+        redirect_valid = !backend_pending && !redirect_pending_q
             && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
         // An EX-owned prediction repair redirects only younger frontend work.
         // Its instruction becomes the next CM owner and must retain memory or
@@ -1324,8 +1622,8 @@ module Core #(
         // stall decision identical, but removes two register-index compares
         // from predictor request and fetch-cursor control.
         rx_result_can_bypass    = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
-            && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8) || (rx_alu_op_q == 4'd9)
-                || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16)
+            && !((!EARLY_ALU && ((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8) || (rx_alu_op_q == 4'd9)
+                || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16)))
                 || ((ENABLE_ZBB || ENABLE_ZBS) && rx_alu_op_q[5] && !rx_early_bitmanip)) && (rx_rd_q != 5'd0);
         decode_operand_match_rx = fd_q.valid && rx_valid_q && rx_write_enable_q && (rx_rd_q != 5'd0)
             && ((decode_bus.use_rs1 && (decode_bus.rs1 == rx_rd_q))
@@ -1356,21 +1654,47 @@ module Core #(
         // frontend is already blocked by redirect_pending_q.  Keeping the raw
         // EX redirect out of this handshake avoids extending forwarding and
         // redirect arithmetic into every predictor state/control endpoint.
-        predictor_response_accept   = predictor_response_valid && fetch_q.valid && !backend_wait && !redirect_pending_q
-            && !ex_exception && !ex_system_barrier && !frontend_hold;
+        // CompactBranchPredictor applies response_valid to response_fire.
+        // Give that port the readiness predicate directly, keeping the same
+        // accepted event here without a second valid-qualified logic cone.
+        predictor_response_ready    = fetch_q.valid && !backend_pending && !redirect_pending_q
+            && !ex_frontend_block && !frontend_hold;
+        predictor_response_accept   = predictor_response_valid && predictor_response_ready;
         predictor_frontend_redirect = predictor_response_accept && predictor_response_taken;
         // Keep the current InstructionBuffer tag hit out of the wide fetch
         // payload mux.  An invalid candidate may refresh masked payload, but
         // only the semantic predictor handshake advances the fetch cursor.
-        fetch_candidate_offer   = !backend_wait && !redirect_pending_q && !ex_exception && !ex_system_barrier
+        fetch_candidate_offer   = !backend_pending && !redirect_pending_q && !ex_frontend_block
             && !frontend_hold
             && (!fetch_q.valid || !fetch_lookahead_q.valid || !fetch_tail_valid_q || predictor_response_accept)
             && !predictor_frontend_redirect;
         fetch_payload_capture   = fetch_candidate_offer && predictor_request_ready;
         fetch_queue_push_valid  = fetch_payload_capture && fetch_packet.valid;
         predictor_request_valid = fetch_packet.valid && fetch_candidate_offer;
-        fetch_queue_advance     = !backend_wait && !redirect_pending_q && !ex_exception && !ex_system_barrier
+        fetch_queue_advance     = !backend_pending && !redirect_pending_q && !ex_frontend_block
             && !predictor_wait && !frontend_hold && !predictor_frontend_redirect;
+
+        // The accepted handshakes decide whether the cursor writes. Select
+        // its data using earlier predicates: while a write is enabled, these
+        // are equivalent to the corresponding accepted redirect. This keeps
+        // backend completion off the wide cursor data mux without changing
+        // any fetch/redirect edge or allowing an unaccepted request to advance.
+        fetch_cursor_redirect = !backend_wait && redirect_pending_q;
+        fetch_cursor_prediction = predictor_frontend_redirect && !predictor_wait;
+        fetch_line_write = fetch_cursor_redirect || fetch_cursor_prediction
+            || (predictor_request_accept && fetch_cross_line);
+        fetch_parcel_write = fetch_cursor_redirect || fetch_cursor_prediction
+            || predictor_request_accept;
+        fetch_line_next = fetch_line_plus_one;
+        fetch_parcel_next = fetch_next_parcel;
+        if fetch_q.valid && predictor_response_valid && predictor_response_taken {
+            fetch_line_next = predictor_response_next_pc[31:3];
+            fetch_parcel_next = predictor_response_next_pc[2:1];
+        }
+        if redirect_pending_q {
+            fetch_line_next = pending_redirect_target[ADDRESS_BITS - 1:3];
+            fetch_parcel_next = pending_redirect_target[2:1];
+        }
 
         // Keep packet data selection independent from the write enables.  A
         // payload is non-architectural whenever its corresponding valid bit is
@@ -1407,7 +1731,7 @@ module Core #(
         // any younger prediction, and reset the speculative queue here.
         predictor_discard_all = interrupt_event || (STRICT_MEMORY && cm_trap_event)
             || (!backend_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
-                && (ex_exception || ex_system_barrier));
+                && ex_frontend_block);
 
         // Present the four raw cycle predicates independently. CsrFile samples
         // all four at this edge, then applies the controller's memory,
@@ -1418,7 +1742,7 @@ module Core #(
         // can coincide with retirement.
         csr_bus.retire            = cm_retire_event;
         csr_bus.stall_dependency  = execution_hazard || muldiv_wait;
-        csr_bus.stall_memory_wait = memory_wait;
+        csr_bus.stall_memory_wait = memory_wait || atomic_wait || pmp_data_wait;
         // Count the same generation/application cycles as the raw redirect
         // predicates, but one cycle later from the registered maintenance
         // pulses.  Keeping the delayed pending pulse preserves the second
@@ -1450,12 +1774,26 @@ module Core #(
         // address-space mux between a pipeline register and every BRAM bank.
         data_addr        = cm_lsu_address_q;
         data_memory_addr = cm_lsu_memory_address_q;
+        atomic_write_data_update = atomic_store_issue && (cm_raw_instr_q[31:27] != 5'd3);
+        cm_write_data_enable = !backend_wait || atomic_write_data_update;
+        cm_write_data_next = execute_store_data;
+        if atomic_write_data_update { cm_write_data_next = atomic_write_value; }
         data_wdata       = cm_lsu_wdata_q;
         data_wmask       = completion_bus.store_mask;
         // Hold the architectural store indication for the complete CM
         // transaction. HardwareMemory performs the physical write only when
         // the request sequence changes, so this cannot duplicate the write.
         data_we               = cm_valid_q && cm_is_store_q && !cm_exception_q && !redirect_discards_cm;
+        if ACTIVE_A && cm_is_atomic_q {
+            data_we = cm_valid_q && atomic_written && !cm_exception_q && !redirect_discards_cm;
+        }
+        // Debug/tohost observers must wait for atomic architectural completion,
+        // one CPU edge after the registered memory acknowledgment. Normal
+        // stores retain their existing acknowledgment/retirement edge.
+        data_store_retire_ready = 1'b1;
+        if ACTIVE_A && cm_is_atomic_q {
+            data_store_retire_ready = atomic_done && !(redirect_pending_q && redirect_flush_wb_q);
+        }
         data_request_sequence = data_request_sequence_q;
         data_load_size        = cm_load_size_q;
         data_load_unsigned    = cm_load_unsigned_q;
@@ -1464,6 +1802,52 @@ module Core #(
         halted    = 1'b0;
         debug_x31 = debug_x31_q;
 
+    }
+
+    // At the lower-frequency target, capture address and end byte together,
+    // then check permissions. The three-stage variant keeps the extra cut.
+    // No request token is issued until the selected stages complete. A pipeline
+    // advance invalidates the result for the next EX owner; an older redirect
+    // can always flush this owner without waiting for a permission result.
+    always_ff (clk, rst_n) {
+        if_reset {
+            pmp_data_address_q = 64'd0;
+            pmp_data_last_q = 33'd0;
+            pmp_data_high_q = 1'b0;
+            pmp_data_stage_q = 2'd0;
+            pmp_data_allowed_q = 1'b0;
+        } else if ENABLE_U {
+            // The stage owns validity. Speculatively refresh the next stage's
+            // inputs while stage zero is idle; only the transitions below
+            // can make them observable to permission checking. This keeps the
+            // global backend-wait/redirect cone off the address register CEs.
+            if (PMP_DATA_STAGES == 2) && (pmp_data_stage_q == 2'd0) {
+                pmp_data_address_q = lsu_address;
+                pmp_data_last_q = pmp_data_last_next;
+                pmp_data_high_q = pmp_data_high_next;
+            }
+            if !backend_wait {
+                pmp_data_stage_q = 2'd0;
+            } else if pmp_data_wait {
+                if pmp_data_stage_q == 2'd0 {
+                    if PMP_DATA_STAGES == 2 {
+                        pmp_data_stage_q = 2'd2;
+                    } else {
+                        pmp_data_address_q = lsu_address;
+                        pmp_data_stage_q = 2'd1;
+                    }
+                } else if pmp_data_stage_q == 2'd1 {
+                    if PMP_DATA_STAGES != 2 {
+                        pmp_data_last_q = pmp_data_last_next;
+                        pmp_data_high_q = pmp_data_address_q[63:32] != 32'd0;
+                    }
+                    pmp_data_stage_q = 2'd2;
+                } else {
+                    pmp_data_allowed_q = pmp_data_comb_allowed;
+                    pmp_data_stage_q = 2'd3;
+                }
+            }
+        }
     }
 
     // Hold the frontend through the accepted interrupt even if its external
@@ -1583,7 +1967,10 @@ module Core #(
             // The semantic handshakes already exclude memory/dependency
             // waits and architectural flushes. Do not repeat those predicates
             // in a priority mux on the late instruction-valid -> PC path.
-            if !backend_wait && redirect_pending_q {
+            if ACTIVE_A {
+                if fetch_line_write { fetch_line_q = fetch_line_next; }
+                if fetch_parcel_write { fetch_parcel_q = fetch_parcel_next; }
+            } else if !backend_wait && redirect_pending_q {
                 fetch_line_q   = pending_redirect_target[ADDRESS_BITS - 1:3];
                 fetch_parcel_q = pending_redirect_target[2:1];
             } else if predictor_frontend_redirect && !predictor_wait {
@@ -1672,7 +2059,7 @@ module Core #(
             fetch_lookahead_valid_q = 1'b0;
             fetch_tail_valid_q      = 1'b0;
         } else if !backend_wait {
-            if redirect_pending_q || ex_exception || ex_system_barrier {
+            if redirect_pending_q || ex_frontend_block {
                 fetch_valid_q           = 1'b0;
                 fetch_lookahead_valid_q = 1'b0;
                 fetch_tail_valid_q      = 1'b0;
@@ -1698,15 +2085,31 @@ module Core #(
         }
     }
 
+    // One sequence owner for normal transfers and both phases of an AMO.
+    always_ff (clk, rst_n) {
+        if_reset { data_request_sequence_q = 1'b0; }
+        else if normal_memory_issue || atomic_issue { data_request_sequence_q = !data_request_sequence_q; }
+    }
+
+    // Normal stores and AMOs share this registered memory write bus. AMO data
+    // changes with the store request token; SC retains its existing source.
+    // Keep a single explicit hold condition for register-enable inference.
+    always_ff (clk, rst_n) {
+        if_reset { cm_lsu_wdata_q = 64'd0; }
+        else if cm_write_data_enable { cm_lsu_wdata_q = cm_write_data_next; }
+    }
+
     // Pending M results are invisible to consumers while the backend is held.
     // Refresh that payload until done, so only a small result mux crosses this
     // boundary. The completion edge reads the last registered M result.
+    // A PMP check may hold an ordinary ALU/CSR owner in CM, whose arithmetic
+    // value is still live for retirement and forwarding; preserve it too.
     always_ff (clk, rst_n) {
         if_reset {
             cm_arithmetic_q = 64'd0;
         } else if ENABLE_M && muldiv_wait {
             cm_arithmetic_q = muldiv_result;
-        } else if ENABLE_M || !backend_wait {
+        } else if (ENABLE_M && !pmp_data_wait) || !backend_wait {
             if ex_is_csr_q {
                 cm_arithmetic_q = csr_bus.read_data;
             } else {
@@ -1723,8 +2126,10 @@ module Core #(
             redirect_event_delay_q  = 1'b0;
             redirect_flush_wb_q     = 1'b0;
             redirect_target_q       = 64'h0000_0000_0000_0000;
-            data_request_sequence_q = 1'b0;
 
+
+            fd_csr_known_q = 1'b0;
+            fd_csr_writable_q = 1'b0;
             fd_q.pc                = 32'h0000_0000;
             fd_q.instruction       = 32'h0000_0013;
             fd_q.raw_instruction   = 32'h0000_0013;
@@ -1740,9 +2145,14 @@ module Core #(
             rx_fetch_fault_q       = 1'b0;
             rx_fault_boundary_q    = 1'b0;
             ex_fetch_fault_q       = 1'b0;
+            ex_pmp_fetch_fault_q = 1'b0;
+            ex_pmp_second_parcel_q = 1'b0;
             ex_fault_boundary_q    = 1'b0;
 
             rx_valid_q             = 1'b0;
+            rx_pmp_high_q = 1'b0;
+            rx_pmp_last_q = 33'd0;
+            rx_pmp_first_last_q = 33'd0;
             rx_pc_q                = 64'h0000_0000_0000_0000;
             rx_raw_instr_q         = 32'h0000_0013;
             rx_is_compressed_q     = 1'b0;
@@ -1757,6 +2167,7 @@ module Core #(
             rx_use_rs2_q           = 1'b0;
             rx_write_enable_q      = 1'b0;
             rx_is_load_q           = 1'b0;
+            rx_is_atomic_q = 1'b0;
             rx_is_muldiv_q         = 1'b0;
             ex_is_muldiv_q         = 1'b0;
             cm_muldiv_pending_q    = 1'b0;
@@ -1794,7 +2205,11 @@ module Core #(
             ex_subtract_q            = 1'b0;
             ex_write_enable_q        = 1'b0;
             ex_can_bypass_q          = 1'b0;
+            ex_pmp_pending_q = 1'b0;
+            ex_pmp_read_q = 1'b0;
+            ex_pmp_write_q = 1'b0;
             ex_is_load_q             = 1'b0;
+            ex_is_atomic_q = 1'b0;
             ex_load_size_q           = 2'b11;
             ex_load_unsigned_q       = 1'b0;
             ex_is_store_q            = 1'b0;
@@ -1815,6 +2230,8 @@ module Core #(
             ex_is_ebreak_q           = 1'b0;
             ex_is_mret_q             = 1'b0;
             ex_is_fence_i_q          = 1'b0;
+            ex_frontend_block_q      = 1'b0;
+            ex_normal_memory_q = 1'b0;
             ex_illegal_q             = 1'b0;
             ex_control_kind_q        = 3'd0;
             ex_prediction_token_q    = 3'd0;
@@ -1834,11 +2251,15 @@ module Core #(
             ex_bypass_q.redirect     = 1'b0;
 
             cm_valid_q               = 1'b0;
+            cm_atomic_active_q = 1'b0;
+            cm_memory_active_q = 1'b0;
+            cm_system_block_q = 1'b0;
             cm_pc_q                  = 64'h0000_0000_0000_0000;
             cm_raw_instr_q           = 32'h0000_0013;
             cm_rd_q                  = 5'd0;
             cm_write_enable_q        = 1'b0;
             cm_is_load_q             = 1'b0;
+            cm_is_atomic_q = 1'b0;
             cm_load_size_q           = 2'b11;
             cm_load_unsigned_q       = 1'b0;
             cm_is_store_q            = 1'b0;
@@ -1869,7 +2290,6 @@ module Core #(
             cm_shift_word_q          = 1'b0;
             cm_lsu_address_q         = 64'h0000_0000_0000_0000;
             cm_lsu_memory_address_q  = 64'h0000_0000_0000_0000;
-            cm_lsu_wdata_q           = 64'h0000_0000_0000_0000;
             cm_is_csr_q              = 1'b0;
             cm_csr_op_q              = 2'd0;
             cm_csr_write_q           = 1'b0;
@@ -1958,6 +2378,9 @@ module Core #(
             }
 
             if backend_wait {
+                if ENABLE_U && pmp_data_wait && (pmp_data_stage_q == 2'd2) {
+                    ex_pmp_pending_q = 1'b0;
+                }
                 if muldiv_wait && muldiv_done {
                     cm_muldiv_pending_q = 1'b0;
                 }
@@ -1977,13 +2400,13 @@ module Core #(
                 // keeping the bit-manipulation cone off the common CM bypass.
                 rx_execution_hazard_q = (ENABLE_ZBB || ENABLE_ZBS) && execution_hazard && ex_valid_q && ex_alu_op_q[5]
                     && !ex_early_bitmanip;
-                wb_valid_q            = cm_valid_q && !cm_exception_q;
+                wb_valid_q            = cm_valid_q && !cm_exception_q && !atomic_fault;
                 if COMMIT_PAYLOAD {
                     wb_pc_q        = cm_pc_q;
                     wb_raw_instr_q = cm_raw_instr_q;
-                    wb_mem_we_q    = cm_is_store_q;
+                    wb_mem_we_q    = data_we;
                     wb_mem_addr_q  = cm_lsu_address_q;
-                    wb_mem_wdata_q = cm_lsu_wdata_q;
+                    wb_mem_wdata_q = data_wdata;
                     wb_mem_wmask_q = completion_bus.store_mask;
                 } else {
                     wb_pc_q        = 32'd0;
@@ -1995,7 +2418,7 @@ module Core #(
                 }
                 wb_rd_q           = cm_rd_q;
                 wb_write_enable_q = cm_write_enable_q;
-                wb_result_q       = completion_bus.result;
+                wb_result_q       = cm_forward_data;
                 if (ENABLE_ZBB || ENABLE_ZBS) && cm_use_bitmanip_q {
                     wb_result_q = bitmanip_result;
                 }
@@ -2004,6 +2427,11 @@ module Core #(
                 // registered full-cycle side effects; WB suppresses them.
                 // MRET remains a normally retired instruction.
                 cm_valid_q          = ex_valid_q;
+                cm_atomic_active_q = ex_valid_q && ex_is_atomic_q && !ex_exception && !lsu_access_fault;
+                // Ordinary faulting memory instructions retain their existing
+                // token-wait behavior; only atomic operations are excluded.
+                cm_memory_active_q = ex_valid_q && (ex_is_load_q || ex_is_store_q) && !ex_is_atomic_q;
+                cm_system_block_q = ex_frontend_block_q || lsu_access_fault || (ENABLE_U && ex_exception);
                 cm_muldiv_pending_q = ex_is_muldiv_q;
                 cm_pc_q             = ex_pc_q;
                 cm_raw_instr_q      = ex_raw_instr_q;
@@ -2015,6 +2443,7 @@ module Core #(
                 // so a faulting memory tag cannot introduce a memory wait.
                 // Trap/WB and data_we separately suppress all side effects.
                 cm_is_load_q       = ex_is_load_q;
+                cm_is_atomic_q = ex_is_atomic_q;
                 cm_load_size_q     = ex_load_size_q;
                 cm_load_unsigned_q = ex_load_unsigned_q;
                 cm_is_store_q      = ex_is_store_q;
@@ -2024,10 +2453,7 @@ module Core #(
                 // suppress the architectural memory operation itself. Keeping
                 // ex_redirect_valid out of this CE also avoids routing the
                 // unrelated JALR target adder through the request token.
-                if ex_valid_q && (ex_is_load_q || ex_is_store_q) && !ex_exception && !lsu_access_fault
-                    && !branch_redirect_valid && !cm_system_redirect && !redirect_pending_q {
-                    data_request_sequence_q = !data_request_sequence_q;
-                }
+
                 cm_store_size_q   = ex_store_size_q;
                 cm_is_branch_q    = ex_valid_q && ex_is_branch_q;
                 cm_branch_taken_q = 1'b0;
@@ -2055,26 +2481,33 @@ module Core #(
                     cm_untaken_match_q = ex_kind_match_q && !ex_predicted_taken_q
                         && (ex_predicted_next_pc_q == ex_fallthrough_pc_q);
                 }
-                cm_shift_low_q = execute_bus.shift_result;
+                // Remove the old shift storage when completion moves into EX.
+                // Keep amount/word metadata used by the separate Zbb/Zbs unit.
+                cm_shift_low_q = if EARLY_ALU ? 64'd0 : execute_bus.shift_result;
                 if ex_word_op_q {
                     cm_shift_amount_q = {1'b0, alu_operand_b[4:3]};
                 } else {
                     cm_shift_amount_q = alu_operand_b[5:3];
                 }
-                cm_shift_arithmetic_q = ex_alu_op_q == 4'd8;
+                cm_shift_arithmetic_q = !EARLY_ALU && (ex_alu_op_q == 4'd8);
                 cm_logic_result_q     = execute_bus.logic_result;
+                if EARLY_ALU {
+                    cm_logic_result_q = early_alu_result;
+                }
                 if ex_early_bitmanip {
                     cm_logic_result_q = early_bitmanip_result;
                 }
-                cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip) && !ex_is_csr_q;
-                cm_use_shift_q          = execute_bus.result_use_shift;
+                cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip
+                    || (EARLY_ALU && execute_bus.result_use_shift)) && !ex_is_csr_q;
+                cm_use_shift_q          = !EARLY_ALU && execute_bus.result_use_shift;
                 cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
                 cm_compare_less_q       = execute_bus.compare_less;
                 cm_compare_sign_a_q     = execute_bus.compare_sign_a;
                 cm_compare_sign_b_q     = execute_bus.compare_sign_b;
+                // Signed branch recovery still consumes this CM metadata.
                 cm_compare_signed_q     = ex_alu_op_q == 4'd9;
-                cm_use_compare_q        = execute_bus.result_use_compare;
-                cm_shift_left_q         = (ex_alu_op_q == 4'd6) || (ex_alu_op_q == 6'd16);
+                cm_use_compare_q        = !EARLY_ALU && execute_bus.result_use_compare;
+                cm_shift_left_q         = !EARLY_ALU && ((ex_alu_op_q == 4'd6) || (ex_alu_op_q == 6'd16));
                 cm_shift_word_q         = ex_word_op_q;
                 cm_lsu_address_q        = lsu_address;
                 cm_lsu_memory_address_q = lsu_address;
@@ -2095,7 +2528,6 @@ module Core #(
                     && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
                     cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
                 }
-                cm_lsu_wdata_q       = execute_store_data;
                 cm_is_csr_q          = ex_is_csr_q;
                 cm_csr_op_q          = ex_csr_op_q;
                 cm_csr_write_q       = ex_csr_write_q;
@@ -2144,11 +2576,12 @@ module Core #(
                 // not start behind a four-bit opcode equality comparator.
                 ex_subtract_q            = rx_alu_op_q == 4'd1;
                 ex_write_enable_q        = rx_write_enable_q;
-                ex_can_bypass_q          = rx_write_enable_q && !rx_is_load_q && !rx_is_muldiv_q
-                    && !((rx_alu_op_q == 4'd6) || (rx_alu_op_q == 4'd7) || (rx_alu_op_q == 4'd8)
-                        || (rx_alu_op_q == 4'd9) || (rx_alu_op_q == 4'd11) || (rx_alu_op_q == 6'd16)
-                        || ((ENABLE_ZBB || ENABLE_ZBS) && rx_alu_op_q[5] && !rx_early_bitmanip)) && (rx_rd_q != 5'd0);
+                ex_can_bypass_q          = rx_result_can_bypass;
+                ex_pmp_pending_q = ENABLE_U && rx_valid_q && (rx_is_load_q || rx_is_store_q || rx_is_atomic_q);
+                ex_pmp_read_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd3 : rx_is_load_q);
+                ex_pmp_write_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd2 : rx_is_store_q);
                 ex_is_load_q             = rx_is_load_q;
+                ex_is_atomic_q = rx_is_atomic_q;
                 ex_load_size_q           = rx_load_size_q;
                 ex_load_unsigned_q       = rx_load_unsigned_q;
                 ex_is_store_q            = rx_is_store_q;
@@ -2170,7 +2603,20 @@ module Core #(
                 ex_is_ebreak_q           = rx_is_ebreak_q;
                 ex_is_mret_q             = rx_is_mret_q;
                 ex_is_fence_i_q          = rx_is_fence_i_q;
-                ex_illegal_q             = rx_illegal_q;
+                // Capture the complete frontend-stop predicate with its EX
+                // payload. The exception cause and individual system tags
+                // remain separate; ex_valid_q qualifies this held predicate.
+                ex_frontend_block_q = rx_illegal_q || rx_user_illegal || !pmp_fetch_allowed || rx_is_ecall_q || rx_is_ebreak_q
+                    || (STRICT_MEMORY && rx_fetch_fault_q) || rx_is_mret_q || rx_is_fence_i_q
+                    || ((ENABLE_INTERRUPTS || ENABLE_U) && rx_is_csr_q && rx_csr_write_q
+                        && ((rx_csr_index_q == 5'd1) || (rx_csr_index_q == 5'd16)
+                            || (rx_csr_index_q == 5'd17) || (ENABLE_U && (rx_csr_index_q >= 5'd18))));
+                ex_normal_memory_q = (rx_is_load_q || rx_is_store_q) && !rx_is_atomic_q
+                    && !rx_illegal_q && !rx_user_illegal && pmp_fetch_allowed && !rx_is_ecall_q && !rx_is_ebreak_q
+                    && !(STRICT_MEMORY && rx_fetch_fault_q);
+                ex_illegal_q             = rx_illegal_q || rx_user_illegal;
+                ex_pmp_fetch_fault_q = !pmp_fetch_allowed;
+                ex_pmp_second_parcel_q = pmp_first_parcel_allowed;
                 ex_fetch_fault_q         = rx_fetch_fault_q;
                 ex_fault_boundary_q      = rx_fault_boundary_q;
                 ex_control_kind_q        = rx_control_kind;
@@ -2211,12 +2657,15 @@ module Core #(
                     fd_q.valid = 1'b0;
                     rx_valid_q = 1'b0;
                     ex_valid_q = 1'b0;
+                    ex_pmp_pending_q = 1'b0;
                     cm_valid_q = 1'b0;
+                    cm_atomic_active_q = 1'b0;
+                    cm_memory_active_q = 1'b0;
                     if redirect_flush_wb_q {
                         wb_valid_q = 1'b0;
                     }
                     rx_stalled_q = 1'b0;
-                } else if ex_exception || ex_system_barrier {
+                } else if ex_frontend_block {
                     // Trap state/target is committed from CM on the next
                     // cycle. Kill younger work here so that delaying the CSR
                     // side effect does not let an instruction past the
@@ -2224,6 +2673,7 @@ module Core #(
                     fd_q.valid   = 1'b0;
                     rx_valid_q   = 1'b0;
                     ex_valid_q   = 1'b0;
+                    ex_pmp_pending_q = 1'b0;
                     rx_stalled_q = 1'b0;
                 } else if predictor_wait {
                     // The hardware cold-start scrub and a held synchronous
@@ -2231,13 +2681,21 @@ module Core #(
                     // may drain through CM/WB, while EX receives a bubble so
                     // no instruction is executed twice.
                     ex_valid_q   = 1'b0;
+                    ex_pmp_pending_q = 1'b0;
                     rx_stalled_q = rx_valid_q;
                 } else if frontend_hold {
                     ex_valid_q   = 1'b0;
+                    ex_pmp_pending_q = 1'b0;
                     rx_stalled_q = 1'b1;
                 } else {
                     rx_stalled_q           = 1'b0;
                     rx_valid_q             = fd_q.valid;
+                    // Capture permission endpoints under the same hold/flush
+                    // condition as their PC and instruction owner.
+                    // Comparison also elaborates when ADDRESS_BITS is 32.
+                    rx_pmp_high_q = fd_q.pc >: 64'h0000_0000_ffff_ffff;
+                    rx_pmp_last_q = pmp_fetch_last_next;
+                    rx_pmp_first_last_q = pmp_fetch_first_last_next;
                     rx_pc_q                = fd_q.pc;
                     rx_raw_instr_q         = fd_q.raw_instruction;
                     rx_is_compressed_q     = fd_q.is_compressed;
@@ -2252,6 +2710,7 @@ module Core #(
                     rx_use_rs2_q           = decode_bus.use_rs2;
                     rx_write_enable_q      = decode_bus.write_enable;
                     rx_is_load_q           = decode_bus.is_load;
+                rx_is_atomic_q = decode_bus.is_atomic;
                     rx_load_size_q         = decode_bus.load_size;
                     rx_load_unsigned_q     = decode_bus.load_unsigned;
                     rx_is_store_q          = decode_bus.is_store;
@@ -2281,6 +2740,8 @@ module Core #(
                     rx_execution_hazard_q  = decode_execution_hazard;
 
                     fd_q = decode_packet;
+                    fd_csr_known_q = fetched_csr_known;
+                    fd_csr_writable_q = fetched_csr_writable;
                 }
             }
         }
