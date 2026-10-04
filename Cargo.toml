@@ -13,15 +13,15 @@ object = { version = "0.37", default-features = false, features = ["read_core", 
 # Current simulator and compressed-artifact synthesis stack.
 celox = "=0.8.1"
 # Keep direct and Texo-transitive Struo dependencies aligned.
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "a45b63962c843c0876506f2f9a6d560f5537b40d" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
-texo-model = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
-texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
-texo-timing = { git = "https://github.com/fabrica-eda/texo.git", rev = "97b2b0490a2d200d60e3265f1fd46069c6a6dbb9" }
+struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
+struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
+struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
+struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "820e2ba61455d611792c9fd073b564ef1942b73a" }
+texo-model = { git = "https://github.com/fabrica-eda/texo.git", rev = "820e2ba61455d611792c9fd073b564ef1942b73a" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "820e2ba61455d611792c9fd073b564ef1942b73a" }
+texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo.git", rev = "820e2ba61455d611792c9fd073b564ef1942b73a" }
+texo-timing = { git = "https://github.com/fabrica-eda/texo.git", rev = "820e2ba61455d611792c9fd073b564ef1942b73a" }
 
 [patch.crates-io]
 # Keep constant-folding metadata consistent with fitted constant storage.
