@@ -243,7 +243,7 @@ with `--strict-memory`. S-mode, delegation and address translation remain later 
   dedicated endpoint registers are checked. A data hit ends the permission
   wait after one held cycle. Pages split by a PMP boundary keep the exact checks
   above. The 84 MHz qualified image predates this change; the cached RTL closes
-  timing at 104/52 MHz and passed 269 ELFs on the FPGA.
+  timing at 104/52 and 108/54 MHz and passed 269 ELFs on the FPGA at both.
 - End-byte addresses are captured before range comparison: FD→RX captures the
   instruction and first-parcel endpoints with their PC; the first held data
   cycle captures the endpoint alongside the effective address. The carry beyond

@@ -13,19 +13,15 @@ The clock increase from the preserved 78 MHz reference is 7.7%; same-work RTL
 execution takes about 7% less time. This is a simulation comparison, not a board
 measurement. Details are in [RV64_USER_PLATFORM.md](RV64_USER_PLATFORM.md).
 
-The working U profile now prioritizes the CPU at **104 MHz CPU and 52 MHz memory**.
-It precomputes PMP range validity, caches return-stack tops on the existing update
-edge, shortens CSR write gating, and replaces bulk RAS recovery copies with eight
-sharing flags. When retirement later overwrites a shared entry, the speculative
-register saves its old value first. All 536 native runs, the simultaneous U kernel,
-31 simultaneous memory cases, 61 predictor-recovery tests and 11 RAS/predictor
-tests pass. All 268 ELF cycle counts match the preceding 104/52 MHz RTL in both
-native clock orders. The working source also caches PMP fetch and data
+The working U profile runs the CPU at **108 MHz with 54 MHz memory** (VCO 648 MHz;
+CPU/memory outputs have zero phase). It precomputes PMP range validity, caches
+return-stack tops on the existing update edge, shortens CSR write gating, replaces
+bulk RAS recovery copies with eight sharing flags, and caches PMP fetch and data
 permissions per uniform 4 KiB page ([permission cache](RV64_PMP_PERMISSION_CACHE.md)).
 With the Texo routability fix pinned in `Cargo.toml`, a plain flow without seed
-placement or route hints closes this source at 104/52 MHz: **setup 0 ps / hold
-+1 ps** with the measured models, 194 ps guards and four reviewed exceptions.
-The resulting bitstream passed all 269 validation ELFs on the FPGA on 2026-10-04.
+placement or route hints closes it at **setup +1 ps / hold +1 ps** with the measured
+models, 194 ps guards and four reviewed exceptions. The bitstream passed all 269
+validation ELFs on the FPGA on 2026-10-05; 112/56 MHz still misses setup by 137 ps.
 The 84 MHz result applies to its archived source and checkpoint; changing this
 development profile's clock alone does not reproduce that implementation.
 The earlier 78 MHz archive remains unchanged.

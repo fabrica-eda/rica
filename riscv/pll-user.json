@@ -18,8 +18,8 @@
     "OUTDIVIDER_MUXD": "DIVD",
     "CLKI_DIV": "1",
     "CLKOP_ENABLE": "ENABLED",
-    "CLKOP_DIV": "52",
-    "CLKOP_CPHASE": "9",
+    "CLKOP_DIV": "6",
+    "CLKOP_CPHASE": "2",
     "CLKOP_FPHASE": "0",
     "CLKOS_ENABLE": "ENABLED",
     "CLKOS_DIV": "6",
@@ -30,12 +30,13 @@
     "CLKOS2_CPHASE": "0",
     "CLKOS2_FPHASE": "0",
     "FEEDBK_PATH": "INT_OP",
-    "CLKFB_DIV": "1"
+    "CLKFB_DIV": "9"
   },
   "attributes": {
     "FREQUENCY_PIN_CLKI": "12",
-    "FREQUENCY_PIN_CLKOS": "104",
-    "FREQUENCY_PIN_CLKOS2": "52",
+    "FREQUENCY_PIN_CLKOP": "108",
+    "FREQUENCY_PIN_CLKOS": "108",
+    "FREQUENCY_PIN_CLKOS2": "54",
     "ICP_CURRENT": "12",
     "LPF_RESISTOR": "8",
     "MFG_ENABLE_FILTEROPAMP": "1",

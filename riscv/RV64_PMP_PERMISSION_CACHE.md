@@ -1,7 +1,8 @@
 # PMP権限キャッシュ
 
-2026-10-04。対象は作業中の104/52 MHz U/PMPプロファイル（`platform-user.json`）。
-このRTLは104/52 MHzで素のTexoフローによりタイミングを満たし、実機で269 ELFが合格した。
+2026-10-04〜05。作業中のU/PMPプロファイル（`platform-user.json`）は**108/54 MHz**。
+このRTLは108/54 MHzで素のTexoフローによりタイミングを満たし、実機で269 ELFが合格した
+（[108/54 MHz](#10854-mhz2026-10-05)）。104/52 MHzの結果は充填レジスタ化前の記録として残す。
 
 ## 目的
 
@@ -24,9 +25,10 @@ PMP設定と特権はCSR書込みやtrap/MRETで直列化されてからしか�
 
 - FD→RXで `fd_q.pc[31:12]` とタグ・特権を照合し、結果を `rx_ipc_*` に登録する。
   RX→EXは登録済みの1 bitを取り込むだけになり、比較器はこの経路から消える。
-- ミスしたらRXを1サイクル保持する。専用レジスタ `rx_pmp_address_q` と既存の
-  端点レジスタから正確な判定（第1パーセル含む）とページ分類を行い、結果を登録して
-  一様ならエントリを埋める。ページをまたぐ32 bit命令は常にミス扱い。
+- ミスしたらRXを2サイクル保持する。1サイクル目に専用レジスタ `rx_pmp_address_q` と
+  既存の端点レジスタから正確な判定（第1パーセル含む）とページ分類を行って `ipc_eval_*`
+  に登録し、2サイクル目にRXの結果と、一様ならエントリを書く。比較器はレジスタで
+  終わる。ページをまたぐ32 bit命令は常にミス扱い。
 - M-modeで全エントリがOFFなら常に許可（従来の結果と同じ）。
 
 **データ側（1エントリ: 有効、特権、ページタグ、R、W）**
@@ -36,7 +38,8 @@ PMP設定と特権はCSR書込みやtrap/MRETで直列化されてからしか�
   アドレス、最終バイトが同じページ（4 GiB未満）にあるときだけヒットする。
 - ヒットは最初の待ちedgeで専用FF `pmp_data_hit_q` に登録され、待ちは2サイクルから
   1サイクルになる。許可は別FFに取り込み、発行経路の既存の許可LUTで選ぶ。
-- ミスは既存の2段の正確判定をそのまま使い、同じ段でページ分類してエントリを埋める。
+- ミスは既存の2段の正確判定をそのまま使う。同じ段のページ分類を `dpc_fill_*` に登録し、
+  次のedgeでエントリを書く。次のデータ照合はそれ以降なので、ヒットは失わない。
 
 **無効化**: PMP CSR（index 18以上）への書込みがCMにある間、両エントリを無効化する。
 登録済み範囲が新しい値になるまでの3サイクル、照合と充填を止める。特権はタグに含む
@@ -57,7 +60,53 @@ PMP設定と特権はCSR書込みやtrap/MRETで直列化されてからしか�
 - 既存のCPU検証: ネイティブ536実行、同時クロックU kernel、同時クロックのメモリ/原子/
   PMP 31件がすべて合格。同時クロックモデルでは269 ELFすべてが新旧両RTLで合格した。
 
-## 結果
+## 108/54 MHz（2026-10-05）
+
+104/52 MHzの実装で最も遅い終点のうち、自分で足したキャッシュ充填（ページ分類から
+`ipc_tag_q`/`dpc_tag_q` へ、論理8段）をレジスタで切った（上記の構造）。機能はネイティブ
+536実行、同時クロックのU kernelとメモリ系31件、`pmp-cache.elf`、8変異中7検出で、
+U kernelは命令側ミスの1サイクル増で232,883→232,957サイクル（+0.03%）。
+
+同じRTLを修正Texoの素のフロー（実測モデル、194 psガード、既存4例外）で比べた。
+117.6/124.8 MHzは充填レジスタ化前のRTL。
+
+| CPU/メモリ | setup | hold | 判定 |
+| --- | ---: | ---: | --- |
+| 104/52 MHz | +17 ps | +1 ps | 達成（化前は0 ps） |
+| **108/54 MHz** | **+1 ps** | **+1 ps** | **達成** |
+| 112/56 MHz | −137 ps（32件） | −40 ps | 未達 |
+| 117.6/58.8 MHz（化前） | −708 ps（523件） | −15 ps | 未達 |
+| 124.8/62.4 MHz（化前） | −1,779 ps | −111 ps | 未達 |
+
+117.6 MHzの違反は `cm_arithmetic_q`（−708 ps）、`cm_exception_value_q`、性能カウンタ
+247本、`fetch_line_q` と既存経路に広く分布していた。さらに上げるには、それらの経路と
+性能カウンタの更新を組み替える必要がある。
+
+**実機**: `riscv/build/riscv-hardware-compact-user-108-pmpcache-20261005.bit`
+（SHA-256 `88b4a173cf4ac82cc424e1e125d0e18dfbb2bfba1ed4dd739e41655cd5a8fd62`）は
+チェック付きbitgen（プロファイルとPLLの照合、JTCK 515 setup／515 hold一致）を通り、
+タイムベース54 MHzで作り直したタイマーELFを含む269 ELFが**全件合格**した。U kernelは
+mcycle 232,960／minstret 66,924（モデル232,961）。同時クロックモデルとの差は、自前ELFの
+59本が完全一致、74本が命令数一致でmcycle −1、ACT4の136本が命令数−1・mcycle −4〜−5で、
+104/52 MHzと同じ傾向。
+
+**PLL**: 108/54 MHz（VCO 648 MHz）と112/56 MHz（VCO 672 MHz）の元設定を足した。
+`tools/pll_template_from_ecppll.py` が `ecppll` の出力を無修正で取り込み、12 MHz基準で
+CLKI_DIV=1（位相比較周波数が10 MHz超）、CLKOPの内部帰還、VCO 400〜800 MHz、CLKOSと
+CLKOS2のCPHASE/FPHASE=0を満たさない設定を拒否する。位相ゼロは副出力に
+`−CLKOP_CPHASE/DIV×360°` を与えて得る（84 MHzの −154.29° と同じ方法）。同じツールで
+84 MHzの手順を実行すると、既存の `pll-12-to-84.json` とバイト単位で同じ元設定になり、
+来歴のツール／Verilog／元設定ハッシュもすべて一致した。
+
+| CPU/メモリ | ecppll引数 | VCO | CLKOP（帰還） | CLKOS/CLKOS2 |
+| --- | --- | ---: | --- | --- |
+| 108/54 MHz | `--clkout0 108 --clkout1 108 --clkout2 54 --phase1=-120 --phase2=-60` | 648 MHz | 108 MHz、DIV 6 | DIV 6/12、位相0 |
+| 112/56 MHz | `--clkout0 168 --clkout1 112 --clkout2 56 --phase1=-60 --phase2=-30` | 672 MHz | 168 MHz、DIV 4 | DIV 6/12、位相0 |
+
+いずれも `--clkin 12 --internal_feedback`。来歴は `toolchain/measurements/2026-10-05-pll-templates/`、
+実装・監査・実機の記録は `toolchain/measurements/2026-10-05-rv64-u-108-pmpcache/` にある。
+
+## 104/52 MHzの結果（2026-10-04、充填レジスタ化前）
 
 **実機（2026-10-04）**: 104/52 MHzのbitstream
 `riscv/build/riscv-hardware-compact-user-104-pmpcache-20261004.bit`
@@ -132,20 +181,22 @@ U kernel全体は234,109→232,883サイクル（−0.5%）。メモリ待ちが
 cargo test --release --locked --offline -p verify-riscv --test pmp
 (cd riscv && veryl check)
 python3 riscv/kernel/build-user.py   # pmp-cache.elf を含む
+python3 riscv/tools/build_rv64_machine_interrupts.py --platform-profile riscv/platform-user.json \
+  --output-dir build/timer-108   # タイムベース54 MHzのタイマーELF
 
 # 素のフロー（シード配置・配線ヒントなし）。測定モデルと194 psガードはtexo-measuredが付ける。
 riscv/tools/texo-measured pnr riscv --top HardwareCompactUserTestTop \
   --device LFE5UM5G-85F --package CABGA381 --speed 8 \
   --lpf riscv/lfe5um5g-85f-evn.lpf --pll-binding riscv/pll-user.json \
-  --synthesis-goal-mhz 104 --jtagg-prefix jtag \
+  --synthesis-goal-mhz 108 --jtagg-prefix jtag \
   --clock-constraints riscv/jtck-clock-constraints.json \
   --timing-exceptions riscv/timing-coverage-exceptions.json \
   --architecture toolchain/worktrees/dsp/deps/ecp5-dsp-architecture-v6.txdb \
-  --setup-optimization-budget-seconds 1800 --output build/user-104-pmpcache.txcp
+  --setup-optimization-budget-seconds 1800 --output build/user-108-pmpcache.txcp
 
 # nextpnr参照用のネットリスト（Struoマップ、JTAG/PLL結線済み）
 cargo run --release --locked -p verify-riscv --example nextpnr_export -- \
-  riscv HardwareCompactUserTestTop riscv/pll-user.json 104 build/user-104.nextpnr.json
+  riscv HardwareCompactUserTestTop riscv/pll-user.json 108 build/user-108.nextpnr.json
 ```
 
 実装・監査・実機の記録は `toolchain/measurements/2026-10-04-rv64-u-104-pmpcache/`
