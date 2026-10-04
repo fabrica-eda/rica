@@ -20,8 +20,12 @@ sharing flags. When retirement later overwrites a shared entry, the speculative
 register saves its old value first. All 536 native runs, the simultaneous U kernel,
 31 simultaneous memory cases, 61 predictor-recovery tests and 11 RAS/predictor
 tests pass. All 268 ELF cycle counts match the preceding 104/52 MHz RTL in both
-native clock orders. Physical implementation is in progress; this source is
-**not timing qualified**. The earlier 104/104 MHz best was −2,241/−15 ps.
+native clock orders. The working source also caches PMP fetch and data
+permissions per uniform 4 KiB page ([permission cache](RV64_PMP_PERMISSION_CACHE.md)).
+With the Texo routability fix pinned in `Cargo.toml`, a plain flow without seed
+placement or route hints closes this source at 104/52 MHz: **setup 0 ps / hold
++1 ps** with the measured models, 194 ps guards and four reviewed exceptions.
+The resulting bitstream passed all 269 validation ELFs on the FPGA on 2026-10-04.
 The 84 MHz result applies to its archived source and checkpoint; changing this
 development profile's clock alone does not reproduce that implementation.
 The earlier 78 MHz archive remains unchanged.

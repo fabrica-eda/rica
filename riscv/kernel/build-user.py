@@ -52,7 +52,11 @@ def main():
     assembler = OBJDUMP.with_name("llvm-mc")
     linker = sysroot / "lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
     tests = HERE.parent / "tests"
-    for source in (tests / "rv64-u/pmp-machine.S", tests / "rv64i-subset/system.S"):
+    for source, script in (
+        (tests / "rv64-u/pmp-machine.S", tests / "rv64i-subset/link.ld"),
+        (tests / "rv64-u/pmp-cache.S", tests / "rv64-u/link-ram.ld"),
+        (tests / "rv64i-subset/system.S", tests / "rv64i-subset/link.ld"),
+    ):
         obj = out / (source.stem + ".o")
         diagnostic = out / (source.stem + ".elf")
         commands = [
@@ -60,7 +64,7 @@ def main():
              "-mattr=+i,+c,+zicsr,+zifencei", "-filetype=obj", "-I",
              str(tests / "rv64i-subset"), "-o", str(obj), str(source)],
             [str(linker), "-flavor", "gnu", "-m", "elf64lriscv", "-T",
-             str(tests / "rv64i-subset/link.ld"), "-o", str(diagnostic), str(obj)],
+             str(script), "-o", str(diagnostic), str(obj)],
         ]
         for diagnostic_command in commands:
             subprocess.run(diagnostic_command, check=True)
@@ -70,6 +74,7 @@ def main():
         }
         inputs.append(source)
     inputs.extend(tests / "rv64i-subset" / name for name in ("link.ld", "test_macros.inc"))
+    inputs.append(tests / "rv64-u/link-ram.ld")
     record = {
         "command": command,
         "rustflags": flags,

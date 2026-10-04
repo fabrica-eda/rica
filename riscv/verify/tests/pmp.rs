@@ -568,3 +568,262 @@ decoded_config:decoded,lower,upper,nonempty);
         }
     }
 }
+
+fn page_reference(page: u64, user: bool, cfg: [u8; 4], addr: [u32; 4]) -> (bool, [bool; 3]) {
+    let base = page << 12;
+    let end = base + 4096;
+    for i in 0..4 {
+        let (lo, hi) = match (cfg[i] >> 3) & 3 {
+            0 => continue,
+            1 => (
+                if i == 0 {
+                    0
+                } else {
+                    u64::from(addr[i - 1]) * 4
+                },
+                u64::from(addr[i]) * 4,
+            ),
+            2 => (u64::from(addr[i]) * 4, u64::from(addr[i]) * 4 + 4),
+            _ => {
+                let length = 1u64 << (addr[i].trailing_ones().min(29) + 3);
+                let lo = (u64::from(addr[i]) * 4) & !(length - 1);
+                (lo, lo + length)
+            }
+        };
+        if lo < hi && lo < end && base < hi {
+            let permission = |kind: u8| (!user && cfg[i] & 128 == 0) || cfg[i] & (1 << kind) != 0;
+            return (
+                lo <= base && end <= hi,
+                [permission(0), permission(1), permission(2)],
+            );
+        }
+    }
+    (true, [!user; 3])
+}
+
+#[test]
+fn page_uniform_classification_matches_bytewise_oracle_inside_each_page() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+    let source = fs::read_to_string(root.join("PmpCheck.veryl")).unwrap()
+        + r#"
+module PageTest(page: input logic<32>, user_access: input logic, cfg: input logic<32>,
+a0: input logic<30>, a1: input logic<30>, a2: input logic<30>, a3: input logic<30>,
+uniform: output logic, read: output logic, write: output logic, execute: output logic) {
+var configs: logic<8> [4]; var addresses: logic<30> [4];
+var lower: logic<33> [4]; var upper: logic<33> [4]; var nonempty: logic<4>;
+always_comb { for i in 0..4 { configs[i]=cfg[i*8+:8]; nonempty[i]=lower[i] <: upper[i]; }
+addresses[0]=a0; addresses[1]=a1; addresses[2]=a2; addresses[3]=a3; }
+inst ranges: PmpRanges(pmp_config:configs,pmp_address:addresses,lower,upper);
+inst check: PmpPageUniform(page:page[19:0],user_access,pmp_config:configs,lower,upper,nonempty,
+uniform,read,write,execute);
+}"#;
+    let mut checked_accesses = 0_u64;
+    let mut uniform_pages = [0_u64; 2];
+    for mapped in [false, true] {
+        let mut sim = if mapped {
+            let rtl =
+                struo_frontend_veryl::analyze_and_lower(&source, "pmp_page_test", "PageTest")
+                    .unwrap();
+            let netlist = struo_target_ecp5::map_to_ecp5_with_options(
+                &struo_synth::synthesize(&rtl).unwrap().netlist,
+                Default::default(),
+            )
+            .unwrap();
+            struo_celox::ecp5_simulator(&netlist)
+                .unwrap()
+                .build_native()
+                .unwrap()
+        } else {
+            SimulatorBuilder::new(&source, "PageTest")
+                .build_native()
+                .unwrap()
+        };
+        let inputs = ["page", "user_access", "cfg", "a0", "a1", "a2", "a3"].map(|n| sim.signal(n));
+        let outputs = ["uniform", "read", "write", "execute"].map(|n| sim.signal(n));
+        let mut seed = 0x5eed_7a6e_c0de_1234_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for case in 0..6000 {
+            let random = next();
+            let cfg: [u8; 4] = if case % 7 == 0 {
+                [0; 4]
+            } else {
+                random.to_le_bytes()[..4].try_into().unwrap()
+            };
+            // Mix page-aligned bounds, sub-page bounds and NAPOT sizes around a
+            // few neighboring pages so that both uniform and split pages occur.
+            let mut addr = [0_u32; 4];
+            for (i, value) in addr.iter_mut().enumerate() {
+                let bits = next();
+                let page_index = 0x80000 + (bits & 7) as u32;
+                *value = match (bits >> 3) % 4 {
+                    0 => page_index << 10,
+                    1 => (page_index << 10) + ((bits >> 8) & 0x3ff) as u32,
+                    2 => ((page_index << 10) & !((1 << ((bits >> 8) % 14)) - 1))
+                        | ((1 << ((bits >> 8) % 14)) - 1) >> 1,
+                    _ => ((page_index + 1) << 10) - 1 - (i as u32),
+                } & 0x3fff_ffff;
+            }
+            if case % 13 == 0 {
+                addr = [0x3fff_ffff, 0x3fff_fffe, 0, 1];
+            }
+            let page = match case % 9 {
+                0 => 0,
+                1 => 0xf_ffff,
+                _ => 0x80000 + (next() % 10) - 1,
+            };
+            let user = case % 2 == 0;
+            sim.modify(|io| {
+                io.set(inputs[0], page as u32);
+                io.set(inputs[1], u8::from(user));
+                io.set(inputs[2], u32::from_le_bytes(cfg));
+                for i in 0..4 {
+                    io.set(inputs[i + 3], addr[i]);
+                }
+            })
+            .unwrap();
+            let got = outputs.map(|signal| {
+                sim.get(signal)
+                    .to_u64_digits()
+                    .first()
+                    .copied()
+                    .unwrap_or(0)
+                    != 0
+            });
+            let (uniform, permissions) = page_reference(page, user, cfg, addr);
+            let context = format!(
+                "case={case} mapped={mapped} page={page:x} user={user} cfg={cfg:x?} addr={addr:x?}"
+            );
+            assert_eq!(got[0], uniform, "uniform {context}");
+            if !uniform {
+                continue;
+            }
+            uniform_pages[usize::from(mapped)] += 1;
+            assert_eq!(&got[1..], &permissions, "permissions {context}");
+            // The property the core relies on: every contained access in a
+            // uniform page has exactly the cached permission of its kind.
+            for _ in 0..8 {
+                let bits = next();
+                let size = (bits & 3) as u8;
+                let offset = (bits >> 2) % (4096 - (1 << size) + 1);
+                let address = (page << 12) + offset;
+                for access in [1_u8, 2, 3, 4] {
+                    let expected = (access & 1 == 0 || permissions[0])
+                        && (access & 2 == 0 || permissions[1])
+                        && (access & 4 == 0 || permissions[2]);
+                    assert_eq!(
+                        oracle(address, size, user, access, cfg, addr),
+                        expected,
+                        "contained access {address:x}/{size}/{access} {context}"
+                    );
+                    checked_accesses += 1;
+                }
+            }
+        }
+    }
+    // Both classes must actually occur for the generated configurations.
+    // About an eighth of the generated pages are split by a PMP boundary.
+    assert!(uniform_pages[0] > 1000 && uniform_pages[0] < 5500, "{uniform_pages:?}");
+    assert_eq!(uniform_pages[0], uniform_pages[1]);
+    assert!(checked_accesses > 50_000, "{checked_accesses}");
+}
+
+#[test]
+fn cached_page_match_equals_effective_address_page_containment() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/PmpCheck.veryl"))
+            .unwrap()
+            + r#"
+module PageMatchTest(base: input logic<64>, offset: input logic<16>, size: input logic<2>,
+tag: input logic<32>, hit: output logic) {
+inst check: PmpCachedPageMatch(base, offset: offset[11:0], size, tag: tag[19:0], hit);
+}"#;
+    for mapped in [false, true] {
+        let mut sim = if mapped {
+            let rtl = struo_frontend_veryl::analyze_and_lower(
+                &source,
+                "pmp_page_match_test",
+                "PageMatchTest",
+            )
+            .unwrap();
+            let netlist = struo_target_ecp5::map_to_ecp5_with_options(
+                &struo_synth::synthesize(&rtl).unwrap().netlist,
+                Default::default(),
+            )
+            .unwrap();
+            struo_celox::ecp5_simulator(&netlist)
+                .unwrap()
+                .build_native()
+                .unwrap()
+        } else {
+            SimulatorBuilder::new(&source, "PageMatchTest")
+                .build_native()
+                .unwrap()
+        };
+        let inputs = ["base", "offset", "size", "tag"].map(|n| sim.signal(n));
+        let hit = sim.signal("hit");
+        let mut seed = 0x0dd5_1a7e_9e11_b007_u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut hits = 0;
+        for case in 0..200_000 {
+            let bits = next();
+            let tag = match case % 17 {
+                0 => 0,
+                1 => 0xf_ffff,
+                _ => (next() & 0xf_ffff) as u32,
+            };
+            // Bases cluster around the cached page, its neighbors and the
+            // 2^32 boundary so carries, borrows and wraps all occur.
+            let page = match bits % 6 {
+                0 => u64::from(tag),
+                1 => u64::from(tag).wrapping_sub(1),
+                2 => u64::from(tag) + 1,
+                3 => next() & 0xf_ffff,
+                4 => 0xf_ffff,
+                _ => 0,
+            };
+            let upper = match (bits >> 3) % 8 {
+                0 => 1_u64,
+                1 => 0xffff_ffff,
+                2 => next() >> 32,
+                _ => 0,
+            };
+            let low = match (bits >> 6) % 4 {
+                0 => (next() & 7) as u64,
+                1 => 0xff8 + (next() & 7),
+                _ => next() & 0xfff,
+            };
+            let base = (upper << 32) | ((page & 0xf_ffff) << 12) | low;
+            let offset = ((bits >> 9) & 0xfff) as u16;
+            let size = ((bits >> 21) & 3) as u8;
+            sim.modify(|io| {
+                io.set(inputs[0], base);
+                io.set(inputs[1], offset);
+                io.set(inputs[2], size);
+                io.set(inputs[3], tag);
+            })
+            .unwrap();
+            let got = sim.get(hit).to_u64_digits().first().copied().unwrap_or(0) != 0;
+            let effective = base.wrapping_add_signed(i64::from(((offset << 4) as i16) >> 4));
+            let expected = base >> 32 == 0
+                && base >> 12 == u64::from(tag)
+                && effective >> 12 == u64::from(tag)
+                && (effective & 0xfff) + (1 << size) - 1 < 4096;
+            assert_eq!(
+                got, expected,
+                "mapped={mapped} base={base:x} offset={offset:x} size={size} tag={tag:x}"
+            );
+            hits += usize::from(got);
+        }
+        assert!(hits > 10_000, "{hits}");
+    }
+}

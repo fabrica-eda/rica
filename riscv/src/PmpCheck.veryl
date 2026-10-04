@@ -282,6 +282,83 @@ module PmpPermissionDecodedBounds #(param CHECK_FIRST_PARCEL: bit = 1) (
     }
 }
 
+/// Classify one 4 KiB page below 2^32 against a stable PMP snapshot. The page
+/// is uniform when no entry overlaps it or its first overlapping entry contains
+/// it. Every access contained in a uniform page then has the returned R/W/X
+/// permissions; pages split by a boundary stay on the exact per-access check.
+module PmpPageUniform (
+    page: input logic<20>,
+    user_access: input logic,
+    pmp_config: input logic<8> [4],
+    lower: input logic<33> [4], upper: input logic<33> [4], nonempty: input logic<4>,
+    uniform: output logic,
+    read: output logic, write: output logic, execute: output logic,
+) {
+    // Compare page numbers only. With floor pages Lp/Up and nonzero in-page
+    // offsets Lz/Uz: the page overlaps [lower, upper) iff Lp <= P < ceil(upper),
+    // and contains it iff ceil(lower) <= P < Up. This needs two 21-bit
+    // magnitude and two equality comparisons per entry instead of four
+    // full-width comparisons against the page's first and last bytes.
+    var below_lower: logic<4>;
+    var at_lower: logic<4>;
+    var below_upper: logic<4>;
+    var at_upper: logic<4>;
+    var overlap: logic<4>;
+    var contains: logic<4>;
+    var grants: logic<4>;
+    var permission: logic<3> [4];
+    var granted: logic<3>;
+    always_comb {
+        for entry in 0..4 {
+            below_lower[entry] = {1'b0, page} <: lower[entry][32:12];
+            at_lower[entry] = {1'b0, page} == lower[entry][32:12];
+            below_upper[entry] = {1'b0, page} <: upper[entry][32:12];
+            at_upper[entry] = {1'b0, page} == upper[entry][32:12];
+            overlap[entry] = (pmp_config[entry][4:3] != 2'd0) && nonempty[entry] && !below_lower[entry]
+                && (below_upper[entry] || (at_upper[entry] && (upper[entry][11:0] != 12'd0)));
+            contains[entry] = !below_lower[entry] && !(at_lower[entry] && (lower[entry][11:0] != 12'd0))
+                && below_upper[entry];
+            for kind in 0..3 {
+                permission[entry][kind] = (!user_access && !pmp_config[entry][7]) || pmp_config[entry][kind];
+            }
+        }
+        grants[0] = overlap[0];
+        grants[1] = overlap[1] && !overlap[0];
+        grants[2] = overlap[2] && !(overlap[1:0] != 2'd0);
+        grants[3] = overlap[3] && !(overlap[2:0] != 3'd0);
+        uniform = (overlap == 4'd0) || ((grants & contains) != 4'd0);
+        for kind in 0..3 {
+            granted[kind] = (grants[0] && permission[0][kind]) || (grants[1] && permission[1][kind])
+                || (grants[2] && permission[2][kind]) || (grants[3] && permission[3][kind]);
+            if overlap == 4'd0 { granted[kind] = !user_access; }
+        }
+        read = granted[0];
+        write = granted[1];
+        execute = granted[2];
+    }
+}
+
+/// Match one registered load/store base against a cached page without waiting
+/// for the full effective-address sum. A hit requires the base, the effective
+/// address and its last byte to share page `tag` below 2^32: the signed offset
+/// must not carry or borrow across the page, which the 12-bit sum decides.
+module PmpCachedPageMatch (
+    base: input logic<64>, offset: input logic<12>, size: input logic<2>,
+    tag: input logic<20>,
+    hit: output logic,
+) {
+    var page_sum: logic<13>;
+    var end_sum: logic<13>;
+    always_comb {
+        page_sum = {1'b0, base[11:0]} + {1'b0, offset};
+        end_sum = {1'b0, page_sum[11:0]} + {10'd0, (size == 2'd3), size[1], (size != 2'd0)};
+        // A nonnegative offset stays in page without a carry; a negative one
+        // stays in page only with a carry.
+        hit = (base[31:12] == tag) && (page_sum[12] == offset[11])
+            && (base[63:32] == 32'd0) && !end_sum[12];
+    }
+}
+
 /// Four programmable PMP entries, 32-bit PA, four-byte grain. The first entry
 /// overlapping any byte owns the whole access, including partial overlaps.
 module PmpCheck (

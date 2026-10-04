@@ -889,6 +889,49 @@ module Core #(
     var ex_pmp_read_q: logic;
     var ex_pmp_write_q: logic;
     var pmp_write: logic;
+    // One-entry fetch and data permission caches hold the R/W/X result of a
+    // uniform 4 KiB page for one privilege. FD looks up the fetch entry and
+    // RX resolves a miss from dedicated endpoint registers in one held cycle.
+    // EX matches each possible forwarded base against the data entry beside the
+    // address adder; a hit registers its permission on the first held edge and
+    // ends the wait one cycle early. PMP CSR writes invalidate both entries,
+    // then lookups and fills wait until the registered ranges are current.
+    var pmp_none_active: logic;
+    var pmp_cache_invalidate: logic;
+    var pmp_settle_q: logic<2>;
+    var rx_pmp_address_q: logic<32>;
+    var fd_pmp_high: logic;
+    var rx_ipc_ready_q: logic;
+    var rx_ipc_allow_q: logic;
+    var rx_ipc_first_q: logic;
+    var ipc_valid_q: logic;
+    var ipc_user_q: logic;
+    var ipc_tag_q: logic<20>;
+    var ipc_execute_q: logic;
+    var ipc_lookup_hit: logic;
+    var ipc_lookup_allow: logic;
+    var ipc_miss_hold: logic;
+    var ipc_resolve: logic;
+    var ipc_allowed: logic;
+    var ipc_first_allowed: logic;
+    var ipc_page_uniform: logic;
+    var ipc_page_execute: logic;
+    var dpc_valid_q: logic;
+    var dpc_user_q: logic;
+    var dpc_tag_q: logic<20>;
+    var dpc_source_hits: logic<3>;
+    var pmp_data_hit_q: logic;
+    var pmp_data_hit_allow_q: logic;
+    var dpc_entry_ready: logic;
+    var dpc_read_q: logic;
+    var dpc_write_q: logic;
+    var dpc_entry_hit: logic;
+    var dpc_hit: logic;
+    var dpc_allow: logic;
+    var dpc_page_uniform: logic;
+    var dpc_page_read: logic;
+    var dpc_page_write: logic;
+    var pmp_data_resolve: logic;
     always_comb {
         pmp_read = ex_pmp_read_q;
         pmp_write = ex_pmp_write_q;
@@ -918,6 +961,22 @@ module Core #(
                 high: pmp_data_high_next,
             );
             assign pmp_data_first_last_unused = 33'd0;
+            // Match every registered base the EX bypass can select, as the
+            // physical-region check does, then choose with the same selectors.
+            for source in 0..3 :g_cached_page {
+                inst page_match: PmpCachedPageMatch (
+                    base: lsu_access_bases[source], offset: ex_redirect_offset_q[11:0],
+                    size: lsu_access_size, tag: dpc_tag_q,
+                    hit: dpc_source_hits[source],
+                );
+            }
+            always_comb {
+                dpc_entry_hit = dpc_source_hits[0];
+                if ex_bypass_q.operand_a {
+                    dpc_entry_hit = if cm_use_logic_q ? dpc_source_hits[2] : dpc_source_hits[1];
+                }
+                dpc_entry_hit = dpc_entry_hit && dpc_entry_ready;
+            }
         } else :g_address_end {
             assign pmp_data_high_next = lsu_address[63:32] != 32'd0;
             inst data_end: PmpAccessEnd (
@@ -925,14 +984,36 @@ module Core #(
                 size: lsu_access_size,
                 last: pmp_data_last_next, first_last: pmp_data_first_last_unused,
             );
+            assign dpc_entry_hit = 1'b0;
+            assign dpc_source_hits = 3'd0;
         }
+        assign pmp_none_active = (decoded_config[0][4:3] == 2'd0) && (decoded_config[1][4:3] == 2'd0)
+            && (decoded_config[2][4:3] == 2'd0) && (decoded_config[3][4:3] == 2'd0);
+        // A fetch miss holds RX, whose dedicated endpoint registers are stable.
         inst fetch_check: PmpPermissionDecodedBounds (
-            address: {31'd0, rx_pmp_high_q, rx_pc_q[31:0]}, last: rx_pmp_last_q, first_last: rx_pmp_first_last_q,
+            address: {31'd0, rx_pmp_high_q, rx_pmp_address_q}, last: rx_pmp_last_q, first_last: rx_pmp_first_last_q,
             user_access: csr_bus.user_mode,
             read_access: 1'b0, write_access: 1'b0, execute_access: 1'b1,
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
-            allowed: pmp_fetch_allowed, first_parcel_allowed: pmp_first_parcel_allowed,
+            allowed: ipc_allowed, first_parcel_allowed: ipc_first_allowed,
         );
+        var fetch_page_read_unused: logic;
+        var fetch_page_write_unused: logic;
+        inst fetch_page: PmpPageUniform (
+            page: rx_pmp_address_q[31:12], user_access: csr_bus.user_mode,
+            pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
+            uniform: ipc_page_uniform, read: fetch_page_read_unused,
+            write: fetch_page_write_unused, execute: ipc_page_execute,
+        );
+        var data_page_execute_unused: logic;
+        inst data_page: PmpPageUniform (
+            page: pmp_data_address_q[31:12], user_access: csr_bus.data_user,
+            pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
+            uniform: dpc_page_uniform, read: dpc_page_read,
+            write: dpc_page_write, execute: data_page_execute_unused,
+        );
+        assign pmp_fetch_allowed = rx_ipc_allow_q;
+        assign pmp_first_parcel_allowed = rx_ipc_first_q;
         inst data_check: PmpPermissionDecodedBounds #(CHECK_FIRST_PARCEL: 0) (
             address: {31'd0, pmp_data_high_q, pmp_data_address_q[31:0]}, last: pmp_data_last_q, first_last: 33'd0,
             user_access: csr_bus.data_user,
@@ -940,7 +1021,9 @@ module Core #(
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
             allowed: pmp_data_comb_allowed, first_parcel_allowed: pmp_data_first_unused,
         );
-        assign pmp_data_allowed = pmp_data_allowed_q;
+        // The issue path selects between two registered results in its
+        // existing permission LUT.
+        assign pmp_data_allowed = if pmp_data_hit_q ? pmp_data_hit_allow_q : pmp_data_allowed_q;
     } else :g_no_pmp {
         assign pmp_fetch_last_next = 33'd0;
         assign pmp_fetch_first_last_next = 33'd0;
@@ -952,6 +1035,76 @@ module Core #(
         assign pmp_fetch_allowed = 1'b1;
         assign pmp_data_allowed = 1'b1;
         assign pmp_data_comb_allowed = 1'b1;
+        assign pmp_none_active = 1'b1;
+        assign dpc_entry_hit = 1'b0;
+        assign dpc_source_hits = 3'd0;
+        assign ipc_allowed = 1'b1;
+        assign ipc_first_allowed = 1'b1;
+        assign ipc_page_uniform = 1'b0;
+        assign ipc_page_execute = 1'b0;
+        assign dpc_page_uniform = 1'b0;
+        assign dpc_page_read = 1'b0;
+        assign dpc_page_write = 1'b0;
+    }
+
+    always_comb {
+        pmp_cache_invalidate = ENABLE_U && cm_valid_q && cm_is_csr_q && cm_csr_write_q && (cm_csr_index_q >= 5'd18);
+        // Comparison also elaborates when ADDRESS_BITS is 32.
+        fd_pmp_high = fd_q.pc >: 64'h0000_0000_ffff_ffff;
+        // M-mode accesses with every entry OFF are always permitted.
+        ipc_lookup_hit = !pmp_cache_invalidate && (pmp_settle_q == 2'd0)
+            && ((pmp_none_active && !csr_bus.user_mode)
+                || (ipc_valid_q && (ipc_user_q == csr_bus.user_mode) && (fd_q.pc[31:12] == ipc_tag_q)
+                    && !fd_pmp_high
+                    && !((fd_q.raw_instruction[1:0] == 2'b11) && (fd_q.pc[11:1] == 11'h7ff))));
+        ipc_lookup_allow = (pmp_none_active && !csr_bus.user_mode) || ipc_execute_q;
+        ipc_miss_hold = ENABLE_U && rx_valid_q && !rx_ipc_ready_q;
+        ipc_resolve = ipc_miss_hold && !pmp_cache_invalidate && (pmp_settle_q == 2'd0);
+        dpc_entry_ready = dpc_valid_q && (dpc_user_q == csr_bus.data_user);
+        dpc_hit = !pmp_cache_invalidate && (pmp_settle_q == 2'd0)
+            && ((pmp_none_active && !csr_bus.data_user) || dpc_entry_hit);
+        dpc_allow = (pmp_none_active && !csr_bus.data_user)
+            || ((!pmp_read || dpc_read_q) && (!pmp_write || dpc_write_q));
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            pmp_settle_q = 2'd0;
+            ipc_valid_q = 1'b0;
+            ipc_user_q = 1'b0;
+            ipc_tag_q = 20'd0;
+            ipc_execute_q = 1'b0;
+            dpc_valid_q = 1'b0;
+            dpc_user_q = 1'b0;
+            dpc_tag_q = 20'd0;
+            dpc_read_q = 1'b0;
+            dpc_write_q = 1'b0;
+        } else if ENABLE_U {
+            if pmp_cache_invalidate {
+                // CSR, bound and nonempty registers update over two edges.
+                pmp_settle_q = 2'd3;
+                ipc_valid_q = 1'b0;
+                dpc_valid_q = 1'b0;
+            } else {
+                if pmp_settle_q != 2'd0 {
+                    pmp_settle_q = pmp_settle_q - 2'd1;
+                }
+                if ipc_resolve && ipc_page_uniform && !rx_pmp_high_q {
+                    ipc_valid_q = 1'b1;
+                    ipc_user_q = csr_bus.user_mode;
+                    ipc_tag_q = rx_pmp_address_q[31:12];
+                    ipc_execute_q = ipc_page_execute;
+                }
+                if pmp_data_wait && (pmp_data_stage_q == 2'd2) && (pmp_settle_q == 2'd0)
+                    && dpc_page_uniform && !pmp_data_high_q {
+                    dpc_valid_q = 1'b1;
+                    dpc_user_q = csr_bus.data_user;
+                    dpc_tag_q = pmp_data_address_q[31:12];
+                    dpc_read_q = dpc_page_read;
+                    dpc_write_q = dpc_page_write;
+                }
+            }
+        }
     }
 
     inst fetch_access: PhysicalAccessCheck (
@@ -1488,7 +1641,9 @@ module Core #(
         // privilege and PMP configuration cannot change under this check.
         // The pending bit belongs to the EX owner and is cleared when its
         // permission is captured. Keep stage decoding off global backpressure.
-        pmp_data_wait = ENABLE_U && ex_pmp_pending_q && !redirect_pending_q;
+        // A registered data-cache hit ends the wait for the current EX owner.
+        pmp_data_wait = ENABLE_U && ex_pmp_pending_q && !pmp_data_hit_q && !redirect_pending_q;
+        pmp_data_resolve = pmp_data_wait && (pmp_data_stage_q == 2'd2);
         backend_wait = memory_wait || muldiv_wait || atomic_wait || pmp_data_wait;
         // Consumers gated by !redirect_pending_q or !redirect_discards_cm may
         // use the raw pending work: no CM work is discarded while either
@@ -1645,7 +1800,7 @@ module Core #(
             decode_execution_hazard = 1'b1;
         }
         execution_hazard = rx_execution_hazard_q;
-        frontend_hold    = execution_hazard || interrupt_drain_q || interrupt_claimed_q;
+        frontend_hold    = execution_hazard || interrupt_drain_q || interrupt_claimed_q || ipc_miss_hold;
 
         predictor_wait = !predictor_ready || (fetch_q.valid && !predictor_response_valid);
         // A redirect/exception detected in this cycle may consume one younger
@@ -1816,6 +1971,8 @@ module Core #(
             pmp_data_high_q = 1'b0;
             pmp_data_stage_q = 2'd0;
             pmp_data_allowed_q = 1'b0;
+            pmp_data_hit_q = 1'b0;
+            pmp_data_hit_allow_q = 1'b0;
         } else if ENABLE_U {
             // The stage owns validity. Speculatively refresh the next stage's
             // inputs while stage zero is idle; only the transitions below
@@ -1826,10 +1983,21 @@ module Core #(
                 pmp_data_last_q = pmp_data_last_next;
                 pmp_data_high_q = pmp_data_high_next;
             }
+            // Likewise capture the cached permission; pmp_data_hit_q alone
+            // makes it observable.
+            if pmp_data_stage_q == 2'd0 {
+                pmp_data_hit_allow_q = dpc_allow;
+            }
             if !backend_wait {
                 pmp_data_stage_q = 2'd0;
+                pmp_data_hit_q = 1'b0;
             } else if pmp_data_wait {
                 if pmp_data_stage_q == 2'd0 {
+                    // After a hit the masked wait stops further transitions,
+                    // so the exact check and its fill never run for this owner.
+                    if dpc_hit {
+                        pmp_data_hit_q = 1'b1;
+                    }
                     if PMP_DATA_STAGES == 2 {
                         pmp_data_stage_q = 2'd2;
                     } else {
@@ -2153,6 +2321,10 @@ module Core #(
             rx_pmp_high_q = 1'b0;
             rx_pmp_last_q = 33'd0;
             rx_pmp_first_last_q = 33'd0;
+            rx_pmp_address_q = 32'd0;
+            rx_ipc_ready_q = 1'b0;
+            rx_ipc_allow_q = 1'b0;
+            rx_ipc_first_q = 1'b0;
             rx_pc_q                = 64'h0000_0000_0000_0000;
             rx_raw_instr_q         = 32'h0000_0013;
             rx_is_compressed_q     = 1'b0;
@@ -2328,6 +2500,13 @@ module Core #(
             commit_mem_wdata = 64'h0000_0000_0000_0000;
             commit_mem_wmask = 8'h00;
         } else {
+            // A held RX fetch miss records its exact permission once the PMP
+            // snapshot is current. A later FD capture replaces this result.
+            if ipc_resolve {
+                rx_ipc_ready_q = 1'b1;
+                rx_ipc_allow_q = ipc_allowed;
+                rx_ipc_first_q = ipc_first_allowed;
+            }
             // An EX-owned memory repair keeps its redirect transaction live
             // while the owner waits in CM.  The completion edge below then
             // advances that owner to WB and applies the saved frontend target.
@@ -2378,7 +2557,7 @@ module Core #(
             }
 
             if backend_wait {
-                if ENABLE_U && pmp_data_wait && (pmp_data_stage_q == 2'd2) {
+                if ENABLE_U && pmp_data_resolve {
                     ex_pmp_pending_q = 1'b0;
                 }
                 if muldiv_wait && muldiv_done {
@@ -2692,10 +2871,15 @@ module Core #(
                     rx_valid_q             = fd_q.valid;
                     // Capture permission endpoints under the same hold/flush
                     // condition as their PC and instruction owner.
-                    // Comparison also elaborates when ADDRESS_BITS is 32.
-                    rx_pmp_high_q = fd_q.pc >: 64'h0000_0000_ffff_ffff;
+                    rx_pmp_high_q = fd_pmp_high;
                     rx_pmp_last_q = pmp_fetch_last_next;
                     rx_pmp_first_last_q = pmp_fetch_first_last_next;
+                    rx_pmp_address_q = fd_q.pc[31:0];
+                    // A hit is fully contained in one cached page, so both
+                    // parcels share its permission.
+                    rx_ipc_ready_q = ipc_lookup_hit;
+                    rx_ipc_allow_q = ipc_lookup_allow;
+                    rx_ipc_first_q = ipc_lookup_allow;
                     rx_pc_q                = fd_q.pc;
                     rx_raw_instr_q         = fd_q.raw_instruction;
                     rx_is_compressed_q     = fd_q.is_compressed;
