@@ -14,6 +14,8 @@ module Core #(
     param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_M         : bit = 0,
     param ENABLE_U: bit = 0,
+    // Supervisor privilege with delegation and Bare translation. Requires U.
+    param ENABLE_S: bit = 0,
     param PMP_DATA_STAGES: u32 = 3,
     param EARLY_ALU: bit = 0,
     param ENABLE_A         : bit = 0,
@@ -169,10 +171,12 @@ module Core #(
     var rx_csr_op_q           : logic<2>           ;
     var rx_csr_use_imm_q      : logic              ;
     var rx_csr_write_q        : logic              ;
-    var rx_csr_index_q        : logic<5>           ;
+    var rx_csr_index_q        : logic<6>           ;
     var rx_is_ecall_q         : logic              ;
     var rx_is_ebreak_q        : logic              ;
+    // xRET: MRET or SRET; the SRET flag selects the return state and PC.
     var rx_is_mret_q          : logic              ;
+    var rx_is_sret_q          : logic              ;
     var rx_is_fence_i_q       : logic              ;
     var rx_illegal_q          : logic              ;
     var rx_prediction_token_q : logic<3>           ;
@@ -208,10 +212,11 @@ module Core #(
     var ex_csr_use_imm_q        : logic              ;
     var ex_csr_immediate_q      : logic<5>           ;
     var ex_csr_write_q          : logic              ;
-    var ex_csr_index_q          : logic<5>           ;
+    var ex_csr_index_q          : logic<6>           ;
     var ex_is_ecall_q           : logic              ;
     var ex_is_ebreak_q          : logic              ;
     var ex_is_mret_q            : logic              ;
+    var ex_is_sret_q            : logic              ;
     var ex_is_fence_i_q         : logic              ;
     var ex_frontend_block_q     : logic              ;
     var ex_normal_memory_q: logic;
@@ -285,7 +290,7 @@ module Core #(
     var cm_is_csr_q             : logic                     ;
     var cm_csr_op_q             : logic<2>                  ;
     var cm_csr_write_q          : logic                     ;
-    var cm_csr_index_q          : logic<5>                  ;
+    var cm_csr_index_q          : logic<6>                  ;
     var cm_csr_source_q         : logic<64>                 ;
     var cm_exception_q          : logic                     ;
     var cm_exception_cause_q    : logic<64>                 ;
@@ -294,6 +299,13 @@ module Core #(
     var cm_data_fault_boot_q    : logic                     ;
     var cm_data_fault_ram_q     : logic                     ;
     var cm_is_mret_q            : logic                     ;
+    var cm_is_sret_q            : logic                     ;
+    // The CM exception is delegated to S (decided in EX with its cause).
+    var cm_exception_delegated_q: logic                     ;
+    // Delegation of an atomic's {misaligned, access} fault causes: 4/5 for
+    // LR, 6/7 otherwise. CM selects with the cause's low bit only.
+    var cm_atomic_delegated_q   : logic<2>                  ;
+    var ex_exception_delegated  : logic                     ;
     var cm_is_fence_i_q         : logic                     ;
     var cm_prediction_token_q   : logic<3>                  ;
     var cm_predicted_kind_q     : logic<3>                  ;
@@ -426,6 +438,7 @@ module Core #(
     var interrupt_accept        : logic                  ;
     var interrupt_claimed_q     : logic                  ;
     var interrupt_cause_q       : logic<4>               ;
+    var interrupt_delegated_q   : logic                  ;
     var interrupt_event         : logic                  ;
     var interrupt_resume_pc_q   : logic<ADDRESS_BITS>    ;
     var frontend_hold           : logic                  ;
@@ -536,7 +549,7 @@ module Core #(
     var fd_csr_writable_q: logic;
     var fetched_csr_known: logic;
     var fetched_csr_writable: logic;
-    inst csr_class: CsrAddressClass #(ENABLE_U: ENABLE_U, ENABLE_INTERRUPTS: ENABLE_INTERRUPTS) (
+    inst csr_class: CsrAddressClass #(ENABLE_U: ENABLE_U, ENABLE_S: ENABLE_S, ENABLE_INTERRUPTS: ENABLE_INTERRUPTS) (
         address: fetch_q.raw_instruction[31:20],
         known: fetched_csr_known, writable: fetched_csr_writable,
     );
@@ -551,6 +564,7 @@ module Core #(
         ENABLE_ZBA       : ENABLE_ZBA       ,
         ENABLE_M         : ENABLE_M         ,
         ENABLE_U: ENABLE_U,
+        ENABLE_S: ENABLE_S,
         ENABLE_A         : ACTIVE_A         ,
     ) (
         decode: decode_bus,
@@ -569,6 +583,7 @@ module Core #(
         ENABLE_INTERRUPTS: ENABLE_INTERRUPTS                     ,
         ENABLE_M         : ENABLE_M                              ,
         ENABLE_U: ENABLE_U,
+        ENABLE_S: ENABLE_S,
         ENABLE_A         : ACTIVE_A                              ,
         ENABLE_B         : ENABLE_ZBA && ENABLE_ZBB && ENABLE_ZBS,
     ) (
@@ -609,7 +624,7 @@ module Core #(
         always_ff (clk, rst_n) {
             if_reset { invalidate_q = 1'b0; }
             else {
-                invalidate_q = csr_bus.trap_enter || csr_bus.mret
+                invalidate_q = csr_bus.trap_enter || csr_bus.mret || csr_bus.sret
                     || (cm_retire_event && cm_is_store_q && !cm_is_atomic_q);
             }
         }
@@ -951,9 +966,18 @@ module Core #(
     always_comb {
         pmp_read = ex_pmp_read_q;
         pmp_write = ex_pmp_write_q;
-        rx_user_illegal = ENABLE_U && csr_bus.user_mode
-            && (rx_is_mret_q || (rx_raw_instr_q == 32'h10500073)
-                || (rx_is_csr_q && ((rx_raw_instr_q[29:28] != 2'd0)
+        // Privileged encodings below M. U may use only user CSRs; S may also
+        // use supervisor CSRs. MSTATUS.TW/TSR/TVM trap S-mode WFI, SRET and
+        // SATP/SFENCE.VMA. U-mode WFI remains illegal, as before S existed.
+        rx_user_illegal = ENABLE_U && csr_bus.below_machine
+            && ((rx_is_mret_q && !rx_is_sret_q)
+                || ((rx_raw_instr_q == 32'h10500073) && (!csr_bus.supervisor_mode || csr_bus.timeout_wait))
+                || (ENABLE_S && rx_is_sret_q && (!csr_bus.supervisor_mode || csr_bus.trap_sret))
+                || (ENABLE_S && (rx_raw_instr_q[31:25] == 7'b0001001) && (rx_raw_instr_q[14:0] == 15'h0073)
+                    && (!csr_bus.supervisor_mode || csr_bus.trap_virtual_memory))
+                || (rx_is_csr_q && ((rx_raw_instr_q[29] == 1'b1)
+                    || (rx_raw_instr_q[28] && !csr_bus.supervisor_mode)
+                    || (ENABLE_S && (rx_raw_instr_q[31:20] == 12'h180) && csr_bus.trap_virtual_memory)
                     || ((rx_raw_instr_q[31:20] == 12'hc00) && !csr_bus.counter_enable[0])
                     || ((rx_raw_instr_q[31:20] == 12'hc02) && !csr_bus.counter_enable[2]))));
     }
@@ -1008,7 +1032,7 @@ module Core #(
         // A fetch miss holds RX, whose dedicated endpoint registers are stable.
         inst fetch_check: PmpPermissionDecodedBounds (
             address: {31'd0, rx_pmp_high_q, rx_pmp_address_q}, last: rx_pmp_last_q, first_last: rx_pmp_first_last_q,
-            user_access: csr_bus.user_mode,
+            user_access: csr_bus.below_machine,
             read_access: 1'b0, write_access: 1'b0, execute_access: 1'b1,
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
             allowed: ipc_allowed, first_parcel_allowed: ipc_first_allowed,
@@ -1016,14 +1040,14 @@ module Core #(
         var fetch_page_read_unused: logic;
         var fetch_page_write_unused: logic;
         inst fetch_page: PmpPageUniform (
-            page: rx_pmp_address_q[31:12], user_access: csr_bus.user_mode,
+            page: rx_pmp_address_q[31:12], user_access: csr_bus.below_machine,
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
             uniform: ipc_page_uniform, read: fetch_page_read_unused,
             write: fetch_page_write_unused, execute: ipc_page_execute,
         );
         var data_page_execute_unused: logic;
         inst data_page: PmpPageUniform (
-            page: pmp_data_address_q[31:12], user_access: csr_bus.data_user,
+            page: pmp_data_address_q[31:12], user_access: csr_bus.data_below_machine,
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
             uniform: dpc_page_uniform, read: dpc_page_read,
             write: dpc_page_write, execute: data_page_execute_unused,
@@ -1032,7 +1056,7 @@ module Core #(
         assign pmp_first_parcel_allowed = rx_ipc_first_q;
         inst data_check: PmpPermissionDecodedBounds #(CHECK_FIRST_PARCEL: 0) (
             address: {31'd0, pmp_data_high_q, pmp_data_address_q[31:0]}, last: pmp_data_last_q, first_last: 33'd0,
-            user_access: csr_bus.data_user,
+            user_access: csr_bus.data_below_machine,
             read_access: pmp_read, write_access: pmp_write, execute_access: 1'b0,
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
             allowed: pmp_data_comb_allowed, first_parcel_allowed: pmp_data_first_unused,
@@ -1064,23 +1088,24 @@ module Core #(
     }
 
     always_comb {
-        pmp_cache_invalidate = ENABLE_U && cm_valid_q && cm_is_csr_q && cm_csr_write_q && (cm_csr_index_q >= 5'd18);
+        pmp_cache_invalidate = ENABLE_U && cm_valid_q && cm_is_csr_q && cm_csr_write_q && (cm_csr_index_q >= 6'd18)
+            && !cm_csr_index_q[5];
         // Comparison also elaborates when ADDRESS_BITS is 32.
         fd_pmp_high = fd_q.pc >: 64'h0000_0000_ffff_ffff;
         // M-mode accesses with every entry OFF are always permitted.
         ipc_lookup_hit = !pmp_cache_invalidate && (pmp_settle_q == 2'd0)
-            && ((pmp_none_active && !csr_bus.user_mode)
-                || (ipc_valid_q && (ipc_user_q == csr_bus.user_mode) && (fd_q.pc[31:12] == ipc_tag_q)
+            && ((pmp_none_active && !csr_bus.below_machine)
+                || (ipc_valid_q && (ipc_user_q == csr_bus.below_machine) && (fd_q.pc[31:12] == ipc_tag_q)
                     && !fd_pmp_high
                     && !((fd_q.raw_instruction[1:0] == 2'b11) && (fd_q.pc[11:1] == 11'h7ff))));
-        ipc_lookup_allow = (pmp_none_active && !csr_bus.user_mode) || ipc_execute_q;
+        ipc_lookup_allow = (pmp_none_active && !csr_bus.below_machine) || ipc_execute_q;
         ipc_miss_hold = ENABLE_U && rx_valid_q && !rx_ipc_ready_q;
         ipc_evaluate = ipc_miss_hold && !ipc_eval_valid_q && !pmp_cache_invalidate && (pmp_settle_q == 2'd0);
         ipc_resolve = ipc_miss_hold && ipc_eval_valid_q && !pmp_cache_invalidate && (pmp_settle_q == 2'd0);
-        dpc_entry_ready = dpc_valid_q && (dpc_user_q == csr_bus.data_user);
+        dpc_entry_ready = dpc_valid_q && (dpc_user_q == csr_bus.data_below_machine);
         dpc_hit = !pmp_cache_invalidate && (pmp_settle_q == 2'd0)
-            && ((pmp_none_active && !csr_bus.data_user) || dpc_entry_hit);
-        dpc_allow = (pmp_none_active && !csr_bus.data_user)
+            && ((pmp_none_active && !csr_bus.data_below_machine) || dpc_entry_hit);
+        dpc_allow = (pmp_none_active && !csr_bus.data_below_machine)
             || ((!pmp_read || dpc_read_q) && (!pmp_write || dpc_write_q));
     }
 
@@ -1147,13 +1172,13 @@ module Core #(
                 ipc_eval_allowed_q = ipc_allowed;
                 ipc_eval_first_q = ipc_first_allowed;
                 ipc_eval_fill_q = ipc_page_uniform && !rx_pmp_high_q;
-                ipc_eval_user_q = csr_bus.user_mode;
+                ipc_eval_user_q = csr_bus.below_machine;
                 ipc_eval_execute_q = ipc_page_execute;
             }
             dpc_fill_pending_q = pmp_data_wait && (pmp_data_stage_q == 2'd2) && !pmp_cache_invalidate
                 && (pmp_settle_q == 2'd0) && dpc_page_uniform && !pmp_data_high_q;
             if pmp_data_stage_q == 2'd2 {
-                dpc_fill_user_q = csr_bus.data_user;
+                dpc_fill_user_q = csr_bus.data_below_machine;
                 dpc_fill_tag_q = pmp_data_address_q[31:12];
                 dpc_fill_read_q = dpc_page_read;
                 dpc_fill_write_q = dpc_page_write;
@@ -1462,7 +1487,8 @@ module Core #(
             && (ex_illegal_q || ex_pmp_fetch_fault_q || ex_is_ecall_q || ex_is_ebreak_q || (STRICT_MEMORY && ex_fetch_fault_q));
         if ex_is_ecall_q {
             ex_exception_cause = 64'd11;
-            if ENABLE_U && csr_bus.user_mode { ex_exception_cause = 64'd8; }
+            if ENABLE_U && csr_bus.below_machine { ex_exception_cause = 64'd8; }
+            if ENABLE_S && csr_bus.supervisor_mode { ex_exception_cause = 64'd9; }
         } else if ex_is_ebreak_q {
             ex_exception_cause = 64'd3;
         } else {
@@ -1487,6 +1513,13 @@ module Core #(
             ex_exception_cause = 64'd1;
             ex_exception_value = ex_pc_q;
             if ex_pmp_second_parcel_q { ex_exception_value = ex_pc_q + 64'd2; }
+        }
+        // Delegation of the cause CM will present: this instruction's own
+        // exception, or otherwise a data access fault (5/7).
+        ex_exception_delegated = csr_bus.exception_delegated[ex_exception_cause[3:0]];
+        if STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception {
+            ex_exception_delegated = csr_bus.exception_delegated[5];
+            if ex_is_store_q { ex_exception_delegated = csr_bus.exception_delegated[7]; }
         }
         // Dynamic prediction keeps its EX direction result. Static prediction
         // finishes the reduction from the same registered compare slices as
@@ -1719,12 +1752,12 @@ module Core #(
         // CM write is followed by a redirect to fallthrough, so the new state
         // is evaluated before a successor can execute, just as after MRET.
         ex_irq_fence       = (ENABLE_INTERRUPTS || ENABLE_U) && ex_valid_q && ex_is_csr_q && ex_csr_write_q
-            && ((ex_csr_index_q == 5'd1) || (ex_csr_index_q == 5'd16) || (ex_csr_index_q == 5'd17) || (ENABLE_U && (ex_csr_index_q >= 5'd18)));
+            && ((ex_csr_index_q == 6'd1) || (ex_csr_index_q == 6'd16) || (ex_csr_index_q == 6'd17) || (ENABLE_U && (ex_csr_index_q >= 6'd18)));
         ex_system_barrier  = (ex_valid_q && (ex_is_mret_q || ex_is_fence_i_q)) || ex_irq_fence;
         ex_frontend_block = ex_exception || ex_system_barrier;
         if ACTIVE_A { ex_frontend_block = ex_valid_q && ex_frontend_block_q; }
         cm_irq_fence_event = (ENABLE_INTERRUPTS || ENABLE_U) && cm_valid_q && cm_is_csr_q && cm_csr_write_q
-            && ((cm_csr_index_q == 5'd1) || (cm_csr_index_q == 5'd16) || (cm_csr_index_q == 5'd17) || (ENABLE_U && (cm_csr_index_q >= 5'd18))) && !cm_exception_q
+            && ((cm_csr_index_q == 6'd1) || (cm_csr_index_q == 6'd16) || (cm_csr_index_q == 6'd17) || (ENABLE_U && (cm_csr_index_q >= 6'd18))) && !cm_exception_q
             && !backend_pending && !redirect_pending_q;
         cm_trap_event      = cm_valid_q && (cm_exception_q || atomic_fault) && !backend_pending && !redirect_pending_q;
         cm_mret_event      = cm_valid_q && cm_is_mret_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
@@ -1777,6 +1810,7 @@ module Core #(
         csr_bus.trap_enter   = cm_trap_event || interrupt_event;
         csr_bus.trap_pc      = cm_pc_q;
         csr_bus.trap_cause   = cm_exception_cause_q;
+        csr_bus.trap_supervisor = cm_exception_delegated_q;
         csr_bus.trap_value   = cm_exception_value_q;
         if cm_data_fault_value_q {
             csr_bus.trap_value = cm_lsu_address_q;
@@ -1786,14 +1820,17 @@ module Core #(
                 csr_bus.trap_value = 64'h0000_0000_8003_f000;
             }
         }
-        csr_bus.mret         = cm_mret_event;
+        csr_bus.mret         = cm_mret_event && !cm_is_sret_q;
+        csr_bus.sret         = ENABLE_S && cm_mret_event && cm_is_sret_q;
         if atomic_fault {
             csr_bus.trap_cause = {60'd0, atomic_cause};
+            csr_bus.trap_supervisor = if atomic_cause[0] ? cm_atomic_delegated_q[0] : cm_atomic_delegated_q[1];
             csr_bus.trap_value = cm_lsu_address_q;
         }
         if interrupt_event {
             csr_bus.trap_pc    = interrupt_resume_pc_q;
             csr_bus.trap_cause = {1'b1, 59'd0, interrupt_cause_q};
+            csr_bus.trap_supervisor = interrupt_delegated_q;
             csr_bus.trap_value = 64'd0;
         }
 
@@ -1812,6 +1849,7 @@ module Core #(
             redirect_target = csr_bus.trap_vector;
         } else if cm_mret_event {
             redirect_target = csr_bus.return_pc;
+            if ENABLE_S && cm_is_sret_q { redirect_target = csr_bus.supervisor_return_pc; }
         } else if cm_fence_i_event {
             redirect_target = cm_fallthrough_pc_q;
         } else {
@@ -2084,11 +2122,13 @@ module Core #(
             interrupt_drain_q   = 1'b0;
             interrupt_claimed_q = 1'b0;
             interrupt_cause_q   = 4'd0;
+            interrupt_delegated_q = 1'b0;
         } else if ENABLE_INTERRUPTS {
             interrupt_drain_q   = interrupt_drain && !csr_bus.trap_enter;
             interrupt_claimed_q = interrupt_accept;
             if interrupt_accept {
                 interrupt_cause_q = csr_bus.interrupt_cause;
+                interrupt_delegated_q = csr_bus.interrupt_to_supervisor;
             }
         }
     }
@@ -2105,6 +2145,7 @@ module Core #(
             } else if cm_retire_event {
                 if cm_mret_event {
                     interrupt_resume_pc_q = csr_bus.return_pc;
+                    if ENABLE_S && cm_is_sret_q { interrupt_resume_pc_q = csr_bus.supervisor_return_pc; }
                 } else if cm_is_branch_q {
                     interrupt_resume_pc_q = cm_actual_next_pc;
                 } else if cm_control_kind_q != 3'd0 {
@@ -2412,10 +2453,11 @@ module Core #(
             rx_csr_op_q            = 2'b00;
             rx_csr_use_imm_q       = 1'b0;
             rx_csr_write_q         = 1'b0;
-            rx_csr_index_q         = 5'd0;
+            rx_csr_index_q         = 6'd0;
             rx_is_ecall_q          = 1'b0;
             rx_is_ebreak_q         = 1'b0;
             rx_is_mret_q           = 1'b0;
+            rx_is_sret_q           = 1'b0;
             rx_is_fence_i_q        = 1'b0;
             rx_illegal_q           = 1'b0;
             rx_prediction_token_q  = 3'd0;
@@ -2453,10 +2495,11 @@ module Core #(
             ex_csr_use_imm_q         = 1'b0;
             ex_csr_immediate_q       = 5'd0;
             ex_csr_write_q           = 1'b0;
-            ex_csr_index_q           = 5'd0;
+            ex_csr_index_q           = 6'd0;
             ex_is_ecall_q            = 1'b0;
             ex_is_ebreak_q           = 1'b0;
             ex_is_mret_q             = 1'b0;
+            ex_is_sret_q             = 1'b0;
             ex_is_fence_i_q          = 1'b0;
             ex_frontend_block_q      = 1'b0;
             ex_normal_memory_q = 1'b0;
@@ -2521,7 +2564,7 @@ module Core #(
             cm_is_csr_q              = 1'b0;
             cm_csr_op_q              = 2'd0;
             cm_csr_write_q           = 1'b0;
-            cm_csr_index_q           = 5'd0;
+            cm_csr_index_q           = 6'd0;
             cm_csr_source_q          = 64'd0;
             cm_exception_q           = 1'b0;
             cm_exception_cause_q     = 64'd0;
@@ -2530,6 +2573,9 @@ module Core #(
             cm_data_fault_boot_q     = 1'b0;
             cm_data_fault_ram_q      = 1'b0;
             cm_is_mret_q             = 1'b0;
+            cm_is_sret_q             = 1'b0;
+            cm_exception_delegated_q = 1'b0;
+            cm_atomic_delegated_q    = 2'd0;
             cm_is_fence_i_q          = 1'b0;
             cm_control_kind_q        = 3'd0;
             cm_prediction_token_q    = 3'd0;
@@ -2773,6 +2819,11 @@ module Core #(
                 cm_csr_source_q      = csr_source;
                 cm_exception_q       = ex_exception || lsu_access_fault;
                 cm_exception_cause_q = ex_exception_cause;
+                cm_exception_delegated_q = ENABLE_S && ex_exception_delegated;
+                cm_atomic_delegated_q = {csr_bus.exception_delegated[6], csr_bus.exception_delegated[7]};
+                if ex_raw_instr_q[31:27] == 5'd2 {
+                    cm_atomic_delegated_q = {csr_bus.exception_delegated[4], csr_bus.exception_delegated[5]};
+                }
                 cm_exception_value_q = ex_exception_value;
                 // Check the full effective address before issuing the token.
                 // A data fault enters CM directly; it does not put the address
@@ -2794,6 +2845,7 @@ module Core #(
                     }
                 }
                 cm_is_mret_q           = ex_is_mret_q;
+                cm_is_sret_q           = ex_is_sret_q;
                 cm_is_fence_i_q        = ex_is_fence_i_q;
                 cm_control_kind_q      = ex_control_kind_q;
                 cm_prediction_token_q  = ex_prediction_token_q;
@@ -2845,6 +2897,7 @@ module Core #(
                 ex_is_ecall_q            = rx_is_ecall_q;
                 ex_is_ebreak_q           = rx_is_ebreak_q;
                 ex_is_mret_q             = rx_is_mret_q;
+                ex_is_sret_q             = rx_is_sret_q;
                 ex_is_fence_i_q          = rx_is_fence_i_q;
                 // Capture the complete frontend-stop predicate with its EX
                 // payload. The exception cause and individual system tags
@@ -2852,8 +2905,8 @@ module Core #(
                 ex_frontend_block_q = rx_illegal_q || rx_user_illegal || !pmp_fetch_allowed || rx_is_ecall_q || rx_is_ebreak_q
                     || (STRICT_MEMORY && rx_fetch_fault_q) || rx_is_mret_q || rx_is_fence_i_q
                     || ((ENABLE_INTERRUPTS || ENABLE_U) && rx_is_csr_q && rx_csr_write_q
-                        && ((rx_csr_index_q == 5'd1) || (rx_csr_index_q == 5'd16)
-                            || (rx_csr_index_q == 5'd17) || (ENABLE_U && (rx_csr_index_q >= 5'd18))));
+                        && ((rx_csr_index_q == 6'd1) || (rx_csr_index_q == 6'd16)
+                            || (rx_csr_index_q == 6'd17) || (ENABLE_U && (rx_csr_index_q >= 6'd18))));
                 ex_normal_memory_q = (rx_is_load_q || rx_is_store_q) && !rx_is_atomic_q
                     && !rx_illegal_q && !rx_user_illegal && pmp_fetch_allowed && !rx_is_ecall_q && !rx_is_ebreak_q
                     && !(STRICT_MEMORY && rx_fetch_fault_q);
@@ -2976,7 +3029,8 @@ module Core #(
                     rx_csr_index_q         = decode_bus.csr_index;
                     rx_is_ecall_q          = decode_bus.is_ecall;
                     rx_is_ebreak_q         = decode_bus.is_ebreak;
-                    rx_is_mret_q           = decode_bus.is_mret;
+                    rx_is_mret_q           = decode_bus.is_mret || decode_bus.is_sret;
+                    rx_is_sret_q           = decode_bus.is_sret;
                     rx_is_fence_i_q        = decode_bus.is_fence_i;
                     rx_illegal_q           = decode_bus.illegal || fd_q.illegal;
                     rx_fetch_fault_q       = fd_q.access_fault;

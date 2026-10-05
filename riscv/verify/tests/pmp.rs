@@ -397,7 +397,7 @@ fn pmp_csr_decoder_exposes_only_even_rv64_cfg_and_sixteen_addresses() {
     let source = fs::read_to_string(root.join("PipelineInterfaces.veryl")).unwrap()
         + &fs::read_to_string(root.join("Decoder.veryl")).unwrap()
         + r#"
-module UserDecodeTest(instr: input logic<32>, illegal: output logic, index: output logic<5>) {
+module UserDecodeTest(instr: input logic<32>, illegal: output logic, index: output logic<6>) {
 inst b: DecodeBus; inst d: Decoder #(ENABLE_U:1,ENABLE_INTERRUPTS:1)(decode:b);
 always_comb {b.instr=instr;illegal=b.illegal;index=b.csr_index;}
 }"#;

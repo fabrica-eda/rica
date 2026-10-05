@@ -1,0 +1,75 @@
+module SupervisorCsrTest(clk: input clock, rst_n: input reset,
+index: input logic<6>,
+write_index: input logic<6>,
+write_enable: input logic,
+write_source: input logic<64>,
+trap_enter: input logic,
+trap_pc: input logic<64>,
+trap_cause: input logic<64>,
+trap_value: input logic<64>,
+mret: input logic,
+sret: input logic,
+machine_interrupts: input logic<3>,
+read_data: output logic<64>,
+below_machine: output logic,
+supervisor_mode: output logic,
+data_below_machine: output logic,
+counter_enable: output logic<3>,
+trap_virtual_memory: output logic,
+timeout_wait: output logic,
+trap_sret: output logic,
+trap_vector: output logic<64>,
+return_pc: output logic<64>,
+supervisor_return_pc: output logic<64>,
+interrupt_pending: output logic,
+interrupt_cause: output logic<4>,
+) {
+ inst b: CsrBus;
+ inst c: CsrFile #(ENABLE_U:1, ENABLE_S:1, ENABLE_INTERRUPTS:1, FULL_ADDRESS:1)(clk,rst_n,csr:b);
+ always_comb {
+b.index = index;
+b.write_index = write_index;
+b.write_enable = write_enable;
+b.write_op = 0;
+b.write_source = write_source;
+b.retire = 0;
+b.stall_dependency = 0;
+b.stall_memory_wait = 0;
+b.stall_redirect = 0;
+b.stall_frontend_empty = 0;
+b.predictor_conditional_resolved = 0;
+b.predictor_direction_wrong = 0;
+b.predictor_btb_miss = 0;
+b.predictor_ras_fallback = 0;
+b.predictor_repair = 0;
+b.counter_freeze = 0;
+b.debug_counter_index = 0;
+b.trap_enter = trap_enter;
+b.trap_pc = trap_pc;
+b.trap_cause = trap_cause;
+b.trap_value = trap_value;
+b.mret = mret;
+b.sret = sret;
+// The core registers this decision; derive it here from the presented cause.
+b.trap_supervisor = b.exception_delegated[trap_cause[3:0]];
+if trap_cause[63] {
+    b.trap_supervisor = (trap_cause[3:0] == 4'd1) && b.interrupt_delegated[0]
+        || (trap_cause[3:0] == 4'd5) && b.interrupt_delegated[1]
+        || (trap_cause[3:0] == 4'd9) && b.interrupt_delegated[2];
+}
+b.machine_interrupts = machine_interrupts;
+read_data = b.read_data;
+below_machine = b.below_machine;
+supervisor_mode = b.supervisor_mode;
+data_below_machine = b.data_below_machine;
+counter_enable = b.counter_enable;
+trap_virtual_memory = b.trap_virtual_memory;
+timeout_wait = b.timeout_wait;
+trap_sret = b.trap_sret;
+trap_vector = b.trap_vector;
+return_pc = b.return_pc;
+supervisor_return_pc = b.supervisor_return_pc;
+interrupt_pending = b.interrupt_pending;
+interrupt_cause = b.interrupt_cause;
+}
+}

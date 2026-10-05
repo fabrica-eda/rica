@@ -99,6 +99,11 @@ retains the legacy comparison configuration. The default hardware image is
 explicit project snapshot. ELF paths remain explicit, so archived candidates
 can be checked without replacing the working project's RTL or clock settings.
 
+**2026-10-05:** the working U/PMP profile also implements **S-mode with trap
+delegation** (Bare translation only) at **112/56 MHz**. It closes timing in the plain
+measured Texo flow and passes all 270 validation ELFs on the FPGA; see
+[S-mode](RV64_SUPERVISOR_PLATFORM.md). Sv39 is the next stage.
+
 The custom OS target is **M/S/U modes and Sv39**. The [OS/ISA plan](RV64_OS_ISA_PLAN.md)
 continues from the qualified interrupt/access-fault foundation to external I/O,
 A, U-mode/PMP and supervisor virtual memory. The placement/routing fixes now run

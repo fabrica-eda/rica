@@ -2,6 +2,7 @@
 module Decoder #(
     param ENABLE_M         : bit = 0,
     param ENABLE_U: bit = 0,
+    param ENABLE_S: bit = 0,
     param ENABLE_A         : bit = 0,
     param ENABLE_ZBA       : bit = 0,
     param ENABLE_ZBB       : bit = 0,
@@ -11,7 +12,7 @@ module Decoder #(
     decode: modport DecodeBus::decoder,
 ) {
     inst unit: DecoderWithCsrClass #(
-        ENABLE_M: ENABLE_M, ENABLE_U: ENABLE_U, ENABLE_A: ENABLE_A,
+        ENABLE_M: ENABLE_M, ENABLE_U: ENABLE_U, ENABLE_S: ENABLE_S, ENABLE_A: ENABLE_A,
         ENABLE_ZBA: ENABLE_ZBA, ENABLE_ZBB: ENABLE_ZBB, ENABLE_ZBS: ENABLE_ZBS,
         ENABLE_INTERRUPTS: ENABLE_INTERRUPTS,
     ) (
@@ -24,6 +25,7 @@ module DecoderWithCsrClass #(
     param USE_CSR_CLASS: bit = 0,
     param ENABLE_M         : bit = 0,
     param ENABLE_U: bit = 0,
+    param ENABLE_S: bit = 0,
     param ENABLE_A         : bit = 0,
     param ENABLE_ZBA       : bit = 0,
     param ENABLE_ZBB       : bit = 0,
@@ -75,6 +77,8 @@ module DecoderWithCsrClass #(
     var csr_address_writable: logic    ;
     var csr_write_requested : logic    ;
     var csr_user_address: logic;
+    var csr_supervisor_address: logic;
+    var legal_supervisor_system: logic;
     var csr_known_group0    : logic    ;
     var csr_known_group1    : logic    ;
     var csr_known_group2    : logic    ;
@@ -147,6 +151,7 @@ module DecoderWithCsrClass #(
             || (decode.instr[31:20] == 12'h7c0) || (decode.instr[31:20] == 12'h7c1);
         decode.csr_index[4] = ENABLE_INTERRUPTS
             && ((decode.instr[31:20] == 12'h304) || (decode.instr[31:20] == 12'h344));
+        decode.csr_index[5] = 1'b0;
         csr_known_group0    = (decode.instr[31:20] == 12'h300) || (decode.instr[31:20] == 12'h301)
             || (decode.instr[31:20] == 12'h305) || (decode.instr[31:20] == 12'h340);
         csr_known_group1    = (decode.instr[31:20] == 12'h341) || (decode.instr[31:20] == 12'h342)
@@ -186,6 +191,40 @@ module DecoderWithCsrClass #(
             csr_address_known = csr_address_known || csr_user_address;
             csr_address_writable = csr_address_writable || csr_user_address;
         }
+        // Supervisor CSRs and the delegation registers use indices 32..44.
+        // SIE/SIP/MIDELEG exist only with interrupts. Privilege checks for
+        // these addresses remain in the core, as for every CSR below M.
+        csr_supervisor_address = 1'b0;
+        if ENABLE_S {
+            csr_supervisor_address = 1'b1;
+            case decode.instr[31:20] {
+                12'h100: decode.csr_index = 6'd32;
+                12'h105: decode.csr_index = 6'd34;
+                12'h106: decode.csr_index = 6'd35;
+                12'h10a: decode.csr_index = 6'd36;
+                12'h140: decode.csr_index = 6'd37;
+                12'h141: decode.csr_index = 6'd38;
+                12'h142: decode.csr_index = 6'd39;
+                12'h143: decode.csr_index = 6'd40;
+                12'h180: decode.csr_index = 6'd42;
+                12'h302: decode.csr_index = 6'd43;
+                default: csr_supervisor_address = 1'b0;
+            }
+            if ENABLE_INTERRUPTS {
+                if decode.instr[31:20] == 12'h104 {
+                    decode.csr_index = 6'd33;
+                    csr_supervisor_address = 1'b1;
+                } else if decode.instr[31:20] == 12'h144 {
+                    decode.csr_index = 6'd41;
+                    csr_supervisor_address = 1'b1;
+                } else if decode.instr[31:20] == 12'h303 {
+                    decode.csr_index = 6'd44;
+                    csr_supervisor_address = 1'b1;
+                }
+            }
+            csr_address_known = csr_address_known || csr_supervisor_address;
+            csr_address_writable = csr_address_writable || csr_supervisor_address;
+        }
         // Core may supply stable address properties registered with fd_q.
         // Operand-dependent write intent remains in this decode stage.
         if USE_CSR_CLASS {
@@ -196,6 +235,7 @@ module DecoderWithCsrClass #(
         decode.is_ecall      = 1'b0;
         decode.is_ebreak     = 1'b0;
         decode.is_mret       = 1'b0;
+        decode.is_sret       = 1'b0;
         decode.is_fence_i    = 1'b0;
         // Every unsupported or reserved encoding raises an illegal-instruction
         // exception instead of silently retiring or stopping the core.
@@ -644,9 +684,13 @@ module DecoderWithCsrClass #(
                     || ((funct7 == 7'b0100000) && ((funct3 == 3'b000) || (funct3 == 3'b101)))));
         // Exact privileged encodings already prove opcode and funct3.
         // Keep their recognition parallel to the CSR access checks.
+        // SRET and SFENCE.VMA. With Bare translation SFENCE.VMA has no
+        // cached translation to order, so it retires as a NOP.
+        legal_supervisor_system = ENABLE_S && ((decode.instr == 32'h1020_0073)
+            || ((decode.instr[31:25] == 7'b0001001) && (decode.instr[14:0] == 15'h0073)));
         legal_system   = ((opcode == 7'b0001111) && ((funct3 == 3'b000) || (funct3 == 3'b001)))
             || (decode.instr == 32'h0000_0073) || (decode.instr == 32'h0010_0073) || (decode.instr == 32'h3020_0073)
-            || (decode.instr == 32'h1050_0073)
+            || (decode.instr == 32'h1050_0073) || legal_supervisor_system
             || ((opcode == 7'b1110011) && (funct3[1:0] != 2'b00) && csr_address_known
                 && (!csr_write_requested || csr_address_writable));
         encoding_legal = ((legal_u_jump || legal_control) || (legal_memory || legal_integer)) || legal_system;
@@ -661,6 +705,7 @@ module DecoderWithCsrClass #(
         decode.is_ecall     = decode.instr == 32'h0000_0073;
         decode.is_ebreak    = decode.instr == 32'h0010_0073;
         decode.is_mret      = decode.instr == 32'h3020_0073;
+        decode.is_sret      = ENABLE_S && (decode.instr == 32'h1020_0073);
         decode.is_fence_i   = (opcode == 7'b0001111) && (funct3 == 3'b001);
         decode.write_enable = legal_u_jump || legal_integer || decode.is_csr
             || ((opcode == 7'b1100111) && (funct3 == 3'b000)) || ((opcode == 7'b0000011) && (funct3 != 3'b111));
@@ -781,6 +826,7 @@ module DecoderWithCsrClass #(
 /// Stable CSR address properties, independent of operands and privilege state.
 module CsrAddressClass #(
     param ENABLE_U: bit = 0,
+    param ENABLE_S: bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
 ) (
     address: input logic<12>,
@@ -791,7 +837,11 @@ module CsrAddressClass #(
     always_comb {
         extended = (ENABLE_INTERRUPTS && ((address == 12'h304) || (address == 12'h344)))
             || (ENABLE_U && ((address == 12'h3a0) || (address == 12'h3a2)
-                || (address[11:4] == 8'h3b) || (address == 12'h306) || (address == 12'h30a)));
+                || (address[11:4] == 8'h3b) || (address == 12'h306) || (address == 12'h30a)))
+            || (ENABLE_S && ((address == 12'h100) || (address == 12'h105) || (address == 12'h106)
+                || (address == 12'h10a) || (address == 12'h140) || (address == 12'h141) || (address == 12'h142)
+                || (address == 12'h143) || (address == 12'h180) || (address == 12'h302)
+                || (ENABLE_INTERRUPTS && ((address == 12'h104) || (address == 12'h144) || (address == 12'h303)))));
         known = (address == 12'h300) || (address == 12'h301) || (address == 12'h305) || (address == 12'h340)
             || (address == 12'h341) || (address == 12'h342) || (address == 12'h343)
             || (address == 12'hf11) || (address == 12'hf12) || (address == 12'hf13) || (address == 12'hf14)

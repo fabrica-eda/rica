@@ -11,8 +11,14 @@ _start:
     li t0, -1
     csrw mie, t0
     csrr t1, mie
-    li t2, 0x888
-    bne t1, t2, fail_1
+    # S-capable harts also implement the supervisor enables.
+    csrr t2, misa
+    srli t2, t2, 18
+    andi t2, t2, 1
+    li t3, 0x888
+    beqz t2, 1f
+    li t3, 0xaaa
+1:  bne t1, t3, fail_1
     csrw mie, zero
     li s0, 0x02000000
     li s1, 0x02004000

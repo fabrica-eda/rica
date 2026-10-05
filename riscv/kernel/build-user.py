@@ -56,6 +56,7 @@ def main():
         (tests / "rv64-u/pmp-machine.S", tests / "rv64i-subset/link.ld"),
         (tests / "rv64-u/pmp-cache.S", tests / "rv64-u/link-ram.ld"),
         (tests / "rv64i-subset/system.S", tests / "rv64i-subset/link.ld"),
+        (tests / "rv64-s/supervisor.S", tests / "rv64i-subset/link.ld"),
     ):
         obj = out / (source.stem + ".o")
         diagnostic = out / (source.stem + ".elf")

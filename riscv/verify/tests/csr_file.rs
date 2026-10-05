@@ -7,8 +7,8 @@ const TEST_TOP: &str = r#"
 module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0, param FULL_ADDRESS: bit = 0) (
     clk                 : input  clock    ,
     rst_n               : input  reset    ,
-    index               : input  logic<5> ,
-    write_index         : input  logic<5> ,
+    index               : input  logic<6> ,
+    write_index         : input  logic<6> ,
     write_enable        : input  logic    ,
     write_op            : input  logic<2> ,
     write_source        : input  logic<64>,
@@ -67,6 +67,8 @@ module CsrFileTestTop #(param ENABLE_INTERRUPTS: bit = 0, param FULL_ADDRESS: bi
         csr_bus.trap_cause            = trap_cause;
         csr_bus.trap_value            = trap_value;
         csr_bus.mret                  = mret;
+        csr_bus.sret                  = 1'b0;
+        csr_bus.trap_supervisor       = 1'b0;
         csr_bus.machine_interrupts = machine_interrupts;
         interrupt_pending = csr_bus.interrupt_pending;
         interrupt_cause = csr_bus.interrupt_cause;

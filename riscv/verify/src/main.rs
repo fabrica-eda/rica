@@ -982,6 +982,7 @@ struct HardwareModelConfig {
     strict_memory: bool,
     enable_a: bool,
     enable_u: bool,
+    enable_s: bool,
     machine_console: bool,
     kernel_console: bool,
 }
@@ -1008,6 +1009,7 @@ fn verify_hardware_memory_rtl(
         strict_memory,
         enable_a,
         enable_u,
+        enable_s,
         machine_console,
         kernel_console,
     } = config;
@@ -1041,6 +1043,7 @@ fn verify_hardware_memory_rtl(
         .param("STRICT_MEMORY", u64::from(strict_memory))
         .param("ENABLE_A", u64::from(enable_a))
         .param("ENABLE_U", u64::from(enable_u))
+        .param("ENABLE_S", u64::from(enable_s))
         .param("ENABLE_CONSOLE", u64::from(machine_console))
         .compile_native()?
         .into_program_image();
@@ -1581,9 +1584,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let early_divide = arguments.iter().any(|arg| arg == "--early-divide");
     let machine_interrupts = arguments.iter().any(|arg| arg == "--machine-interrupts");
     let strict_memory = arguments.iter().any(|arg| arg == "--strict-memory");
-    let enable_u = arguments.iter().any(|arg| arg == "--u-mode");
+    let enable_s = arguments.iter().any(|arg| arg == "--s-mode");
+    let enable_u = enable_s || arguments.iter().any(|arg| arg == "--u-mode");
     if enable_u && !strict_memory {
-        return Err("--u-mode requires --strict-memory".into());
+        return Err("--u-mode and --s-mode require --strict-memory".into());
     }
     let enable_a = arguments.iter().any(|arg| arg == "--a-extension");
     if enable_a && !strict_memory {
@@ -1720,6 +1724,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     && argument.as_str() != "--strict-memory"
                     && argument.as_str() != "--a-extension"
                     && argument.as_str() != "--u-mode"
+                    && argument.as_str() != "--s-mode"
                     && argument.as_str() != "--kernel-console"
                     && argument.as_str() != "--machine-console"
                     && argument.as_str() != "--dsp-multiplier"
@@ -1760,6 +1765,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         strict_memory,
                         enable_a,
                         enable_u,
+                        enable_s,
                         machine_console,
                         kernel_console,
                         trace: timed_trace,
@@ -1788,6 +1794,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 strict_memory,
                 enable_a,
                 enable_u,
+                enable_s,
                 machine_console,
                 kernel_console,
             },

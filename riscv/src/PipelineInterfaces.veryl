@@ -27,10 +27,11 @@ interface DecodeBus {
     var csr_op       : logic<2> ;
     var csr_use_imm  : logic    ;
     var csr_write    : logic    ;
-    var csr_index    : logic<5> ;
+    var csr_index    : logic<6> ;
     var is_ecall     : logic    ;
     var is_ebreak    : logic    ;
     var is_mret      : logic    ;
+    var is_sret      : logic    ;
     var is_fence_i   : logic    ;
     var illegal      : logic    ;
 
@@ -45,21 +46,35 @@ interface DecodeBus {
     }
 }
 
-/// Machine-mode CSR storage and the precise trap/return control surface.
+/// Privileged CSR storage and the precise trap/return control surface.
 ///
-/// CSR instructions read combinationally in EX. Writes, trap entry, and MRET
-/// update architectural state at the completion boundary, after older redirects.
+/// CSR instructions read combinationally in EX. Writes, trap entry, MRET and
+/// SRET update architectural state at the completion boundary, after older
+/// redirects. `below_machine` is set in S and U, where PMP applies to fetch;
+/// `data_below_machine` additionally follows MPRV for loads and stores.
+/// The core presents `trap_supervisor` with each trap: its cause is delegated
+/// by `exception_delegated` or, for an accepted interrupt,
+/// `interrupt_to_supervisor` at acceptance. Both masks are zero in M.
+/// `trap_vector` follows `trap_supervisor`.
 /// Machine interrupt levels are synchronous to the core clock. Bit order is
 /// {external, timer, software}; the platform owns acknowledgment of each level.
 interface CsrBus {
-    var user_mode: logic;
-    var data_user: logic;
+    var below_machine: logic;
+    var supervisor_mode: logic;
+    var data_below_machine: logic;
+    var trap_virtual_memory: logic;
+    var timeout_wait: logic;
+    var trap_sret: logic;
+    var exception_delegated: logic<16>;
+    var interrupt_delegated: logic<3>;
+    var interrupt_to_supervisor: logic;
+    var trap_supervisor: logic;
     var counter_enable: logic<3>;
     var pmp_config: logic<8> [4];
     var pmp_address: logic<30> [4];
 
-    var index                         : logic<5> ;
-    var write_index                   : logic<5> ;
+    var index                         : logic<6> ;
+    var write_index                   : logic<6> ;
     var read_data                     : logic<64>;
     var write_enable                  : logic    ;
     var write_op                      : logic<2> ;
@@ -82,15 +97,25 @@ interface CsrBus {
     var trap_cause                    : logic<64>;
     var trap_value                    : logic<64>;
     var mret                          : logic    ;
+    var sret                          : logic    ;
     var trap_vector                   : logic<64>;
     var return_pc                     : logic<64>;
+    var supervisor_return_pc          : logic<64>;
     var machine_interrupts            : logic<3> ;
     var interrupt_pending             : logic    ;
     var interrupt_cause               : logic<4> ;
 
     modport core {
-        user_mode: input,
-        data_user: input,
+        exception_delegated: input,
+        interrupt_delegated: input,
+        interrupt_to_supervisor: input,
+        trap_supervisor: output,
+        below_machine: input,
+        supervisor_mode: input,
+        data_below_machine: input,
+        trap_virtual_memory: input,
+        timeout_wait: input,
+        trap_sret: input,
         counter_enable: input,
         pmp_config: input,
         pmp_address: input,
@@ -117,18 +142,28 @@ interface CsrBus {
         trap_cause                    : output,
         trap_value                    : output,
         mret                          : output,
+        sret                          : output,
         machine_interrupts            : output,
         read_data                     : input ,
         debug_counter_data            : input ,
         trap_vector                   : input ,
         return_pc                     : input ,
+        supervisor_return_pc          : input ,
         interrupt_pending             : input ,
         interrupt_cause               : input ,
     }
 
     modport file {
-        user_mode: output,
-        data_user: output,
+        exception_delegated: output,
+        interrupt_delegated: output,
+        interrupt_to_supervisor: output,
+        trap_supervisor: input,
+        below_machine: output,
+        supervisor_mode: output,
+        data_below_machine: output,
+        trap_virtual_memory: output,
+        timeout_wait: output,
+        trap_sret: output,
         counter_enable: output,
         pmp_config: output,
         pmp_address: output,
@@ -155,11 +190,13 @@ interface CsrBus {
         trap_cause                    : input ,
         trap_value                    : input ,
         mret                          : input ,
+        sret                          : input ,
         machine_interrupts            : input ,
         read_data                     : output,
         debug_counter_data            : output,
         trap_vector                   : output,
         return_pc                     : output,
+        supervisor_return_pc          : output,
         interrupt_pending             : output,
         interrupt_cause               : output,
     }

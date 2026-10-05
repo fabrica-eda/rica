@@ -9,7 +9,7 @@ module CsrDecoderTestTop #(
     param ENABLE_INTERRUPTS: bit = 0,
 ) (
     instr    : input  logic<32>,
-    csr_index: output logic<5> ,
+    csr_index: output logic<6> ,
     csr_write: output logic    ,
     illegal  : output logic    ,
 ) {
@@ -221,7 +221,7 @@ fn csr_decode_recognizes_exact_address_set_and_write_permissions() {
         r#"module CsrDecodeTest #(param U: bit = 0, param IRQ: bit = 0) (
             instr: input logic<32>, illegal: output logic,
             prefetched_illegal: output logic,
-            csr_index: output logic<5>, prefetched_csr_index: output logic<5>,
+            csr_index: output logic<6>, prefetched_csr_index: output logic<6>,
         ) {
             inst d: DecodeBus;
             inst decoder: Decoder #(ENABLE_U: U, ENABLE_INTERRUPTS: IRQ) (decode: d);
@@ -284,6 +284,103 @@ fn csr_decode_recognizes_exact_address_set_and_write_permissions() {
                     }
                 }
             }
+        }
+    }
+}
+
+const SUPERVISOR_TOP: &str = r#"
+module SupervisorDecoderTestTop #(
+    param ENABLE_S: bit = 0,
+) (
+    instr    : input  logic<32>,
+    csr_index: output logic<6> ,
+    is_sret  : output logic    ,
+    is_mret  : output logic    ,
+    illegal  : output logic    ,
+) {
+    inst decode_bus: DecodeBus;
+    inst decoder: Decoder #(ENABLE_U: 1, ENABLE_S: ENABLE_S, ENABLE_INTERRUPTS: 1) (
+        decode: decode_bus,
+    );
+
+    always_comb {
+        decode_bus.instr = instr;
+        csr_index        = decode_bus.csr_index;
+        is_sret          = decode_bus.is_sret;
+        is_mret          = decode_bus.is_mret;
+        illegal          = decode_bus.illegal;
+    }
+}
+"#;
+
+#[test]
+fn supervisor_csrs_sret_and_sfence_decode_only_with_s() {
+    let riscv = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_owned();
+    let source = [
+        fs::read_to_string(riscv.join("src/PipelineInterfaces.veryl")).unwrap(),
+        fs::read_to_string(riscv.join("src/Decoder.veryl")).unwrap(),
+        SUPERVISOR_TOP.to_owned(),
+    ]
+    .join("\n");
+    const SUPERVISOR: [(u16, u8); 13] = [
+        (0x100, 32), // sstatus
+        (0x104, 33), // sie
+        (0x105, 34), // stvec
+        (0x106, 35), // scounteren
+        (0x10a, 36), // senvcfg
+        (0x140, 37), // sscratch
+        (0x141, 38), // sepc
+        (0x142, 39), // scause
+        (0x143, 40), // stval
+        (0x144, 41), // sip
+        (0x180, 42), // satp
+        (0x302, 43), // medeleg
+        (0x303, 44), // mideleg
+    ];
+    for enabled in [false, true] {
+        let mut simulator = SimulatorBuilder::new(&source, "SupervisorDecoderTestTop")
+            .param("ENABLE_S", u64::from(enabled))
+            .build_native()
+            .unwrap();
+        let mut run = |instruction: u32| {
+            let instr = simulator.signal("instr");
+            simulator.modify(|io| io.set(instr, instruction)).unwrap();
+            (
+                value(&mut simulator, "csr_index") as u8,
+                value(&mut simulator, "is_sret") != 0,
+                value(&mut simulator, "is_mret") != 0,
+                value(&mut simulator, "illegal") != 0,
+            )
+        };
+        for (address, index) in SUPERVISOR {
+            for funct3 in [1, 2, 3, 5, 6, 7] {
+                let (decoded, _, _, illegal) = run(csr_instruction(address, funct3, 1, 2));
+                assert_eq!(illegal, !enabled, "{address:03x} funct3={funct3}");
+                if enabled {
+                    assert_eq!(decoded, index, "{address:03x}");
+                } else {
+                    assert!(decoded < 32, "{address:03x} decoded {decoded}");
+                }
+            }
+        }
+        // Neighboring unimplemented supervisor addresses remain illegal.
+        for address in [0x101, 0x107, 0x145, 0x181, 0x304 + 0x100] {
+            assert!(run(csr_instruction(address, 2, 0, 1)).3, "{address:03x}");
+        }
+        let (_, sret, mret, illegal) = run(0x1020_0073);
+        assert_eq!((sret, mret, illegal), (enabled, false, !enabled));
+        // CSR indices are meaningful only for CSR instructions.
+        let (_, sret, mret, illegal) = run(0x3020_0073);
+        assert_eq!((sret, mret, illegal), (false, true, false));
+        // SFENCE.VMA rs1, rs2 with rd = 0; other rd or funct7 values are reserved.
+        for (rs1, rs2) in [(0, 0), (5, 0), (0, 7), (31, 31)] {
+            let sfence = 0x1200_0073 | rs2 << 20 | rs1 << 15;
+            assert_eq!(run(sfence).3, !enabled, "sfence.vma x{rs1}, x{rs2}");
+            assert!(run(sfence | 1 << 7).3, "sfence.vma with rd");
+            assert!(run(sfence ^ 1 << 25).3, "funct7 0b0001000");
         }
     }
 }

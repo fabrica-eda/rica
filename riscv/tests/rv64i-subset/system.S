@@ -168,7 +168,14 @@ after_ecall:
     andi t2, t2, 1
     beqz t2, 1f
     li t1, 0x200000088
-1:  bne t0, t1, fail_12
+    # S-capable harts also report SXL=64.
+1:  csrr t2, misa
+    srli t2, t2, 18
+    andi t2, t2, 1
+    beqz t2, 2f
+    li t2, 0x800000000
+    or t1, t1, t2
+2:  bne t0, t1, fail_12
 
     PASS
 
@@ -190,7 +197,14 @@ trap_handler:
     andi t2, t2, 1
     beqz t2, 1f
     li t1, 0x200001880
-1:  bne t0, t1, fail_13
+    # S-capable harts also report SXL=64.
+1:  csrr t2, misa
+    srli t2, t2, 18
+    andi t2, t2, 1
+    beqz t2, 2f
+    li t2, 0x800000000
+    or t1, t1, t2
+2:  bne t0, t1, fail_13
 
 trap_resume:
     addi t0, s1, 4

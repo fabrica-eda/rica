@@ -200,6 +200,10 @@ A対応後のソフトウェアターゲットは `rv64imac_zicsr_zifencei_zba_z
 
 ### 3. U-modeと保護、その後S-mode＋Sv39
 
+2026-10-05: 2.のS-mode（委譲、SRET、S CSR、Bare）を実装し、112/56 MHzで実機270 ELFが合格。
+[S-modeの仕様・検証範囲](RV64_SUPERVISOR_PLATFORM.md)。PMPはSとUを区別しないため、
+U-taskを隔離するS-kernelはSv39（3.）と一緒に試す。
+
 2026-09-24: opt-in U/PMPと、隔離された2つのUタスクを実装中。
 CSR/PMPのnative・mapped検証とOSの機能モデル検証は合格。
 124.8 MHzでの配置配線・実機認定は継続中で、既定の認定imageは未変更。

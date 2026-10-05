@@ -56,6 +56,7 @@ pub struct ExecutionConfig<'a> {
     pub strict_memory: bool,
     pub enable_a: bool,
     pub enable_u: bool,
+    pub enable_s: bool,
     pub machine_console: bool,
     pub kernel_console: bool,
     pub trace: Option<TraceConfig<'a>>,
@@ -172,6 +173,7 @@ pub fn run(
         .param("STRICT_MEMORY", u64::from(execution.strict_memory))
         .param("ENABLE_A", u64::from(execution.enable_a))
         .param("ENABLE_U", u64::from(execution.enable_u))
+        .param("ENABLE_S", u64::from(execution.enable_s))
         .param("ENABLE_CONSOLE", u64::from(execution.machine_console))
         .build()?;
     let reset = sim.signal("rst_n");

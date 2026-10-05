@@ -1,6 +1,6 @@
 module UserCsrTest(clk: input clock, rst_n: input reset,
-index: input logic<5>,
-write_index: input logic<5>,
+index: input logic<6>,
+write_index: input logic<6>,
 write_enable: input logic,
 write_op: input logic<2>,
 write_source: input logic<64>,
@@ -37,10 +37,12 @@ b.trap_pc = 0;
 b.trap_cause = 0;
 b.trap_value = 0;
 b.mret = mret;
+b.sret = 0;
+b.trap_supervisor = 0;
 b.machine_interrupts = machine_interrupts;
 read_data = b.read_data;
-user_mode = b.user_mode;
-data_user = b.data_user;
+user_mode = b.below_machine;
+data_user = b.data_below_machine;
 interrupt_pending = b.interrupt_pending;
 }
 }
