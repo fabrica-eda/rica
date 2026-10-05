@@ -9,13 +9,19 @@
     li s9, \n
 .endm
 
-# Expect a trap with this cause at this PC; resume at cont in mode priv
-# (0 = U, 1 = S, 3 = M). The handler that takes the trap must match.
-.macro EXPECT cause, epc, cont, priv
+# Expect a trap with this cause at this PC, taken by the S (1) or M (3)
+# handler; resume at cont in mode priv (0 = U, 1 = S, 3 = M). The handler
+# defaults to the resumed mode. Each handler rejects traps meant for the other.
+.macro EXPECT cause, epc, cont, priv, handler=-1
     li s6, \cause
     la s4, \epc
     la s8, \cont
     li s10, \priv
+    .if \handler == -1
+    li s11, \priv
+    .else
+    li s11, \handler
+    .endif
 .endm
 
 .macro EXPECT_INTERRUPT cause, epc, cont, priv
@@ -25,6 +31,7 @@
     la s4, \epc
     la s8, \cont
     li s10, \priv
+    li s11, \priv
 .endm
 
 # M-mode: return to target in mode priv through MRET.
@@ -74,7 +81,7 @@ _start:
 
     # 2: S cannot access M CSRs; undelegated, the trap goes to M with MPP = S.
     STEP 2
-    EXPECT 2, t2_mstatus, t2_done, 1
+    EXPECT 2, t2_mstatus, t2_done, 1, 3
     ENTER 1, t2_supervisor
 t2_supervisor:
     csrr t0, sstatus           # S may read its own status
@@ -318,7 +325,7 @@ t11_back:
     # loads only.
 t12_machine:
     STEP 12
-    li t0, 0x200093ff          # NAPOT 4 KiB at 0x80024000, no permission
+    li t0, 0x200091ff          # NAPOT 4 KiB at 0x80024000, no permission
     csrw pmpaddr0, t0
     li t0, 0x3fffffff
     csrw pmpaddr1, t0
@@ -451,6 +458,51 @@ t14_lr2:
 .option pop
 t14_done:
     bne s5, s1, fail
+
+    # 15: misaligned atomics fault in the atomic unit as misaligned (LR 4,
+    # others 6), again delegated by their own bits only.
+    STEP 15
+    li t0, 1 << 7
+    csrc medeleg, t0
+    li t0, 1 << 4
+    csrs medeleg, t0
+    li s1, 0x80026004          # permitted RAM, not doubleword aligned
+    EXPECT 4, t15_lr, t15_amo_entry, 1
+    ENTER 0, t15_lr
+.option push
+.option arch, +a
+t15_lr:
+    lr.d t0, (s1)
+    j fail
+t15_amo_entry:
+    bne s5, s1, fail
+    EXPECT 6, t15_amo, t15_swap, 3
+    SRET_TO_USER t15_amo
+t15_amo:
+    amoadd.d t0, t0, (s1)
+    j fail
+t15_swap:
+    bne s5, s1, fail
+    li t0, 1 << 4
+    csrc medeleg, t0
+    li t0, 1 << 6
+    csrs medeleg, t0
+    EXPECT 6, t15_sc, t15_lr2_entry, 1
+    ENTER 0, t15_sc
+t15_sc:
+    sc.d t0, t0, (s1)
+    j fail
+t15_lr2_entry:
+    bne s5, s1, fail
+    addi s1, s1, -2            # word LR two bytes past a word boundary
+    EXPECT 4, t15_lr2, t15_done, 3
+    SRET_TO_USER t15_lr2
+t15_lr2:
+    lr.w t0, (s1)
+    j fail
+.option pop
+t15_done:
+    bne s5, s1, fail
     j pass
 
 pass:
@@ -468,6 +520,8 @@ fail:
 # interrupt is not retaken on return.
 .balign 4
 m_trap:
+    li t0, 3
+    bne s11, t0, m_mismatch
     csrr t0, mcause
     bne t0, s6, m_mismatch
     csrr t0, mepc
@@ -486,6 +540,8 @@ m_mismatch:
 
 .balign 4
 s_trap:
+    li t0, 1
+    bne s11, t0, fail
     csrr t0, scause
     bne t0, s6, fail
     csrr t0, sepc

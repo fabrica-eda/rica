@@ -52,13 +52,17 @@ U-taskの隔離を伴うS-kernelはSv39（PTEのUビット）と一緒に導入�
 | `verify/tests/supervisor_csr.rs`（native＋ECP5 mapped） | 委譲、SRET、状態の見え方、割り込みの宛先と優先順位、カウンタ、TVM/TW/TSR、MPRV |
 | `verify/tests/csr_decoder.rs` | S CSR 13個の索引と6形式の合法性、SRET、SFENCE.VMA（rd≠0とfunct7違いは不正）。`ENABLE_S=0` では全て不正 |
 | 既存CSR/PMPテスト | `ENABLE_S=0` で全て合格（CSR索引の拡幅後） |
-| `tests/rv64-s/supervisor.S`（コア全体、14段） | 両クロック順と同時クロックモデルで合格。委譲されるload/store/atomicのアクセス違反を含む |
-| 変異試験 | S関連のRTL変異19個のうち17個を `supervisor.elf` が検出。残る2個はatomicユニット経由の委譲で、Sへ委譲される場合はこの経路を通らない（M宛ての場合は検出） |
+| `tests/rv64-s/supervisor.S`（コア全体、15段） | 両クロック順と同時クロックモデルで合格。委譲されるload/storeのアクセス違反、atomicのアクセス違反（PMP経由とatomicユニット経由）とmisaligned（atomicユニット）を含む |
+| 変異試験 | S関連のRTL変異19個を `supervisor.elf` が全て検出 |
 | 既存270 ELF | Sなしで全合格。Sありでは2つ（`system`、`machine_interrupts`）がM/Uプラットフォーム固有の `mstatus`/`mie` 値を厳密比較していたため、MISAのSビットで期待値を切り替えるよう修正 |
 | U kernel（同時クロック、Sあり） | mcycle 231,189、minstret 66,473。112 MHz記録と同一 |
 
-`supervisor.S` の各段は、期待するトラップ（原因、xEPC、継続先、継続特権）をMとSのハンドラが
-照合する。EBREAKは委譲しないので、Mへ戻る手段として使う。ビルドは `kernel/build-user.py`。
+`supervisor.S` の各段は、期待するトラップ（原因、xEPC、受けるハンドラ、継続先、継続特権）を
+MとSのハンドラが照合し、宛先でないハンドラが受けたトラップは失敗にする。EBREAKは委譲しないので、
+Mへ戻る手段として使う。ビルドは `kernel/build-user.py`。
+
+misalignedのatomicは、M未満でもPMP検査を通ればatomicユニットがmisaligned（LR 4、他 6）を
+報告する。misalignedの通常load/storeはハードウェアで処理し、トラップしない。
 
 ## タイミングと実機
 
@@ -75,7 +79,7 @@ S有効時は、修正前のTexo（`main` の素のフロー）では112/56 MHz�
 | bitstream | `riscv/build/riscv-hardware-compact-user-112-supervisor-20261005.bit` |
 | SHA-256 | `09f213ee2cdf16db46383b82d6f7d38936cd7eed4bb77182e39c29cf2935d97a` |
 | チェック付きbitgen | プロファイル・PLL照合、JTCK 515 setup／515 hold一致 |
-| 実機 | 270 ELF全件合格（tapir、5分50秒）。`supervisor.elf` mcycle 5,430（同時クロックモデル5,431）、U kernel mcycle 231,191／minstret 66,473（モデル231,189／66,473） |
+| 実機 | 270 ELF全件合格（tapir、5分50秒）。`supervisor.elf`（15段版を再実行）mcycle 6,303（同時クロックモデルと一致）、U kernel mcycle 231,191／minstret 66,473（モデル231,189／66,473） |
 
 記録は `toolchain/measurements/2026-10-05-rv64-s-112/`（配置配線・bitgen・監査・ソース、
 実機ログ、native検証、変異試験）。RicaのTexoピンはPR #102のマージ後に上げる。
