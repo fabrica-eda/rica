@@ -23,7 +23,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def audit(text, allow_a=False):
+def audit(text, allow_a=False, allow_s=False):
     # Explicit integer-only allow-list, in addition to the encoding checks.
     # In particular, the usual riscv64gc target would introduce A/F/D here.
     base = set("""lui auipc jal jalr beq bne blt bge bltu bgeu
@@ -38,6 +38,8 @@ def audit(text, allow_a=False):
     if allow_a:
         base |= {op + suffix for op in ["amoadd.d", "lr.d", "sc.d"]
                  for suffix in ["", ".aq", ".rl", ".aqrl"]}
+    if allow_s:
+        base |= {"sret", "sfence.vma"}
     counts = {}
     for match in re.finditer(r"^\s*[0-9a-f]+:\s+([0-9a-f]{4}|[0-9a-f]{8})\s+(\S+)", text, re.M):
         encoding, mnemonic = match.groups()

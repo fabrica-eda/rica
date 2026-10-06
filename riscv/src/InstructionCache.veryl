@@ -9,10 +9,12 @@
 /// valid bits. Read/write collisions are masked through both read stages, so execution
 /// never depends on the FPGA's read-during-write value.
 ///
-/// PC is physical. With `translate`, the line after the last line of PC's
-/// 4 KiB page is in the page `next_page` instead of the following physical
-/// page, so a translated 32-bit instruction may cross into a page mapped
-/// elsewhere.
+/// Without `translate`, PC is physical. With `translate`, PC is virtual and
+/// the physical address is {`frame`, PC[11:0]}; the line after the last line
+/// of the page is in `next_page` instead of the following physical page, so
+/// a translated 32-bit instruction may cross into a page mapped elsewhere.
+/// Tag comparisons on the fetch-valid path compare against both PC and the
+/// frame register and select late, so translation adds no mux before them.
 module InstructionCache #(
     param INDEX_BITS: u32 = 7,
 ) (
@@ -21,6 +23,7 @@ module InstructionCache #(
     invalidate              : input  'cpu    logic              ,
     pc                      : input  'cpu    logic          <32>,
     translate               : input  'cpu    logic              ,
+    frame                   : input  'cpu    logic          <20>,
     next_page               : input  'cpu    logic          <20>,
     instruction             : output 'cpu    logic          <32>,
     instruction_compressed  : output 'cpu    logic              ,
@@ -61,6 +64,10 @@ module InstructionCache #(
     var scrub_row_q            : 'cpu logic<INDEX_BITS>;
 
     var pc_line           : 'cpu logic<32>            ;
+    var physical_pc       : 'cpu logic<32>            ;
+    var translated_pc     : 'cpu logic<32>            ;
+    var virtual_line      : 'cpu logic<32>            ;
+    var translated_line   : 'cpu logic<32>            ;
     var ahead_line        : 'cpu logic<32>            ;
     var desired_ahead     : 'cpu logic                ;
     var next_line         : 'cpu logic<32>            ;
@@ -105,12 +112,19 @@ module InstructionCache #(
         assign memory_request_sequence = request_sequence_q;
     }
 
-    inst addresses: InstructionCacheAddresses ( pc, translate, next_page, pc_line, next_line, ahead_line );
+    // Line addresses for reads and refill requests (registered uses).
+    inst addresses: InstructionCacheAddresses (
+        pc: physical_pc, translate, next_page, pc_line, next_line, ahead_line,
+    );
 
     always_comb {
+        translated_pc = {frame, pc[11:0]};
+        physical_pc   = if translate ? translated_pc : pc;
+        virtual_line    = {pc[31:3], 3'b000};
+        translated_line = {translated_pc[31:3], 3'b000};
         read_address[0] = pc_line;
         // The odd current/successor bank always uses PC's row and tag.
-        read_address[1] = {pc[31:4], 1'b1, 3'd0};
+        read_address[1] = {physical_pc[31:4], 1'b1, 3'd0};
         if pc[3] {
             read_address[0] = next_line;
         }
@@ -127,7 +141,9 @@ module InstructionCache #(
             // Compare the demanded line directly with PC, keeping the
             // successor increment out of the current-hit timing cone.
             current_bank_hit[bank] = read_valid_q[bank] && (read_index_q[bank] == pc[INDEX_BITS + 3:4])
-                && entry[bank][ENTRY_BITS - 1] && (entry[bank][ENTRY_BITS - 2:68] == pc[31:INDEX_BITS + 4]);
+                && entry[bank][ENTRY_BITS - 1]
+                && (if translate ? (entry[bank][ENTRY_BITS - 2:68] == translated_pc[31:INDEX_BITS + 4])
+                    : (entry[bank][ENTRY_BITS - 2:68] == pc[31:INDEX_BITS + 4]));
         }
         current_hit        = current_bank_hit[0];
         next_hit           = current_bank_hit[1];
@@ -139,11 +155,11 @@ module InstructionCache #(
         if pc[3] {
             current_hit        = current_bank_hit[1];
             next_hit           = read_valid_q[0] && entry[0][ENTRY_BITS - 1]
-                && (previous_even_row == pc[31:4]);
+                && (if translate ? (previous_even_row == translated_pc[31:4]) : (previous_even_row == pc[31:4]));
             // The successor of a translated page's last line is in next_page.
             if translate && (&pc[11:4]) {
                 next_hit = read_valid_q[0] && entry[0][ENTRY_BITS - 1]
-                    && ({entry[0][ENTRY_BITS - 2:68], read_index_q[0]} == next_line[31:4]);
+                    && ({entry[0][ENTRY_BITS - 2:68], read_index_q[0]} == {next_page, 8'h00});
             }
             current_settled    = bank_settled[1];
             next_settled       = read_valid_q[0] && (previous_even_index == pc[INDEX_BITS + 3:4]);
@@ -185,13 +201,15 @@ module InstructionCache #(
         // When the demanded line arrives, propose its missing successor on
         // the same edge. Waiting for the synchronous read to observe the fill
         // inserts avoidable bubbles into a cold sequential instruction stream.
-        if fill && (request_address_q == pc_line) && next_settled && !next_hit {
+        if fill && (if translate ? (request_address_q == translated_line) : (request_address_q == virtual_line))
+            && next_settled && !next_hit {
             desired_next = 1'b1;
             miss_request = 1'b1;
         }
         // This speculative read is bounded to PC+16. If PC remains stopped,
         // its completion cannot trigger another request beyond that window.
-        if fill && current_hit && (previous_request_line == pc_line) {
+        if fill && current_hit
+            && (if translate ? (previous_request_line == translated_line) : (previous_request_line == virtual_line)) {
             desired_ahead = 1'b1;
             miss_request  = 1'b1;
         }

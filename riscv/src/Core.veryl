@@ -71,9 +71,11 @@ module Core #(
     debug_counter_data    : output logic<64>,
     debug_x31             : output logic<64>,
     instruction_flush     : output logic    ,
-    /// PC is translated: the line after its page's last line is in
+    /// PC is virtual and translated: the instruction's physical page is
+    /// fetch_frame, and the line after the page's last line is in
     /// fetch_next_page.
     fetch_translate       : output logic    ,
+    fetch_frame           : output logic<20>,
     fetch_next_page       : output logic<20>,
 ) {
     // Strict physical memory retains full architectural PC/trap values while
@@ -94,6 +96,8 @@ module Core #(
         valid          : logic              ,
         access_fault   : logic              ,
         fault_boundary : logic              ,
+        // Sv39: the physical page the instruction was fetched from.
+        frame          : logic<20>          ,
     }
     struct FetchPayload {
         pc             : logic<ADDRESS_BITS>,
@@ -101,6 +105,7 @@ module Core #(
         is_compressed  : logic              ,
         access_fault   : logic              ,
         fault_boundary : logic              ,
+        frame          : logic<20>          ,
     }
     struct DecodePacket {
         pc               : logic<ADDRESS_BITS>,
@@ -115,6 +120,7 @@ module Core #(
         valid            : logic              ,
         access_fault     : logic              ,
         fault_boundary   : logic              ,
+        frame            : logic<20>          ,
     }
     var fetch_line_q             : logic       <ADDRESS_BITS - 3>;
     var fetch_parcel_q           : logic       <2>               ;
@@ -643,7 +649,8 @@ module Core #(
     // the instruction like a fetch fault. A miss is resolved in CM by a walk
     // and a refetch of the same instruction.
     var fetch_virtual_pc: logic<ADDRESS_BITS>;
-    var fetch_frame: logic<20>;
+    var fetch_page_same: logic;
+    var fetch_translation_hit: logic;
     var fd_frame: logic<20>;
     var fd_next_frame: logic<20>;
     var fd_pmp_address: logic<32>;
@@ -1247,6 +1254,13 @@ module Core #(
         var fd_next_perms  : logic<5>        ;
         var fd_noncanonical: logic           ;
         var fetch_walk     : logic           ;
+        var fetch_page_q   : logic<27>       ;
+        var fetch_frame_q  : logic<20>       ;
+        var fetch_next_frame_q: logic<20>    ;
+        var fetch_hit_q    : logic           ;
+        var fetch_consistent  : logic        ;
+        var fetch_consistent_q: logic<2>     ;
+        var itlb_written_q : logic           ;
         var fetch_walk_address: logic<64>    ;
         var walk_page      : logic<27>       ;
         var first_pma_cross_unused : logic   ;
@@ -1327,16 +1341,27 @@ module Core #(
 
         always_comb {
             // Frontend lookup for the I-cache's physical PC and its successor
-            // page. Without a hit the frame is arbitrary; FD rejects it.
+            // page, registered so that the I-cache's tag comparison starts
+            // from a register. The I-cache presents a line pair sampled two
+            // cycles earlier, so a fetch is valid only when the lookup has
+            // matched the current page and the current ITLB for the last
+            // three cycles: a page change or ITLB write costs up to three
+            // cycles, mostly hidden by redirect latency. Without a
+            // translation the packet carries no instruction and FD reports
+            // the miss.
             for entry in 0..2 {
                 fetch_hit[entry] = itlb_valid_q[entry] && (itlb_page_q[entry] == fetch_virtual_pc[38:12]);
                 fetch_next_hit[entry] = itlb_valid_q[entry] && (itlb_previous_q[entry] == fetch_virtual_pc[38:12]);
                 fd_hit[entry] = itlb_valid_q[entry] && (itlb_page_q[entry] == fd_q.pc[38:12]);
                 fd_next_hit[entry] = itlb_valid_q[entry] && (itlb_previous_q[entry] == fd_q.pc[38:12]);
             }
-            fetch_frame = if fetch_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
-            fetch_next_page = if fetch_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
-            fd_frame = if fd_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+            fetch_frame = fetch_frame_q;
+            fetch_next_page = fetch_next_frame_q;
+            fetch_consistent = (fetch_virtual_pc[38:12] == fetch_page_q) && !itlb_written_q;
+            fetch_page_same = fetch_consistent && (&fetch_consistent_q);
+            fetch_translation_hit = fetch_hit_q;
+            // The packet carries the frame it was fetched from.
+            fd_frame = fd_q.frame;
             fd_perms = if fd_hit[1] ? itlb_perms_q[1] : itlb_perms_q[0];
             fd_next_frame = if fd_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
             fd_next_perms = if fd_next_hit[1] ? itlb_perms_q[1] : itlb_perms_q[0];
@@ -1461,6 +1486,12 @@ module Core #(
                 cm_access_size_q = 2'd0;
                 itlb_valid_q     = 2'd0;
                 itlb_victim_q    = 1'b0;
+                fetch_page_q       = 27'd0;
+                fetch_frame_q      = 20'd0;
+                fetch_next_frame_q = 20'd0;
+                fetch_hit_q        = 1'b0;
+                fetch_consistent_q = 2'd0;
+                itlb_written_q     = 1'b0;
                 for entry in 0..2 {
                     itlb_page_q[entry]     = 27'd0;
                     itlb_previous_q[entry] = 27'd0;
@@ -1469,6 +1500,12 @@ module Core #(
                 }
             } else {
                 check_denied_q = !(pma_allowed && sv39_pmp_allowed);
+                fetch_page_q       = fetch_virtual_pc[38:12];
+                fetch_frame_q      = if fetch_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+                fetch_next_frame_q = if fetch_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+                fetch_hit_q        = fetch_hit != 2'd0;
+                fetch_consistent_q = {fetch_consistent_q[0], fetch_consistent};
+                itlb_written_q     = translation_flush;
                 if !backend_wait {
                     cm_translated_q  = ex_translate && !ex_exception;
                     cm_access_size_q = lsu_access_size;
@@ -1500,6 +1537,7 @@ module Core #(
                                 itlb_frame_q[itlb_fill_entry]    = walker_page;
                                 itlb_perms_q[itlb_fill_entry]    = walker_perms;
                                 itlb_victim_q                    = !itlb_fill_entry;
+                                itlb_written_q                   = 1'b1;
                                 state_q                          = TranslationState::Done;
                             }
                         }
@@ -1585,6 +1623,8 @@ module Core #(
         assign sv39_check_write         = 1'b0;
         assign sv39_check_user          = 1'b0;
         assign fetch_frame              = 20'd0;
+        assign fetch_page_same          = 1'b1;
+        assign fetch_translation_hit    = 1'b1;
         assign fetch_next_page          = 20'd0;
         assign fd_frame                 = 20'd0;
         assign fd_next_frame            = 20'd0;
@@ -1742,12 +1782,16 @@ module Core #(
         fetch_packet.access_fault   = STRICT_MEMORY && !fetch_access_allowed
             && !(ENABLE_SV39 && csr_bus.translate_fetch);
         fetch_packet.fault_boundary = fetch_access_boundary;
+        fetch_packet.frame          = fetch_frame;
         // An unmapped starting PC needs no memory response. At a mapped final
         // halfword, wait for the instruction length before deciding whether its
         // second parcel lies outside RAM. The memory returns zero for that line.
         fetch_packet.valid = instr_valid || (STRICT_MEMORY && !fetch_access_allowed && !fetch_access_boundary
             && !(ENABLE_SV39 && csr_bus.translate_fetch));
-        if fetch_packet.access_fault {
+        if ENABLE_SV39 && csr_bus.translate_fetch {
+            fetch_packet.valid = fetch_page_same && (instr_valid || !fetch_translation_hit);
+        }
+        if fetch_packet.access_fault || (ENABLE_SV39 && csr_bus.translate_fetch && !fetch_translation_hit) {
             fetch_packet.raw_instruction = 32'h0000_0013;
             fetch_packet.is_compressed   = 1'b0;
         }
@@ -1756,12 +1800,14 @@ module Core #(
         fetch_q.pc                        = fetch_payload_q.pc;
         fetch_q.access_fault              = fetch_payload_q.access_fault;
         fetch_q.fault_boundary            = fetch_payload_q.fault_boundary;
+        fetch_q.frame                     = fetch_payload_q.frame;
         fetch_q.raw_instruction           = fetch_payload_q.raw_instruction;
         fetch_q.is_compressed             = fetch_payload_q.is_compressed;
         fetch_q.valid                     = fetch_valid_q;
         fetch_lookahead_q.pc              = fetch_lookahead_payload_q.pc;
         fetch_lookahead_q.access_fault    = fetch_lookahead_payload_q.access_fault;
         fetch_lookahead_q.fault_boundary  = fetch_lookahead_payload_q.fault_boundary;
+        fetch_lookahead_q.frame           = fetch_lookahead_payload_q.frame;
         fetch_lookahead_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
         fetch_lookahead_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
         fetch_lookahead_q.valid           = fetch_lookahead_valid_q;
@@ -1796,6 +1842,7 @@ module Core #(
         decode_packet.access_fault = fetch_q.access_fault;
 
         decode_packet.fault_boundary    = fetch_q.fault_boundary;
+        decode_packet.frame             = fetch_q.frame;
         decode_packet.instruction       = fetch_q.raw_instruction;
         decode_packet.raw_instruction   = fetch_q.raw_instruction;
         decode_packet.is_compressed     = fetch_q.is_compressed;
@@ -2304,7 +2351,10 @@ module Core #(
             || translation_fault) && !backend_pending && !redirect_pending_q;
         cm_mret_event      = cm_valid_q && cm_is_mret_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
         cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
-        instruction_flush  = cm_fence_i_event;
+        // FENCE.I (MISC-MEM opcode, bit 4 clear) invalidates the I-cache.
+        // SFENCE.VMA (SYSTEM) shares its serialization only: the I-cache is
+        // physically tagged.
+        instruction_flush  = cm_fence_i_event && !cm_raw_instr_q[4];
         cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event || cm_irq_fence_event
             || interrupt_event || cm_replay_event;
         normal_memory_issue = !backend_pending && ex_valid_q && (ex_is_load_q || ex_is_store_q)
@@ -2567,13 +2617,10 @@ module Core #(
         if EARLY_TAKEN_FETCH && taken_fetch_valid_q {
             fetch_virtual_pc = taken_fetch_pc_q;
         }
+        // A translated PC stays virtual; the I-cache combines the
+        // registered frame with its page offset.
         pc = fetch_virtual_pc;
         fetch_translate = ENABLE_SV39 && csr_bus.translate_fetch;
-        // Only the page frame comes from the ITLB; the page offset is the
-        // virtual PC's.
-        if fetch_translate {
-            pc = {32'd0, fetch_frame, fetch_virtual_pc[11:0]};
-        }
         // The optional board-memory relocation is registered together with
         // the architectural LSU address. It therefore does not put an
         // address-space mux between a pipeline register and every BRAM bank.
@@ -2847,12 +2894,14 @@ module Core #(
                 fetch_payload_q.pc              = fetch_lookahead_payload_q.pc;
                 fetch_payload_q.access_fault    = fetch_lookahead_payload_q.access_fault;
                 fetch_payload_q.fault_boundary  = fetch_lookahead_payload_q.fault_boundary;
+                fetch_payload_q.frame           = fetch_lookahead_payload_q.frame;
                 fetch_payload_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
                 fetch_payload_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
             } else {
                 fetch_payload_q.pc              = fetch_packet.pc;
                 fetch_payload_q.access_fault    = fetch_packet.access_fault;
                 fetch_payload_q.fault_boundary  = fetch_packet.fault_boundary;
+                fetch_payload_q.frame           = fetch_packet.frame;
                 fetch_payload_q.raw_instruction = fetch_packet.raw_instruction;
                 fetch_payload_q.is_compressed   = fetch_packet.is_compressed;
             }
@@ -2863,12 +2912,14 @@ module Core #(
                 fetch_lookahead_payload_q.pc              = fetch_tail_payload_q.pc;
                 fetch_lookahead_payload_q.access_fault    = fetch_tail_payload_q.access_fault;
                 fetch_lookahead_payload_q.fault_boundary  = fetch_tail_payload_q.fault_boundary;
+                fetch_lookahead_payload_q.frame           = fetch_tail_payload_q.frame;
                 fetch_lookahead_payload_q.raw_instruction = fetch_tail_payload_q.raw_instruction;
                 fetch_lookahead_payload_q.is_compressed   = fetch_tail_payload_q.is_compressed;
             } else {
                 fetch_lookahead_payload_q.pc              = fetch_packet.pc;
                 fetch_lookahead_payload_q.access_fault    = fetch_packet.access_fault;
                 fetch_lookahead_payload_q.fault_boundary  = fetch_packet.fault_boundary;
+                fetch_lookahead_payload_q.frame           = fetch_packet.frame;
                 fetch_lookahead_payload_q.raw_instruction = fetch_packet.raw_instruction;
                 fetch_lookahead_payload_q.is_compressed   = fetch_packet.is_compressed;
             }
@@ -2877,6 +2928,7 @@ module Core #(
             fetch_tail_payload_q.pc              = fetch_packet.pc;
             fetch_tail_payload_q.access_fault    = fetch_packet.access_fault;
             fetch_tail_payload_q.fault_boundary  = fetch_packet.fault_boundary;
+            fetch_tail_payload_q.frame           = fetch_packet.frame;
             fetch_tail_payload_q.raw_instruction = fetch_packet.raw_instruction;
             fetch_tail_payload_q.is_compressed   = fetch_packet.is_compressed;
         }
@@ -2977,6 +3029,7 @@ module Core #(
             fd_q.valid             = 1'b0;
             fd_q.access_fault      = 1'b0;
             fd_q.fault_boundary    = 1'b0;
+            fd_q.frame             = 20'd0;
             rx_fetch_fault_q       = 1'b0;
             rx_itlb_miss_q         = 1'b0;
             rx_fetch_page_fault_q  = 1'b0;

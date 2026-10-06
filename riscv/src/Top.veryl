@@ -35,6 +35,7 @@ module Top (
     var unused_instruction_flush: 'cpu logic;
     var unused_fetch_translate: 'cpu logic;
     var unused_fetch_next_page: 'cpu logic<20>;
+    var unused_fetch_frame: 'cpu logic<20>;
     var unused_store_retire_ready: 'cpu logic;
 
     inst core: Core #(
@@ -77,6 +78,7 @@ module Top (
         debug_x31             : x31                         ,
         instruction_flush     : unused_instruction_flush    ,
         fetch_translate       : unused_fetch_translate      ,
+        fetch_frame           : unused_fetch_frame          ,
         fetch_next_page       : unused_fetch_next_page      ,
     );
 

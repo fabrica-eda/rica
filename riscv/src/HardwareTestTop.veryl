@@ -137,6 +137,7 @@ module HardwareTestTop #(
     var instruction_flush             : 'cpu    logic;
     var fetch_translate               : 'cpu    logic;
     var fetch_next_page               : 'cpu    logic<20>;
+    var fetch_frame                   : 'cpu    logic<20>;
     var memory_instr_request_sequence : 'memory logic;
     var memory_instr_response_sequence: 'memory logic;
     if ICACHE_INDEX_BITS == 0 :g_buffer {
@@ -166,6 +167,7 @@ module HardwareTestTop #(
             invalidate              : instruction_flush             ,
             pc                      : cpu_pc[31:0]                  ,
             translate               : fetch_translate               ,
+            frame                   : fetch_frame                   ,
             next_page               : fetch_next_page               ,
             instruction             : instruction                   ,
             instruction_compressed  : instruction_compressed        ,
@@ -340,6 +342,7 @@ module HardwareTestTop #(
         debug_x31             : debug_x31                  ,
         instruction_flush     : instruction_flush          ,
         fetch_translate       : fetch_translate            ,
+        fetch_frame           : fetch_frame                ,
         fetch_next_page       : fetch_next_page            ,
     );
 

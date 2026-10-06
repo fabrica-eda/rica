@@ -96,64 +96,73 @@ module PageTableWalker (
         }
     }
 
+    // Walk control. The payload registers below have explicit enables and
+    // no reset: they are read only with `done` or while busy.
+    var load_root  : logic;
+    var descend    : logic;
+    var finish     : logic;
+    var fault_page : logic;
+    var fault_access: logic;
+    always_comb {
+        load_root = (state_q == State::Idle) && start;
+        descend = 1'b0;
+        finish = 1'b0;
+        fault_page = 1'b0;
+        fault_access = 1'b0;
+        if state_q == State::Issue && request_denied {
+            finish = 1'b1;
+            fault_access = 1'b1;
+        }
+        if state_q == State::Wait && response_valid {
+            if !pte_valid || pte_reserved || (!pte_leaf && (level_q == 2'd0))
+                || (pte_leaf && (pte_misaligned || !response_data[6])) {
+                finish = 1'b1;
+                fault_page = 1'b1;
+            } else if pte_wide {
+                finish = 1'b1;
+                fault_access = 1'b1;
+            } else if pte_leaf {
+                finish = 1'b1;
+            } else {
+                descend = 1'b1;
+            }
+        }
+    }
+
     always_ff (clk, rst_n) {
         if_reset {
-            state_q         = State::Idle;
-            level_q         = 2'd0;
-            table_q         = 20'd0;
-            virtual_page_q  = 27'd0;
-            done_q          = 1'b0;
-            page_fault_q    = 1'b0;
-            access_fault_q  = 1'b0;
-            physical_page_q = 20'd0;
-            permissions_q   = 5'd0;
+            state_q = State::Idle;
+            done_q  = 1'b0;
         } else {
-            done_q = 1'b0;
-            case state_q {
-                State::Idle: if start {
-                    state_q        = State::Check;
-                    level_q        = 2'd2;
-                    table_q        = root;
-                    virtual_page_q = virtual_page;
-                    page_fault_q   = 1'b0;
-                    access_fault_q = 1'b0;
-                }
-                State::Check: state_q = State::Issue;
-                State::Issue: {
-                    if request_denied {
-                        state_q        = State::Idle;
-                        done_q         = 1'b1;
-                        access_fault_q = 1'b1;
-                    } else {
-                        state_q = State::Wait;
-                    }
-                }
-                State::Wait: if response_valid {
-                    if !pte_valid || pte_reserved || (!pte_leaf && (level_q == 2'd0))
-                        || (pte_leaf && (pte_misaligned || !response_data[6])) {
-                        state_q      = State::Idle;
-                        done_q       = 1'b1;
-                        page_fault_q = 1'b1;
-                    } else if pte_wide {
-                        state_q        = State::Idle;
-                        done_q         = 1'b1;
-                        access_fault_q = 1'b1;
-                    } else if pte_leaf {
-                        state_q         = State::Idle;
-                        done_q          = 1'b1;
-                        physical_page_q = leaf_page;
-                        permissions_q   = {
-                            response_data[7], response_data[4], response_data[3], response_data[2],
-                            response_data[1]
-                        };
-                    } else {
-                        state_q = State::Check;
-                        level_q = level_q - 2'd1;
-                        table_q = response_data[29:10];
-                    }
-                }
-                default: state_q = State::Idle;
+            done_q = finish;
+            if finish {
+                state_q = State::Idle;
+            } else if load_root || descend {
+                state_q = State::Check;
+            } else if state_q == State::Check {
+                state_q = State::Issue;
+            } else if state_q == State::Issue {
+                state_q = State::Wait;
             }
+        }
+    }
+
+    always_ff (clk) {
+        if load_root {
+            level_q        = 2'd2;
+            table_q        = root;
+            virtual_page_q = virtual_page;
+        } else if descend {
+            level_q = level_q - 2'd1;
+            table_q = response_data[29:10];
+        }
+        if finish {
+            page_fault_q    = fault_page;
+            access_fault_q  = fault_access;
+            physical_page_q = leaf_page;
+            permissions_q   = {
+                response_data[7], response_data[4], response_data[3], response_data[2], response_data[1]
+            };
         }
     }
 }

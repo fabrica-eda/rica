@@ -44,9 +44,30 @@ def main():
     )
     counts = audit(dump, allow_a=True)
     (out / "kernel-user.disasm").write_text(dump)
+    # The S-kernel over Sv39: same toolchain, its own linker script and
+    # target directory (different RUSTFLAGS).
+    supervisor_flags = [flag.replace("-Tuser.ld", "-Tsupervisor.ld") for flag in flags]
+    supervisor_command = [
+        "rustup", "run", TOOLCHAIN, "cargo", "build", "--release", "--locked",
+        "--offline", "-Z", "build-std=core", "--target",
+        "riscv64imac-unknown-none-elf", "--target-dir", str(out / "target-supervisor"),
+        "--bin", "rica-supervisor",
+    ]
+    subprocess.run(supervisor_command, cwd=HERE, env={
+        **env, "CARGO_ENCODED_RUSTFLAGS": "\x1f".join(supervisor_flags),
+    }, check=True)
+    supervisor_elf = out / "kernel-supervisor.elf"
+    shutil.copy2(out / "target-supervisor/riscv64imac-unknown-none-elf/release/rica-supervisor",
+                 supervisor_elf)
+    supervisor_dump = subprocess.check_output(
+        [OBJDUMP, "-d", "-M", "no-aliases", "--mattr=+a", supervisor_elf], text=True
+    )
+    supervisor_counts = audit(supervisor_dump, allow_a=True, allow_s=True)
+    (out / "kernel-supervisor.disasm").write_text(supervisor_dump)
     inputs = [HERE / name for name in (
         "src/user.rs", "src/user_entry.S", "user.ld", "build-user.py", "build.py",
         "Cargo.toml", "Cargo.lock", ".cargo/config.toml",
+        "src/supervisor.rs", "src/supervisor_entry.S", "supervisor.ld",
     )]
     diagnostics = {}
     assembler = OBJDUMP.with_name("llvm-mc")
@@ -87,6 +108,13 @@ def main():
         "elf": str(elf.relative_to(ROOT)),
         "sha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
         "instruction_counts": counts,
+        "supervisor": {
+            "command": supervisor_command,
+            "rustflags": supervisor_flags,
+            "elf": str(supervisor_elf.relative_to(ROOT)),
+            "sha256": hashlib.sha256(supervisor_elf.read_bytes()).hexdigest(),
+            "instruction_counts": supervisor_counts,
+        },
         "inputs": {
             str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
             for p in inputs
@@ -94,6 +122,7 @@ def main():
     }
     (out / "build.json").write_text(json.dumps(record, indent=2) + "\n")
     print(record["elf"], record["sha256"])
+    print(record["supervisor"]["elf"], record["supervisor"]["sha256"])
 
 
 if __name__ == "__main__":

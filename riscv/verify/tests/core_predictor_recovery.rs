@@ -705,8 +705,9 @@ fn invalid_fetch_refreshes_masked_payload_without_issuing_or_advancing() {
             "invalid payload became visible"
         );
         assert_eq!(
-            // Packed tail: compressed, valid, access_fault, fault_boundary.
-            (driver.value("fetch_q") >> 4) as u32,
+            // Packed tail: compressed, valid, access_fault, fault_boundary,
+            // frame (20 bits).
+            (driver.value("fetch_q") >> 24) as u32,
             instruction,
             "masked payload did not refresh independently of instr_valid",
         );
@@ -730,7 +731,7 @@ fn invalid_fetch_refreshes_masked_payload_without_issuing_or_advancing() {
         "valid retry did not advance exactly once"
     );
     assert_eq!(driver.value("fetch_valid_q"), 1);
-    assert_eq!((driver.value("fetch_q") >> 4) as u32, instruction);
+    assert_eq!((driver.value("fetch_q") >> 24) as u32, instruction);
 }
 
 #[test]
