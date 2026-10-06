@@ -17,11 +17,11 @@ struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa6
 struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
 struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
 struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "824bfa602bd1a3df5028a8c00a6727cb16e3657b" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "c0be1f445face45b5548c3de514fa7df73910e24" }
-texo-model = { git = "https://github.com/fabrica-eda/texo.git", rev = "c0be1f445face45b5548c3de514fa7df73910e24" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "c0be1f445face45b5548c3de514fa7df73910e24" }
-texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo.git", rev = "c0be1f445face45b5548c3de514fa7df73910e24" }
-texo-timing = { git = "https://github.com/fabrica-eda/texo.git", rev = "c0be1f445face45b5548c3de514fa7df73910e24" }
+texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "fadec1cab213f4fcb17a50f44301dcc750fe67e5" }
+texo-model = { git = "https://github.com/fabrica-eda/texo.git", rev = "fadec1cab213f4fcb17a50f44301dcc750fe67e5" }
+texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "fadec1cab213f4fcb17a50f44301dcc750fe67e5" }
+texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo.git", rev = "fadec1cab213f4fcb17a50f44301dcc750fe67e5" }
+texo-timing = { git = "https://github.com/fabrica-eda/texo.git", rev = "fadec1cab213f4fcb17a50f44301dcc750fe67e5" }
 
 [patch.crates-io]
 # Keep constant-folding metadata consistent with fitted constant storage.

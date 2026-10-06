@@ -3336,7 +3336,7 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 [[package]]
 name = "texo-cli"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "ciborium",
  "clap",
@@ -3362,7 +3362,7 @@ dependencies = [
 [[package]]
 name = "texo-flow"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3378,7 +3378,7 @@ dependencies = [
 [[package]]
 name = "texo-model"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "serde",
 ]
@@ -3386,7 +3386,7 @@ dependencies = [
 [[package]]
 name = "texo-pnr"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "libm",
  "rayon",
@@ -3397,7 +3397,7 @@ dependencies = [
 [[package]]
 name = "texo-struo"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "celox",
  "struo-celox",
@@ -3409,7 +3409,7 @@ dependencies = [
 [[package]]
 name = "texo-target-ecp5"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "postcard",
  "serde",
@@ -3421,7 +3421,7 @@ dependencies = [
 [[package]]
 name = "texo-timing"
 version = "0.1.7"
-source = "git+https://github.com/fabrica-eda/texo.git?rev=c0be1f445face45b5548c3de514fa7df73910e24#c0be1f445face45b5548c3de514fa7df73910e24"
+source = "git+https://github.com/fabrica-eda/texo.git?rev=fadec1cab213f4fcb17a50f44301dcc750fe67e5#fadec1cab213f4fcb17a50f44301dcc750fe67e5"
 dependencies = [
  "texo-model",
  "texo-pnr",
