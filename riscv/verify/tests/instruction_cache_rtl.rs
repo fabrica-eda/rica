@@ -95,6 +95,19 @@ impl Driver {
         self.simulator.modify(|io| io.set(pc, value)).unwrap();
     }
 
+    /// Translated PC: the line after the page's last line is in `page`.
+    fn translate(&mut self, page: Option<u32>) {
+        let translate = self.simulator.signal("translate");
+        let next_page = self.simulator.signal("next_page");
+        self.simulator
+            .modify(|io| {
+                io.set(translate, u8::from(page.is_some()));
+                // A 20-bit port takes at most three bytes; test frames fit 16 bits.
+                io.set(next_page, u16::try_from(page.unwrap_or(0)).unwrap());
+            })
+            .unwrap();
+    }
+
     fn invalidate(&mut self, value: bool) {
         let invalidate = self.simulator.signal("invalidate");
         self.simulator
@@ -185,6 +198,33 @@ fn both_cross_line_orders_and_address_wrap_produce_the_right_word() {
         assert_eq!(driver.fetch(pc), 0xa55a_00b3);
         assert_eq!(driver.value("instruction_compressed"), 0);
     }
+}
+
+#[test]
+fn translated_page_crossing_reads_the_next_page_frame_and_then_hits() {
+    let memory = [
+        (0x1ff8, 0x00b3_0001_0001_0001),
+        (0x2000, 0x0001_0001_0001_a5a5),
+        (0x5000, 0x0001_0001_0001_a55a),
+    ];
+    let mut physical = Driver::new(7, memory);
+    assert_eq!(physical.fetch(0x1ffe), 0xa5a5_00b3);
+
+    let mut driver = Driver::new(7, memory);
+    driver.translate(Some(0x5));
+    assert_eq!(driver.fetch(0x1ffe), 0xa55a_00b3);
+    assert!(driver.requests.iter().all(|r| r.0 != 0x2000));
+    // Both lines are now cached: a held PC hits without requesting again.
+    for _ in 0..8 {
+        driver.step();
+    }
+    let requests = driver.requests.len();
+    for _ in 0..16 {
+        assert!(driver.valid());
+        assert_eq!(driver.value("instruction") as u32, 0xa55a_00b3);
+        driver.step();
+    }
+    assert_eq!(driver.requests.len(), requests, "{:?}", driver.requests);
 }
 
 #[test]

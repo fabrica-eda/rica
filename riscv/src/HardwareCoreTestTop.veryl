@@ -75,6 +75,8 @@ module HardwareCoreTestTop #(
     assign cpu_rst_n = rst_n && run;
 
     var instruction_flush             : 'cpu    logic;
+    var fetch_translate               : 'cpu    logic;
+    var fetch_next_page               : 'cpu    logic<20>;
     var memory_instr_request_sequence : 'memory logic;
     var memory_instr_response_sequence: 'memory logic;
     if ICACHE_INDEX_BITS == 0 :g_buffer {
@@ -100,6 +102,8 @@ module HardwareCoreTestTop #(
             rst_n                   : cpu_rst_n                     ,
             invalidate              : instruction_flush             ,
             pc                      : pc[31:0]                      ,
+            translate               : fetch_translate               ,
+            next_page               : fetch_next_page               ,
             instruction             : instruction                   ,
             instruction_compressed  : instruction_compressed        ,
             instruction_valid       : instruction_valid             ,
@@ -256,5 +260,7 @@ module HardwareCoreTestTop #(
         commit_mem_wmask      : commit_mem_wmask           ,
         debug_x31             : debug_x31                  ,
         instruction_flush     : instruction_flush          ,
+        fetch_translate       : fetch_translate            ,
+        fetch_next_page       : fetch_next_page            ,
     );
 }

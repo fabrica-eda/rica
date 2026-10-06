@@ -8,6 +8,11 @@
 /// A redirect may reuse or ignore its fill; FENCE.I discards it and scrubs all
 /// valid bits. Read/write collisions are masked through both read stages, so execution
 /// never depends on the FPGA's read-during-write value.
+///
+/// PC is physical. With `translate`, the line after the last line of PC's
+/// 4 KiB page is in the page `next_page` instead of the following physical
+/// page, so a translated 32-bit instruction may cross into a page mapped
+/// elsewhere.
 module InstructionCache #(
     param INDEX_BITS: u32 = 7,
 ) (
@@ -15,6 +20,8 @@ module InstructionCache #(
     rst_n                   : input  'cpu    reset_async_low    ,
     invalidate              : input  'cpu    logic              ,
     pc                      : input  'cpu    logic          <32>,
+    translate               : input  'cpu    logic              ,
+    next_page               : input  'cpu    logic          <20>,
     instruction             : output 'cpu    logic          <32>,
     instruction_compressed  : output 'cpu    logic              ,
     instruction_valid       : output 'cpu    logic              ,
@@ -98,7 +105,7 @@ module InstructionCache #(
         assign memory_request_sequence = request_sequence_q;
     }
 
-    inst addresses: InstructionCacheAddresses ( pc, pc_line, next_line, ahead_line );
+    inst addresses: InstructionCacheAddresses ( pc, translate, next_page, pc_line, next_line, ahead_line );
 
     always_comb {
         read_address[0] = pc_line;
@@ -133,6 +140,11 @@ module InstructionCache #(
             current_hit        = current_bank_hit[1];
             next_hit           = read_valid_q[0] && entry[0][ENTRY_BITS - 1]
                 && (previous_even_row == pc[31:4]);
+            // The successor of a translated page's last line is in next_page.
+            if translate && (&pc[11:4]) {
+                next_hit = read_valid_q[0] && entry[0][ENTRY_BITS - 1]
+                    && ({entry[0][ENTRY_BITS - 2:68], read_index_q[0]} == next_line[31:4]);
+            }
             current_settled    = bank_settled[1];
             next_settled       = read_valid_q[0] && (previous_even_index == pc[INDEX_BITS + 3:4]);
             current_data       = entry[1][63:0];
@@ -314,6 +326,8 @@ module InstructionCache #(
 /// Each bit toggles exactly when every less significant line bit is one.
 module InstructionCacheAddresses (
     pc        : input  logic<32>,
+    translate : input  logic    ,
+    next_page : input  logic<20>,
     pc_line   : output logic<32>,
     next_line : output logic<32>,
     ahead_line: output logic<32>,
@@ -379,5 +393,13 @@ module InstructionCacheAddresses (
         ahead_line[29]  = pc[29] ^ (&pc[28:4]);
         ahead_line[30]  = pc[30] ^ (&pc[29:4]);
         ahead_line[31]  = pc[31] ^ (&pc[30:4]);
+        // A translated page is followed by next_page, not by its physical
+        // successor.
+        if translate && (&pc[11:3]) {
+            next_line[31:12] = next_page;
+        }
+        if translate && (&pc[11:4]) {
+            ahead_line[31:12] = next_page;
+        }
     }
 }

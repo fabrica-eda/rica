@@ -58,6 +58,7 @@ def main():
         (tests / "rv64i-subset/system.S", tests / "rv64i-subset/link.ld"),
         (tests / "rv64-s/supervisor.S", tests / "rv64i-subset/link.ld"),
         (tests / "rv64-s/sv39-data.S", tests / "rv64-s/link-ram.ld"),
+        (tests / "rv64-s/sv39-fetch.S", tests / "rv64-s/link-ram.ld"),
     ):
         obj = out / (source.stem + ".o")
         diagnostic = out / (source.stem + ".elf")

@@ -1,7 +1,8 @@
 .include "test_macros.inc"
-# Sv39 data translation on the whole core (instruction fetch is not yet
-# translated, so S/U code runs at its physical address). M builds page
-# tables in RAM, then S, U and M with MPRV access data through them. Each
+# Sv39 data translation on the whole core. M builds page tables in RAM, then
+# S, U and M with MPRV access data through them. S code runs at its physical
+# address through a 1 GiB identity leaf; U code runs through a U alias of the
+# same memory, USER_ALIAS above it. Each
 # trap is checked against an expectation (cause, xEPC, handler, xTVAL = the
 # virtual address in s1) as in supervisor.S. A failure reports
 # (step << 1) | 1; failures in S or U reach M through EBREAK first.
@@ -23,6 +24,7 @@
 .equ PAGE_B, 0x80031000
 .equ SATP,   (8 << 60) | (ROOT >> 12)
 .equ SATP2,  (8 << 60) | (ROOT2 >> 12)
+.equ USER_ALIAS, 0x40000000
 
 .equ MAGIC_A0, 0x0807060504030201
 .equ MAGIC_A1, 0x100f0e0d0c0b0a09
@@ -77,8 +79,11 @@
     mret
 .endm
 
+# S-mode: enter U at the U alias of target.
 .macro SRET_TO_USER target
     la t0, \target
+    li t1, USER_ALIAS
+    add t0, t0, t1
     csrw sepc, t0
     li t0, 0x100
     csrc sstatus, t0
@@ -88,6 +93,17 @@
 # Return to M from S or U.
 .macro TO_M
     EXPECT 3, 97f, 96f, 3
+97: ebreak
+    j fail
+96:
+.endm
+
+# Return to M from U code running at the U alias; M resumes at the
+# physical address.
+.macro USER_TO_M
+    EXPECT 3, 97f, 96f, 3
+    li t0, USER_ALIAS
+    sub s8, s8, t0
 97: ebreak
     j fail
 96:
@@ -151,9 +167,11 @@ _start:
     PTE L1, 2, 0x80001, PTE_RWAD                         # misaligned 2 MiB
     # W without R above level 0; as a pointer it would reach ROOT2's leaf.
     PTE L1, 3, (ROOT2 >> 12), PTE_V | PTE_W | PTE_A | PTE_D
-    PTE ROOT, 2, 0x80000, PTE_RWAD                       # 1 GiB identity
+    PTE ROOT, 2, 0x80000, PTE_RWAD | PTE_X               # 1 GiB identity
+    PTE ROOT, 3, 0x80000, PTE_RWAD | PTE_X | PTE_U       # U alias of it
     PTE ROOT, 4, 0x90000, PTE_V                          # table with no memory
     PTE ROOT2, 0, 0x80000, PTE_RWAD                      # 1 GiB at RAM base
+    PTE ROOT2, 2, 0x80000, PTE_RWAD | PTE_X              # code, as in ROOT
 
     # 1: SATP holds Sv39 and the root page; other modes, a PPN beyond 32-bit
     # physical space, and ASID bits do not change it.
@@ -282,8 +300,8 @@ t5_supervisor:
 t5_user:
     LOAD_IS 0x3000, MAGIC_B
     li s1, 0x1000
-    TRAPS 13, 1, 1, ld t0, 0(s1)
-    TO_M
+    TRAPS 13, 0, 1, ld t0, 0(s1)
+    USER_TO_M
 
     # 6: access faults: a leaf PPN beyond 32 bits, a leaf or a PTE without
     # memory, and PMP denying the final access or a PTE read.

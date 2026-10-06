@@ -71,6 +71,10 @@ module Core #(
     debug_counter_data    : output logic<64>,
     debug_x31             : output logic<64>,
     instruction_flush     : output logic    ,
+    /// PC is translated: the line after its page's last line is in
+    /// fetch_next_page.
+    fetch_translate       : output logic    ,
+    fetch_next_page       : output logic<20>,
 ) {
     // Strict physical memory retains full architectural PC/trap values while
     // admitting execution only in the platform RAM/reset regions. The predictor
@@ -633,6 +637,37 @@ module Core #(
     var sv39_check_write: logic;
     var sv39_check_user: logic;
     var sv39_pmp_allowed: logic;
+    // Sv39 instruction translation. The frontend looks the fetch VA up in a
+    // two-entry ITLB for the I-cache's physical PC; FD repeats the lookup for
+    // its instruction and records a miss or a page fault, which travel with
+    // the instruction like a fetch fault. A miss is resolved in CM by a walk
+    // and a refetch of the same instruction.
+    var fetch_virtual_pc: logic<ADDRESS_BITS>;
+    var fetch_frame: logic<20>;
+    var fd_frame: logic<20>;
+    var fd_next_frame: logic<20>;
+    var fd_pmp_address: logic<32>;
+    var fd_translated_straddle: logic;
+    var fd_itlb_miss: logic;
+    var fd_fetch_page_fault: logic;
+    var fd_fetch_second: logic;
+    var rx_itlb_miss_q: logic;
+    var rx_fetch_page_fault_q: logic;
+    var rx_fetch_second_q: logic;
+    var rx_straddle_q: logic;
+    var rx_next_frame_q: logic<20>;
+    var rx_first_pma_allowed: logic;
+    var rx_second_pma_allowed: logic;
+    var rx_second_pmp_allowed: logic;
+    var rx_translation_fault: logic;
+    var ex_itlb_miss_q: logic;
+    var ex_fetch_page_fault_q: logic;
+    var ex_fetch_second_q: logic;
+    var ex_physical_fetch_fault_q: logic;
+    var ex_second_access_fault_q: logic;
+    var cm_itlb_miss_q: logic;
+    var cm_fetch_second_q: logic;
+    var cm_replay_event: logic;
     var atomic_fault_raw: logic;
     var atomic_fault: logic;
     var atomic_cause: logic<4>;
@@ -1018,8 +1053,11 @@ module Core #(
             clk, rst_n, decoded_config, nonempty: range_nonempty,
             pmp_config: csr_bus.pmp_config, pmp_address: csr_bus.pmp_address, lower, upper,
         );
+        // A translated instruction crossing pages is checked here only for
+        // its first parcel; RX checks the second parcel's physical page.
         inst fetch_end: PmpFetchAccessEnd (
-            address: fd_q.pc, full_instruction: fd_q.raw_instruction[1:0] == 2'b11,
+            address: {32'd0, fd_pmp_address},
+            full_instruction: (fd_q.raw_instruction[1:0] == 2'b11) && !fd_translated_straddle,
             last: pmp_fetch_last_next, first_last: pmp_fetch_first_last_next,
         );
         if (PMP_DATA_STAGES == 2) && STRICT_MEMORY :g_offset_end {
@@ -1104,8 +1142,19 @@ module Core #(
                 pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
                 allowed: sv39_pmp_allowed, first_parcel_allowed: sv39_first_unused,
             );
+            // Second parcel of a translated instruction crossing pages: the
+            // first halfword of the next physical page.
+            var second_first_unused: logic;
+            inst second_parcel_check: PmpPermissionDecodedBounds #(CHECK_FIRST_PARCEL: 0) (
+                address: {32'd0, rx_next_frame_q, 12'h000}, last: {1'b0, rx_next_frame_q, 12'h001}, first_last: 33'd0,
+                user_access: csr_bus.below_machine,
+                read_access: 1'b0, write_access: 1'b0, execute_access: 1'b1,
+                pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
+                allowed: rx_second_pmp_allowed, first_parcel_allowed: second_first_unused,
+            );
         } else :g_no_sv39_pmp {
             assign sv39_pmp_allowed = 1'b1;
+            assign rx_second_pmp_allowed = 1'b1;
         }
         // The issue path selects between two registered results in its
         // existing permission LUT.
@@ -1121,6 +1170,7 @@ module Core #(
         assign pmp_fetch_allowed = 1'b1;
         assign pmp_data_allowed = 1'b1;
         assign sv39_pmp_allowed = 1'b1;
+        assign rx_second_pmp_allowed = 1'b1;
         assign pmp_data_comb_allowed = 1'b1;
         assign pmp_none_active = 1'b1;
         assign dpc_entry_hit = 1'b0;
@@ -1180,6 +1230,29 @@ module Core #(
         var pma_cross_unused: logic          ;
         var pma_fault_address_unused: logic<64>;
         var restart        : logic           ;
+        // ITLB: two entries, each with its page minus one so that a lookup
+        // of a page's successor is an equality comparison.
+        var itlb_valid_q   : logic<2>        ;
+        var itlb_page_q    : logic<27>    [2];
+        var itlb_previous_q: logic<27>    [2];
+        var itlb_frame_q   : logic<20>    [2];
+        var itlb_perms_q   : logic<5>     [2];
+        var itlb_victim_q  : logic           ;
+        var itlb_fill_entry: logic           ;
+        var fetch_hit      : logic<2>        ;
+        var fetch_next_hit : logic<2>        ;
+        var fd_hit         : logic<2>        ;
+        var fd_next_hit    : logic<2>        ;
+        var fd_perms       : logic<5>        ;
+        var fd_next_perms  : logic<5>        ;
+        var fd_noncanonical: logic           ;
+        var fetch_walk     : logic           ;
+        var fetch_walk_address: logic<64>    ;
+        var walk_page      : logic<27>       ;
+        var first_pma_cross_unused : logic   ;
+        var first_pma_fault_unused : logic<64>;
+        var second_pma_cross_unused: logic   ;
+        var second_pma_fault_unused: logic<64>;
 
         // Leaf permissions {D, U, X, W, R} against the access and the current
         // effective privilege, SUM and MXR. Svade: a store needs D set.
@@ -1200,10 +1273,35 @@ module Core #(
             return denied;
         }
 
+        // Fetch needs X, and U set exactly when fetching in U.
+        function execute_denied (
+            perms: input logic<5>,
+            user : input logic   ,
+        ) -> logic {
+            return !perms[2] || (perms[3] != user);
+        }
+
+        inst first_parcel_pma: PhysicalAccessCheck (
+            address      : {32'd0, rx_pmp_address_q}                     ,
+            size         : if rx_is_compressed_q || rx_straddle_q ? 2'd1 : 2'd2,
+            instruction  : 1'b1                                          ,
+            allowed      : rx_first_pma_allowed                          ,
+            crosses_bound: first_pma_cross_unused                        ,
+            fault_address: first_pma_fault_unused                        ,
+        );
+        inst second_parcel_pma: PhysicalAccessCheck (
+            address      : {32'd0, rx_next_frame_q, 12'h000},
+            size         : 2'd1                             ,
+            instruction  : 1'b1                             ,
+            allowed      : rx_second_pma_allowed            ,
+            crosses_bound: second_pma_cross_unused          ,
+            fault_address: second_pma_fault_unused          ,
+        );
+
         inst walker: PageTableWalker (
             clk, rst_n,
             start         : walker_start            ,
-            virtual_page  : virtual_address[38:12]  ,
+            virtual_page  : walk_page               ,
             root          : csr_bus.translation_root,
             request_address: walker_address         ,
             request_denied: check_denied_q          ,
@@ -1228,6 +1326,63 @@ module Core #(
         );
 
         always_comb {
+            // Frontend lookup for the I-cache's physical PC and its successor
+            // page. Without a hit the frame is arbitrary; FD rejects it.
+            for entry in 0..2 {
+                fetch_hit[entry] = itlb_valid_q[entry] && (itlb_page_q[entry] == fetch_virtual_pc[38:12]);
+                fetch_next_hit[entry] = itlb_valid_q[entry] && (itlb_previous_q[entry] == fetch_virtual_pc[38:12]);
+                fd_hit[entry] = itlb_valid_q[entry] && (itlb_page_q[entry] == fd_q.pc[38:12]);
+                fd_next_hit[entry] = itlb_valid_q[entry] && (itlb_previous_q[entry] == fd_q.pc[38:12]);
+            }
+            fetch_frame = if fetch_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+            fetch_next_page = if fetch_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+            fd_frame = if fd_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+            fd_perms = if fd_hit[1] ? itlb_perms_q[1] : itlb_perms_q[0];
+            fd_next_frame = if fd_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
+            fd_next_perms = if fd_next_hit[1] ? itlb_perms_q[1] : itlb_perms_q[0];
+            fd_pmp_address = fd_q.pc[31:0];
+            if csr_bus.translate_fetch { fd_pmp_address = {fd_frame, fd_q.pc[11:0]}; }
+
+            // FD's instruction: a miss or page fault on its first parcel, or,
+            // crossing pages, on its second parcel.
+            fd_noncanonical = fd_q.pc[63:39] != {fd_q.pc[38] repeat 25};
+            fd_translated_straddle = csr_bus.translate_fetch && !fd_q.is_compressed && (fd_q.pc[11:1] == 11'h7ff);
+            fd_itlb_miss = 1'b0;
+            fd_fetch_page_fault = 1'b0;
+            fd_fetch_second = 1'b0;
+            if csr_bus.translate_fetch {
+                if fd_noncanonical {
+                    fd_fetch_page_fault = 1'b1;
+                } else if fd_hit == 2'd0 {
+                    fd_itlb_miss = 1'b1;
+                } else if execute_denied(fd_perms, csr_bus.fetch_user) {
+                    fd_fetch_page_fault = 1'b1;
+                } else if fd_translated_straddle {
+                    fd_fetch_second = 1'b1;
+                    // The page after the last positive page is not canonical.
+                    if fd_q.pc[38:12] == 27'h3ffffff {
+                        fd_fetch_page_fault = 1'b1;
+                    } else if fd_next_hit == 2'd0 {
+                        fd_itlb_miss = 1'b1;
+                    } else if execute_denied(fd_next_perms, csr_bus.fetch_user) {
+                        fd_fetch_page_fault = 1'b1;
+                    }
+                }
+            }
+            rx_translation_fault = csr_bus.translate_fetch && rx_valid_q
+                && (rx_itlb_miss_q || rx_fetch_page_fault_q || !rx_first_pma_allowed
+                    || (rx_straddle_q && !(rx_second_pma_allowed && rx_second_pmp_allowed)));
+
+            // A CM walk for an ITLB miss translates the instruction's first
+            // or second parcel.
+            fetch_walk = cm_valid_q && cm_itlb_miss_q;
+            fetch_walk_address = cm_pc_q;
+            if cm_fetch_second_q { fetch_walk_address = cm_pc_q + 64'd2; }
+            walk_page = if fetch_walk ? fetch_walk_address[38:12] : cm_lsu_address_q[38:12];
+            // Round-robin replacement: a fill never evicts the entry filled
+            // just before it, so an instruction's two pages coexist.
+            itlb_fill_entry = itlb_victim_q;
+
             virtual_address = cm_lsu_address_q;
             // AMOs and SC are stores for permissions and causes; LR is a load.
             store_access = cm_is_store_q;
@@ -1245,8 +1400,8 @@ module Core #(
             walk_denied = permission_denied(walker_perms, store_access, csr_bus.data_user,
                 csr_bus.supervisor_user_memory, csr_bus.make_executable_readable);
             restart = !backend_wait || redirect_discards_cm;
-            walker_start = (state_q == TranslationState::Idle) && cm_valid_q && cm_translated_q && !restart
-                && !noncanonical && !crosses_page && !tlb_hit;
+            walker_start = (state_q == TranslationState::Idle) && !restart
+                && ((cm_valid_q && cm_translated_q && !noncanonical && !crosses_page && !tlb_hit) || fetch_walk);
             walker_response = (if SPLIT_MEMORY_RESPONSES ? data_load_response_sequence : data_response_sequence)
                 == data_request_sequence_q;
             physical_address = {physical_q, virtual_address[11:0]};
@@ -1268,7 +1423,7 @@ module Core #(
 
             walker_issue     = walker_request;
             walker_owns_port = walker_busy;
-            port_override    = cm_valid_q && cm_translated_q;
+            port_override    = cm_valid_q && (cm_translated_q || cm_itlb_miss_q);
             port_address     = {32'd0, physical_address};
             if walker_busy { port_address = {32'd0, walker_address}; }
             // RAM and the timer are identity-mapped on the memory port; the
@@ -1278,11 +1433,13 @@ module Core #(
                 port_memory_address = {46'd0, 6'h3f, port_address[11:0]};
             }
 
-            translation_wait = cm_valid_q && cm_translated_q && !cm_exception_q && !redirect_discards_cm
-                && (state_q != TranslationState::Done) && !fault_q;
-            translation_fault = cm_valid_q && cm_translated_q && fault_q;
+            translation_wait = cm_valid_q && ((cm_translated_q && !cm_exception_q) || cm_itlb_miss_q)
+                && !redirect_discards_cm && (state_q != TranslationState::Done) && !fault_q;
+            translation_fault = cm_valid_q && (cm_translated_q || cm_itlb_miss_q) && fault_q;
             translation_fault_cause = fault_cause_q;
-            translation_fault_value = cm_lsu_address_q;
+            translation_fault_value = if cm_itlb_miss_q ? fetch_walk_address : cm_lsu_address_q;
+            cm_replay_event = cm_valid_q && cm_itlb_miss_q && (state_q == TranslationState::Done)
+                && !backend_pending && !redirect_pending_q;
             translation_issue = (state_q == TranslationState::Issue) && !cm_is_atomic_q;
             translation_atomic_ready = !cm_translated_q || (state_q == TranslationState::Done);
             translation_flush = cm_fence_i_event
@@ -1302,16 +1459,52 @@ module Core #(
                 tlb_perms_q    = 5'd0;
                 cm_translated_q  = 1'b0;
                 cm_access_size_q = 2'd0;
+                itlb_valid_q     = 2'd0;
+                itlb_victim_q    = 1'b0;
+                for entry in 0..2 {
+                    itlb_page_q[entry]     = 27'd0;
+                    itlb_previous_q[entry] = 27'd0;
+                    itlb_frame_q[entry]    = 20'd0;
+                    itlb_perms_q[entry]    = 5'd0;
+                }
             } else {
                 check_denied_q = !(pma_allowed && sv39_pmp_allowed);
                 if !backend_wait {
                     cm_translated_q  = ex_translate && !ex_exception;
                     cm_access_size_q = lsu_access_size;
                 }
-                if translation_flush { tlb_valid_q = 1'b0; }
+                if translation_flush {
+                    tlb_valid_q  = 1'b0;
+                    itlb_valid_q = 2'd0;
+                }
                 if restart {
                     state_q = TranslationState::Idle;
                     fault_q = 1'b0;
+                } else if fetch_walk && !fault_q {
+                    // Instruction faults: page fault 12, or access fault 1 for
+                    // a denied PTE read or a frame beyond 32 bits. Permissions
+                    // are checked by FD when the instruction is refetched.
+                    case state_q {
+                        TranslationState::Idle: state_q = TranslationState::Walk;
+                        TranslationState::Walk: if walker_done {
+                            if walker_page_fault {
+                                fault_q       = 1'b1;
+                                fault_cause_q = 4'd12;
+                            } else if walker_access_fault {
+                                fault_q       = 1'b1;
+                                fault_cause_q = 4'd1;
+                            } else {
+                                itlb_valid_q[itlb_fill_entry]    = 1'b1;
+                                itlb_page_q[itlb_fill_entry]     = walk_page;
+                                itlb_previous_q[itlb_fill_entry] = walk_page - 27'd1;
+                                itlb_frame_q[itlb_fill_entry]    = walker_page;
+                                itlb_perms_q[itlb_fill_entry]    = walker_perms;
+                                itlb_victim_q                    = !itlb_fill_entry;
+                                state_q                          = TranslationState::Done;
+                            }
+                        }
+                        default: {}
+                    }
                 } else if cm_valid_q && cm_translated_q && !cm_exception_q && !fault_q {
                     case state_q {
                         TranslationState::Idle: {
@@ -1342,7 +1535,7 @@ module Core #(
                                 fault_cause_q = if store_access ? 4'd7 : 4'd5;
                             } else {
                                 tlb_valid_q = 1'b1;
-                                tlb_page_q  = virtual_address[38:12];
+                                tlb_page_q  = walk_page;
                                 tlb_frame_q = walker_page;
                                 tlb_perms_q = walker_perms;
                                 if walk_denied {
@@ -1391,17 +1584,30 @@ module Core #(
         assign sv39_check_read          = 1'b0;
         assign sv39_check_write         = 1'b0;
         assign sv39_check_user          = 1'b0;
+        assign fetch_frame              = 20'd0;
+        assign fetch_next_page          = 20'd0;
+        assign fd_frame                 = 20'd0;
+        assign fd_next_frame            = 20'd0;
+        assign fd_pmp_address           = fd_q.pc[31:0];
+        assign fd_translated_straddle   = 1'b0;
+        assign fd_itlb_miss             = 1'b0;
+        assign fd_fetch_page_fault      = 1'b0;
+        assign fd_fetch_second          = 1'b0;
+        assign rx_first_pma_allowed     = 1'b1;
+        assign rx_second_pma_allowed    = 1'b1;
+        assign rx_translation_fault     = 1'b0;
+        assign cm_replay_event          = 1'b0;
     }
 
     always_comb {
         pmp_cache_invalidate = ENABLE_U && cm_valid_q && cm_is_csr_q && cm_csr_write_q && (cm_csr_index_q >= 6'd18)
             && !cm_csr_index_q[5];
         // Comparison also elaborates when ADDRESS_BITS is 32.
-        fd_pmp_high = fd_q.pc >: 64'h0000_0000_ffff_ffff;
+        fd_pmp_high = (fd_q.pc >: 64'h0000_0000_ffff_ffff) && !(ENABLE_SV39 && csr_bus.translate_fetch);
         // M-mode accesses with every entry OFF are always permitted.
         ipc_lookup_hit = !pmp_cache_invalidate && (pmp_settle_q == 2'd0)
             && ((pmp_none_active && !csr_bus.below_machine)
-                || (ipc_valid_q && (ipc_user_q == csr_bus.below_machine) && (fd_q.pc[31:12] == ipc_tag_q)
+                || (ipc_valid_q && (ipc_user_q == csr_bus.below_machine) && (fd_pmp_address[31:12] == ipc_tag_q)
                     && !fd_pmp_high
                     && !((fd_q.raw_instruction[1:0] == 2'b11) && (fd_q.pc[11:1] == 11'h7ff))));
         ipc_lookup_allow = (pmp_none_active && !csr_bus.below_machine) || ipc_execute_q;
@@ -1532,12 +1738,15 @@ module Core #(
         if instr_is_compressed {
             fetch_access_size = 2'd1;
         }
-        fetch_packet.access_fault   = STRICT_MEMORY && !fetch_access_allowed;
+        // A translated fetch is checked against PMA by physical page at RX.
+        fetch_packet.access_fault   = STRICT_MEMORY && !fetch_access_allowed
+            && !(ENABLE_SV39 && csr_bus.translate_fetch);
         fetch_packet.fault_boundary = fetch_access_boundary;
         // An unmapped starting PC needs no memory response. At a mapped final
         // halfword, wait for the instruction length before deciding whether its
         // second parcel lies outside RAM. The memory returns zero for that line.
-        fetch_packet.valid = instr_valid || (STRICT_MEMORY && !fetch_access_allowed && !fetch_access_boundary);
+        fetch_packet.valid = instr_valid || (STRICT_MEMORY && !fetch_access_allowed && !fetch_access_boundary
+            && !(ENABLE_SV39 && csr_bus.translate_fetch));
         if fetch_packet.access_fault {
             fetch_packet.raw_instruction = 32'h0000_0013;
             fetch_packet.is_compressed   = 1'b0;
@@ -1792,7 +2001,9 @@ module Core #(
             csr_source = alu_operand_a;
         }
         ex_exception = ex_valid_q
-            && (ex_illegal_q || ex_pmp_fetch_fault_q || ex_is_ecall_q || ex_is_ebreak_q || (STRICT_MEMORY && ex_fetch_fault_q));
+            && (ex_illegal_q || ex_pmp_fetch_fault_q || ex_is_ecall_q || ex_is_ebreak_q || (STRICT_MEMORY && ex_fetch_fault_q)
+                || (ENABLE_SV39 && (ex_itlb_miss_q || ex_fetch_page_fault_q || ex_physical_fetch_fault_q
+                    || ex_second_access_fault_q)));
         if ex_is_ecall_q {
             ex_exception_cause = 64'd11;
             if ENABLE_U && csr_bus.below_machine { ex_exception_cause = 64'd8; }
@@ -1817,10 +2028,28 @@ module Core #(
                 }
             }
         }
+        // Second-parcel faults of a translated instruction crossing pages
+        // rank below every first-parcel fault.
+        if ENABLE_SV39 && ex_second_access_fault_q {
+            ex_exception_cause = 64'd1;
+            ex_exception_value = ex_pc_q + 64'd2;
+        }
+        if ENABLE_SV39 && ex_fetch_page_fault_q && ex_fetch_second_q {
+            ex_exception_cause = 64'd12;
+            ex_exception_value = ex_pc_q + 64'd2;
+        }
+        if ENABLE_SV39 && ex_physical_fetch_fault_q {
+            ex_exception_cause = 64'd1;
+            ex_exception_value = ex_pc_q;
+        }
         if ex_pmp_fetch_fault_q {
             ex_exception_cause = 64'd1;
             ex_exception_value = ex_pc_q;
             if ex_pmp_second_parcel_q { ex_exception_value = ex_pc_q + 64'd2; }
+        }
+        if ENABLE_SV39 && ex_fetch_page_fault_q && !ex_fetch_second_q {
+            ex_exception_cause = 64'd12;
+            ex_exception_value = ex_pc_q;
         }
         // Delegation of the cause CM will present: this instruction's own
         // exception, or otherwise a data access fault (5/7).
@@ -2070,13 +2299,14 @@ module Core #(
         cm_irq_fence_event = (ENABLE_INTERRUPTS || ENABLE_U) && cm_valid_q && cm_is_csr_q && cm_csr_write_q
             && ((cm_csr_index_q == 6'd1) || (cm_csr_index_q == 6'd16) || (cm_csr_index_q == 6'd17) || (ENABLE_U && (cm_csr_index_q >= 6'd18))) && !cm_exception_q
             && !backend_pending && !redirect_pending_q;
-        cm_trap_event      = cm_valid_q && (cm_exception_q || atomic_fault || translation_fault) && !backend_pending
-            && !redirect_pending_q;
+        // An ITLB miss is not a trap: CM walks, then refetches the instruction.
+        cm_trap_event      = cm_valid_q && ((cm_exception_q && !(ENABLE_SV39 && cm_itlb_miss_q)) || atomic_fault
+            || translation_fault) && !backend_pending && !redirect_pending_q;
         cm_mret_event      = cm_valid_q && cm_is_mret_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
         cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
         instruction_flush  = cm_fence_i_event;
         cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event || cm_irq_fence_event
-            || interrupt_event;
+            || interrupt_event || cm_replay_event;
         normal_memory_issue = !backend_pending && ex_valid_q && (ex_is_load_q || ex_is_store_q)
             && !(ACTIVE_A && ex_is_atomic_q) && !ex_exception && !lsu_access_fault && !ex_translate
             && !branch_redirect_valid && !cm_system_redirect && !redirect_pending_q;
@@ -2167,6 +2397,8 @@ module Core #(
         } else if cm_mret_event {
             redirect_target = csr_bus.return_pc;
             if ENABLE_S && cm_is_sret_q { redirect_target = csr_bus.supervisor_return_pc; }
+        } else if ENABLE_SV39 && cm_replay_event {
+            redirect_target = cm_pc_q;
         } else if cm_fence_i_event {
             redirect_target = cm_fallthrough_pc_q;
         } else {
@@ -2295,7 +2527,7 @@ module Core #(
         // A data access fault is first registered in CM. It has not performed
         // the earlier EX exception discard, so retire neither its token nor
         // any younger prediction, and reset the speculative queue here.
-        predictor_discard_all = interrupt_event || (STRICT_MEMORY && cm_trap_event)
+        predictor_discard_all = interrupt_event || (STRICT_MEMORY && cm_trap_event) || cm_replay_event
             || (!backend_wait && !redirect_pending_q && !branch_redirect_valid && !cm_system_redirect
                 && ex_frontend_block);
 
@@ -2328,12 +2560,19 @@ module Core #(
         csr_bus.debug_counter_index = debug_counter_index;
         debug_counter_data          = csr_bus.debug_counter_data;
 
-        pc = fetch_address;
+        fetch_virtual_pc = fetch_address;
         // A registered held prediction prepares the synchronous lookup while
         // its queue entry waits for the backend. Its accept edge clears the
         // preview as the semantic cursor switches to the same target.
         if EARLY_TAKEN_FETCH && taken_fetch_valid_q {
-            pc = taken_fetch_pc_q;
+            fetch_virtual_pc = taken_fetch_pc_q;
+        }
+        pc = fetch_virtual_pc;
+        fetch_translate = ENABLE_SV39 && csr_bus.translate_fetch;
+        // Only the page frame comes from the ITLB; the page offset is the
+        // virtual PC's.
+        if fetch_translate {
+            pc = {32'd0, fetch_frame, fetch_virtual_pc[11:0]};
         }
         // The optional board-memory relocation is registered together with
         // the architectural LSU address. It therefore does not put an
@@ -2739,6 +2978,18 @@ module Core #(
             fd_q.access_fault      = 1'b0;
             fd_q.fault_boundary    = 1'b0;
             rx_fetch_fault_q       = 1'b0;
+            rx_itlb_miss_q         = 1'b0;
+            rx_fetch_page_fault_q  = 1'b0;
+            rx_fetch_second_q      = 1'b0;
+            rx_straddle_q          = 1'b0;
+            rx_next_frame_q        = 20'd0;
+            ex_itlb_miss_q            = 1'b0;
+            ex_fetch_page_fault_q     = 1'b0;
+            ex_fetch_second_q         = 1'b0;
+            ex_physical_fetch_fault_q = 1'b0;
+            ex_second_access_fault_q  = 1'b0;
+            cm_itlb_miss_q            = 1'b0;
+            cm_fetch_second_q         = 1'b0;
             rx_fault_boundary_q    = 1'b0;
             ex_fetch_fault_q       = 1'b0;
             ex_pmp_fetch_fault_q = 1'b0;
@@ -2956,7 +3207,7 @@ module Core #(
                 redirect_preserve_cm_q = redirect_preserve_cm;
                 // CM access faults can still have a younger EX follower.
                 // That follower must be discarded before it reaches WB.
-                redirect_flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event);
+                redirect_flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event) || cm_replay_event;
                 // Only a CM-owned pending redirect exposes this payload.
                 // Refresh it on every advancing cycle to keep the late
                 // redirect-valid decision out of a wide old-value mux.
@@ -3149,6 +3400,8 @@ module Core #(
                 cm_csr_index_q       = ex_csr_index_q;
                 cm_csr_source_q      = csr_source;
                 cm_exception_q       = ex_exception || lsu_access_fault;
+                cm_itlb_miss_q       = ENABLE_SV39 && ex_valid_q && ex_itlb_miss_q;
+                cm_fetch_second_q    = ex_fetch_second_q;
                 cm_exception_cause_q = ex_exception_cause;
                 cm_exception_delegated_q = ENABLE_S && ex_exception_delegated;
                 cm_atomic_delegated_q = {csr_bus.exception_delegated[6], csr_bus.exception_delegated[7]};
@@ -3235,19 +3488,24 @@ module Core #(
                 // payload. The exception cause and individual system tags
                 // remain separate; ex_valid_q qualifies this held predicate.
                 ex_frontend_block_q = rx_illegal_q || rx_user_illegal || !pmp_fetch_allowed || rx_is_ecall_q || rx_is_ebreak_q
-                    || (STRICT_MEMORY && rx_fetch_fault_q) || rx_is_mret_q || rx_is_fence_i_q
+                    || (STRICT_MEMORY && rx_fetch_fault_q) || rx_translation_fault || rx_is_mret_q || rx_is_fence_i_q
                     || ((ENABLE_INTERRUPTS || ENABLE_U) && rx_is_csr_q && rx_csr_write_q
                         && ((rx_csr_index_q == 6'd1) || (rx_csr_index_q == 6'd16)
                             || (rx_csr_index_q == 6'd17) || (ENABLE_U && (rx_csr_index_q >= 6'd18))));
                 ex_normal_memory_q = (rx_is_load_q || rx_is_store_q) && !rx_is_atomic_q
                     && !(ENABLE_SV39 && csr_bus.translate_data)
                     && !rx_illegal_q && !rx_user_illegal && pmp_fetch_allowed && !rx_is_ecall_q && !rx_is_ebreak_q
-                    && !(STRICT_MEMORY && rx_fetch_fault_q);
+                    && !(STRICT_MEMORY && rx_fetch_fault_q) && !rx_translation_fault;
                 ex_illegal_q             = rx_illegal_q || rx_user_illegal;
                 ex_pmp_fetch_fault_q = !pmp_fetch_allowed;
                 ex_pmp_second_parcel_q = pmp_first_parcel_allowed;
                 ex_fetch_fault_q         = rx_fetch_fault_q;
                 ex_fault_boundary_q      = rx_fault_boundary_q;
+                ex_itlb_miss_q            = rx_itlb_miss_q;
+                ex_fetch_page_fault_q     = rx_fetch_page_fault_q;
+                ex_fetch_second_q         = rx_fetch_second_q;
+                ex_physical_fetch_fault_q = ENABLE_SV39 && csr_bus.translate_fetch && !rx_first_pma_allowed;
+                ex_second_access_fault_q  = rx_straddle_q && !(rx_second_pma_allowed && rx_second_pmp_allowed);
                 ex_control_kind_q        = rx_control_kind;
                 ex_prediction_token_q    = rx_prediction_token_q;
                 ex_predicted_kind_q      = rx_predicted_kind_q;
@@ -3324,7 +3582,7 @@ module Core #(
                     rx_pmp_high_q = fd_pmp_high;
                     rx_pmp_last_q = pmp_fetch_last_next;
                     rx_pmp_first_last_q = pmp_fetch_first_last_next;
-                    rx_pmp_address_q = fd_q.pc[31:0];
+                    rx_pmp_address_q = fd_pmp_address;
                     // A hit is fully contained in one cached page, so both
                     // parcels share its permission.
                     rx_ipc_ready_q = ipc_lookup_hit;
@@ -3367,6 +3625,11 @@ module Core #(
                     rx_is_fence_i_q        = decode_bus.is_fence_i;
                     rx_illegal_q           = decode_bus.illegal || fd_q.illegal;
                     rx_fetch_fault_q       = fd_q.access_fault;
+                    rx_itlb_miss_q         = ENABLE_SV39 && fd_itlb_miss;
+                    rx_fetch_page_fault_q  = ENABLE_SV39 && fd_fetch_page_fault;
+                    rx_fetch_second_q      = ENABLE_SV39 && fd_fetch_second;
+                    rx_straddle_q          = ENABLE_SV39 && fd_translated_straddle;
+                    rx_next_frame_q        = fd_next_frame;
                     rx_fault_boundary_q    = fd_q.fault_boundary;
                     rx_prediction_token_q  = fd_q.prediction_token;
                     rx_predicted_kind_q    = fd_q.predicted_kind;
