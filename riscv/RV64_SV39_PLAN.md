@@ -1,6 +1,7 @@
 # Sv39 実装計画
 
-2026-10-06。[OS/ISA計画](RV64_OS_ISA_PLAN.md) §3の3段目。[S-mode](RV64_SUPERVISOR_PLATFORM.md)
+2026-10-06。[OS/ISA計画](RV64_OS_ISA_PLAN.md) §3の3段目。**全段階を実装し、112/56 MHzで
+タイミングを閉じ、実機で274 ELFが全件合格した**（下の「進捗」）。[S-mode](RV64_SUPERVISOR_PLATFORM.md)
 （Bare）の上に、Sv39のアドレス変換を `ENABLE_SV39`（`ENABLE_S` が前提）で追加する。
 目標は112/56 MHzを維持したまま、S-kernelが隔離されたU-taskを動かせること。
 
@@ -149,7 +150,7 @@ PTEを最大3回読み、TLBを埋め、その命令のPCへリダイレクト�
 | `tests/rv64-s/sv39-fetch.S`（8段） | 両クロック順と同時クロックモデルで合格。別の物理ページを4 KiB写像で実行、X/U/A/無効PTE、非正規形PC、PPN幅（ウォーク）とPMA外フレーム、物理的に隣接しないページを跨ぐ32 bit命令（隣接ページには別の上位パーセルを置く）、2パーセル目のページ違反・PMA違反・ミス（xtvalは2パーセル目）、最後の正のページからの跨ぎ、Uの実行とUからSページ、PMPのX拒否（フレーム／2パーセル目）、物理的な次ページへのPMP拒否が影響しないこと、PTE読み出しのPMP拒否、SFENCE.VMAでの再写像、3ページの交互呼び出し |
 | `sv39-data.S` | Sコードは1 GiB恒等写像（X付き）、UコードはUエイリアスで実行するよう変更して合格 |
 | `instruction_cache_rtl.rs` | 変換時のページ跨ぎで `next_page` の行を読み、両行がキャッシュされた後は要求を出さずにヒットし続ける |
-| 変異試験 | 命令側20個：`sv39-fetch.elf` が19個、残り1個（ページ境界の後続ヒット判定）はI-cache単体試験が検出。データ側27個も全て検出 |
+| 変異試験 | 命令側24個：`sv39-fetch.elf` が21個を検出。ページ境界の後続ヒット判定はI-cache単体試験が検出。残り2個は観測できない防御：ITLB書込み直後のフェッチ無効化（リプレイのリダイレクト遅延が常に3サイクルを超える）と、ミスパケットの命令をNOPにすること（FDはどの命令でもリプレイする）。データ側27個は全て検出 |
 | 既存270 ELF | `--sv39`・`--s-mode`・基本構成で回帰なし |
 
 ### 5段目（S-kernel）：実装済み
@@ -165,6 +166,29 @@ load/store/AMO/LR/SC（13/15）、他タスクの物理ページ（13/15）、�
 store（6）。タイマ割り込みによるプリエンプション、ECALLのyield、不正なユーザーSPでもカーネル
 スタックが壊れないことも確認する。タスク切替は `satp` 書換えとSFENCE.VMA。
 
-同時クロックモデルで合格（mcycle 514,175。U/PMPカーネルの約2.2倍）。主因はTLBが小さく
-4 KiB単位であること（カーネルの1 GiB恒等写像が多数のエントリを要する）。SFENCE.VMAでI-cacheを
-消さないようにして5%短縮した。superpageを1エントリで持つTLBは今後の改善候補。
+同時クロックモデルと実機で合格（mcycle 477,807。U/PMPカーネル231,190の約2.1倍）。主因はTLBが
+小さく4 KiB単位であること（カーネルの1 GiB恒等写像が多数のエントリを要する）。SFENCE.VMAで
+I-cacheを消さないようにして約5%短縮した。superpageを1エントリで持つTLBは今後の改善候補。
+
+## 6段目：112/56 MHzと実機
+
+`HardwareCompactUserTestTop`（作業用U/PMPプロファイル）で `ENABLE_SV39` を有効にした。
+
+| 項目 | 値 |
+| --- | --- |
+| 配置配線 | Texo fadec1cの素のフロー：setup 0 ps／hold +1 ps、timing closure met（既存4例外）、1,761 s。LUT段数12 |
+| bitstream | `riscv/build/riscv-hardware-compact-user-112-sv39-20261006.bit` |
+| SHA-256 | `b601f0d7beba5b714a262fa587d63d77b31df33fc1bbe1af6ef34ded7729bc30` |
+| チェック付きbitgen | プロファイル・PLL照合、JTCK 515 setup／515 hold一致 |
+| 実機 | 274 ELF全件合格（既存270＋`sv39-data`・`sv39-fetch`・`kernel-supervisor`・`kernel-user`、tapir、6分38秒） |
+
+| ELF | 実機 mcycle | 同時クロックモデル |
+| --- | --- | --- |
+| `sv39-data.elf` | 29,662 | 29,661 |
+| `sv39-fetch.elf` | 33,593 | 33,593 |
+| `kernel-supervisor.elf` | 477,807 | 477,807 |
+| `supervisor.elf` | 6,339 | 6,339 |
+| `kernel-user.elf` | 231,190 | 231,189 |
+
+記録は `toolchain/measurements/2026-10-06-rv64-sv39-112/`（配置配線・bitgen・監査・ソース、
+実機ログ、変異試験、データ側のみの段階の配置配線）。

@@ -2,7 +2,8 @@
 
 2026-10-05。[OS/ISA計画](RV64_OS_ISA_PLAN.md) §3の2段目として、S-modeとトラップ委譲を
 `ENABLE_S`（`ENABLE_U` が前提）で実装した。作業用U/PMPプロファイルの
-`HardwareCompactUserTestTop` で有効。アドレス変換は**Bareのみ**で、Sv39は次の段階。
+`HardwareCompactUserTestTop` で有効。この文書はBareでの記述で、Sv39（`ENABLE_SV39`）は
+[Sv39計画・結果](RV64_SV39_PLAN.md) を参照（同プロファイルで有効）。
 **112/56 MHzでタイミングを閉じ、実機で270 ELFが全件合格**した。
 
 ## 実装範囲
@@ -17,7 +18,7 @@
 | 割り込み | SEI/STI/SSIのpendingはソフトウェア所有（Mは `mip` で3つ、Sは `sip` で委譲済みSSIPのみ書ける）。宛先がMのものを先に、各宛先内はMEI>MSI>MTI>SEI>SSI>STI |
 | カウンタ | Sは `mcounteren`、Uは `mcounteren & scounteren` を満たすとき `cycle`/`instret` を読める |
 | 命令 | `SRET`（UとTSR=1のSで不正）、`SFENCE.VMA`（UとTVM=1のSで不正。それ以外はNOP）、`WFI`（TW=1のSとUで不正） |
-| `satp` | 0固定、書込み無視（未対応MODEの書込みは無効、という仕様上の扱い）。TVM=1のSでは不正 |
+| `satp` | `ENABLE_SV39=0` では0固定、書込み無視（未対応MODEの書込みは無効、という仕様上の扱い）。`ENABLE_SV39=1` ではBare/Sv39。TVM=1のSでは不正 |
 | `misa` | S（bit 18）を立てる |
 
 STIPなどS割り込みの外部ソースはない。M側ソフトウェアがタイマ割り込みを受けて `mip.STIP`
