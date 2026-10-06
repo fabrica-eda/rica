@@ -1,0 +1,159 @@
+/// Sv39 page-table walker for a 32-bit physical address space.
+///
+/// One walk translates `virtual_page` (VA[38:12]) from the root page `root`.
+/// Each level forms a PTE address, waits for the caller's PMP/PMA verdict on
+/// it, issues one 8-byte read and evaluates the returned PTE. The result is
+/// the 4 KiB physical page of the requested virtual page, so superpages are
+/// returned at 4 KiB granularity, with the leaf permissions.
+///
+/// Svade: a leaf with A clear is a page fault; D is returned for the caller's
+/// store check. Faults:
+/// - page fault: invalid PTE, W without R, reserved/N/PBMT bits set, a
+///   pointer at the last level, a misaligned superpage, or A clear;
+/// - access fault: a denied PTE read, or a PTE or leaf page beyond the 32-bit
+///   physical space (never truncated into an alias).
+module PageTableWalker (
+    clk  : input clock,
+    rst_n: input reset,
+    /// Begin a walk; sampled only while idle.
+    start       : input logic     ,
+    virtual_page: input logic<27> ,
+    root        : input logic<20> ,
+    /// Physical address of the PTE being read, stable while `busy`.
+    request_address: output logic<32>,
+    /// The caller's verdict on `request_address` (PMP for an S-level read and
+    /// physical memory attributes). Sampled one cycle after the address
+    /// changes, so the caller may register it.
+    request_denied: input logic,
+    /// One-cycle pulse: issue a read of `request_address`.
+    request_issue: output logic,
+    /// The read issued last has returned `response_data`.
+    response_valid: input logic    ,
+    response_data : input logic<64>,
+    busy          : output logic   ,
+    /// One-cycle completion pulse with the walk's outcome.
+    done         : output logic    ,
+    page_fault   : output logic    ,
+    access_fault : output logic    ,
+    physical_page: output logic<20>,
+    /// Leaf {D, U, X, W, R}.
+    permissions: output logic<5>,
+) {
+    enum State: logic<2> {
+        Idle,
+        Check,
+        Issue,
+        Wait,
+    }
+    var state_q        : State     ;
+    var level_q        : logic<2>  ;
+    var table_q        : logic<20> ;
+    var virtual_page_q : logic<27> ;
+    var done_q         : logic     ;
+    var page_fault_q   : logic     ;
+    var access_fault_q : logic     ;
+    var physical_page_q: logic<20> ;
+    var permissions_q  : logic<5>  ;
+    var index          : logic<9>  ;
+    var pte_valid      : logic     ;
+    var pte_leaf       : logic     ;
+    var pte_reserved   : logic     ;
+    var pte_wide       : logic     ;
+    var pte_misaligned : logic     ;
+    var leaf_page      : logic<20> ;
+
+    always_comb {
+        index = virtual_page_q[8:0];
+        if level_q == 2'd2 {
+            index = virtual_page_q[26:18];
+        } else if level_q == 2'd1 {
+            index = virtual_page_q[17:9];
+        }
+        request_address = {table_q, index, 3'b000};
+        request_issue   = (state_q == State::Issue) && !request_denied;
+        busy            = state_q != State::Idle;
+        done            = done_q;
+        page_fault      = page_fault_q;
+        access_fault    = access_fault_q;
+        physical_page   = physical_page_q;
+        permissions     = permissions_q;
+
+        // PTE fields: V0 R1 W2 X3 U4 G5 A6 D7, PPN 53:10, PBMT 62:61, N 63.
+        pte_valid    = response_data[0] && !(response_data[2] && !response_data[1]);
+        pte_leaf     = response_data[1] || response_data[3];
+        pte_reserved = response_data[63:54] != 10'd0;
+        // The PPN must fit 20 bits; only the parts the level uses matter for
+        // a superpage, but any set bit above bit 19 of PPN[2] is out of range.
+        pte_wide = response_data[53:30] != 24'd0;
+        // PPN[1:0] of a 1 GiB leaf and PPN[0] of a 2 MiB leaf must be zero.
+        pte_misaligned = ((level_q == 2'd2) && (response_data[27:10] != 18'd0))
+            || ((level_q == 2'd1) && (response_data[18:10] != 9'd0));
+        leaf_page = response_data[29:10];
+        if level_q == 2'd2 {
+            leaf_page[17:0] = virtual_page_q[17:0];
+        } else if level_q == 2'd1 {
+            leaf_page[8:0] = virtual_page_q[8:0];
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            state_q         = State::Idle;
+            level_q         = 2'd0;
+            table_q         = 20'd0;
+            virtual_page_q  = 27'd0;
+            done_q          = 1'b0;
+            page_fault_q    = 1'b0;
+            access_fault_q  = 1'b0;
+            physical_page_q = 20'd0;
+            permissions_q   = 5'd0;
+        } else {
+            done_q = 1'b0;
+            case state_q {
+                State::Idle: if start {
+                    state_q        = State::Check;
+                    level_q        = 2'd2;
+                    table_q        = root;
+                    virtual_page_q = virtual_page;
+                    page_fault_q   = 1'b0;
+                    access_fault_q = 1'b0;
+                }
+                State::Check: state_q = State::Issue;
+                State::Issue: {
+                    if request_denied {
+                        state_q        = State::Idle;
+                        done_q         = 1'b1;
+                        access_fault_q = 1'b1;
+                    } else {
+                        state_q = State::Wait;
+                    }
+                }
+                State::Wait: if response_valid {
+                    if !pte_valid || pte_reserved || (!pte_leaf && (level_q == 2'd0))
+                        || (pte_leaf && (pte_misaligned || !response_data[6])) {
+                        state_q      = State::Idle;
+                        done_q       = 1'b1;
+                        page_fault_q = 1'b1;
+                    } else if pte_wide {
+                        state_q        = State::Idle;
+                        done_q         = 1'b1;
+                        access_fault_q = 1'b1;
+                    } else if pte_leaf {
+                        state_q         = State::Idle;
+                        done_q          = 1'b1;
+                        physical_page_q = leaf_page;
+                        permissions_q   = {
+                            response_data[7], response_data[4], response_data[3], response_data[2],
+                            response_data[1]
+                        };
+                    } else {
+                        state_q = State::Check;
+                        level_q = level_q - 2'd1;
+                        table_q = response_data[29:10];
+                    }
+                }
+                default: state_q = State::Idle;
+            }
+        }
+    }
+}

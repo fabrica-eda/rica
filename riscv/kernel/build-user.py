@@ -57,6 +57,7 @@ def main():
         (tests / "rv64-u/pmp-cache.S", tests / "rv64-u/link-ram.ld"),
         (tests / "rv64i-subset/system.S", tests / "rv64i-subset/link.ld"),
         (tests / "rv64-s/supervisor.S", tests / "rv64i-subset/link.ld"),
+        (tests / "rv64-s/sv39-data.S", tests / "rv64-s/link-ram.ld"),
     ):
         obj = out / (source.stem + ".o")
         diagnostic = out / (source.stem + ".elf")
@@ -76,6 +77,7 @@ def main():
         inputs.append(source)
     inputs.extend(tests / "rv64i-subset" / name for name in ("link.ld", "test_macros.inc"))
     inputs.append(tests / "rv64-u/link-ram.ld")
+    inputs.append(tests / "rv64-s/link-ram.ld")
     record = {
         "command": command,
         "rustflags": flags,

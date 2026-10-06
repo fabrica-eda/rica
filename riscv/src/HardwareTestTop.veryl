@@ -15,6 +15,7 @@ module HardwareTestTop #(
     param EARLY_TAKEN_FETCH: bit = 0,
     param ENABLE_U: bit = 0,
     param ENABLE_S: bit = 0,
+    param ENABLE_SV39: bit = 0,
     param PMP_DATA_STAGES: u32 = 3,
     param EARLY_ALU: bit = 0,
     // Related clocks at the same frequency can return the held BRAM result
@@ -295,6 +296,7 @@ module HardwareTestTop #(
         BRANCH_PREDICTOR_CONFIG: 1 + 2 * PREDICTOR_MODE,
         ENABLE_U: ENABLE_U,
         ENABLE_S: ENABLE_S,
+        ENABLE_SV39: ENABLE_SV39,
         ENABLE_A: ENABLE_A,
         SPLIT_MEMORY_RESPONSES: ENABLE_A,
     ) (

@@ -706,7 +706,10 @@ module DecoderWithCsrClass #(
         decode.is_ebreak    = decode.instr == 32'h0010_0073;
         decode.is_mret      = decode.instr == 32'h3020_0073;
         decode.is_sret      = ENABLE_S && (decode.instr == 32'h1020_0073);
-        decode.is_fence_i   = (opcode == 7'b0001111) && (funct3 == 3'b001);
+        // SFENCE.VMA serializes like FENCE.I: later fetches and translations
+        // must observe page-table updates ordered before it.
+        decode.is_fence_i   = ((opcode == 7'b0001111) && (funct3 == 3'b001))
+            || (ENABLE_S && (decode.instr[31:25] == 7'b0001001) && (decode.instr[14:0] == 15'h0073));
         decode.write_enable = legal_u_jump || legal_integer || decode.is_csr
             || ((opcode == 7'b1100111) && (funct3 == 3'b000)) || ((opcode == 7'b0000011) && (funct3 != 3'b111));
         decode.word_op      = legal_integer && ((opcode == 7'b0011011) || (opcode == 7'b0111011));

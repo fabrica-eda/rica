@@ -69,6 +69,15 @@ interface CsrBus {
     var interrupt_delegated: logic<3>;
     var interrupt_to_supervisor: logic;
     var trap_supervisor: logic;
+    // Sv39 state: fetch/data translation enables, effective privileges and
+    // the root page-table page. Data privilege follows MPRV/MPP in M.
+    var translate_fetch: logic;
+    var translate_data: logic;
+    var fetch_user: logic;
+    var data_user: logic;
+    var translation_root: logic<20>;
+    var supervisor_user_memory: logic;
+    var make_executable_readable: logic;
     var counter_enable: logic<3>;
     var pmp_config: logic<8> [4];
     var pmp_address: logic<30> [4];
@@ -107,6 +116,13 @@ interface CsrBus {
 
     modport core {
         exception_delegated: input,
+        translate_fetch: input,
+        translate_data: input,
+        fetch_user: input,
+        data_user: input,
+        translation_root: input,
+        supervisor_user_memory: input,
+        make_executable_readable: input,
         interrupt_delegated: input,
         interrupt_to_supervisor: input,
         trap_supervisor: output,
@@ -155,6 +171,13 @@ interface CsrBus {
 
     modport file {
         exception_delegated: output,
+        translate_fetch: output,
+        translate_data: output,
+        fetch_user: output,
+        data_user: output,
+        translation_root: output,
+        supervisor_user_memory: output,
+        make_executable_readable: output,
         interrupt_delegated: output,
         interrupt_to_supervisor: output,
         trap_supervisor: input,

@@ -99,6 +99,11 @@ const MIDELEG: u64 = 44;
 const INTERRUPT: u64 = 1 << 63;
 
 fn simulators() -> Vec<Csr> {
+    simulators_for(false)
+}
+
+/// Native and ECP5-mapped CSR files, optionally with Sv39.
+fn simulators_for(sv39: bool) -> Vec<Csr> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
     let source = [
         "PipelineInterfaces.veryl",
@@ -108,7 +113,10 @@ fn simulators() -> Vec<Csr> {
     ]
     .map(|name| fs::read_to_string(root.join(name)).unwrap())
     .join("\n")
-        + include_str!("fixtures/supervisor_csr.veryl");
+        + &include_str!("fixtures/supervisor_csr.veryl").replace(
+            "ENABLE_S:1,",
+            if sv39 { "ENABLE_S:1, ENABLE_SV39:1," } else { "ENABLE_S:1," },
+        );
     let native = SimulatorBuilder::new(&source, "SupervisorCsrTest")
         .build_native()
         .unwrap();
@@ -321,5 +329,60 @@ fn counter_access_and_trap_controls() {
         assert_eq!(csr.get("data_below_machine"), 1);
         csr.write(MSTATUS, 1 << 17 | 3 << 11);
         assert_eq!(csr.get("data_below_machine"), 0);
+    }
+}
+
+#[test]
+fn sv39_satp_sum_and_translation_enables() {
+    for mut csr in simulators_for(true) {
+        // MODE 8 with ASID bits (ignored, width 0) and a 20-bit root.
+        csr.write(SATP, 8 << 60 | 0xffff << 44 | 0x8_0123);
+        assert_eq!(csr.read(SATP), 8 << 60 | 0x8_0123);
+        assert_eq!(csr.get("translation_root"), 0x8_0123);
+        // Unsupported modes and roots beyond 32-bit physical space are ignored.
+        csr.write(SATP, 9 << 60 | 0x1);
+        csr.write(SATP, 8 << 60 | 1 << 20);
+        assert_eq!(csr.read(SATP), 8 << 60 | 0x8_0123);
+        assert_eq!(csr.get("translate_fetch"), 0, "M never translates fetch");
+        assert_eq!(csr.get("translate_data"), 0);
+        // MPRV with MPP = S translates M data accesses as S.
+        csr.write(MSTATUS, 1 << 17 | 1 << 11);
+        assert_eq!(
+            (csr.get("translate_data"), csr.get("data_user")),
+            (1, 0)
+        );
+        csr.write(MSTATUS, 1 << 17);
+        assert_eq!(
+            (csr.get("translate_data"), csr.get("data_user")),
+            (1, 1)
+        );
+        csr.write(MSTATUS, 0);
+        // SUM is shared by MSTATUS and SSTATUS.
+        csr.write(SSTATUS, 1 << 18);
+        assert_eq!(csr.read(MSTATUS) & 1 << 18, 1 << 18);
+        assert_eq!(csr.get("supervisor_user_memory"), 1);
+        csr.write(MSTATUS, 0);
+        assert_eq!(csr.read(SSTATUS) & 1 << 18, 0);
+        csr.enter(1);
+        assert_eq!(
+            (csr.get("translate_fetch"), csr.get("fetch_user")),
+            (1, 0)
+        );
+        csr.write(SSTATUS, 0);
+        csr.pulse("sret");
+        assert_eq!(
+            (csr.get("translate_fetch"), csr.get("fetch_user")),
+            (1, 1)
+        );
+        // Bare turns translation off.
+        csr.write(SATP, 0);
+        assert_eq!(csr.get("translate_fetch"), 0);
+    }
+    // Without Sv39, SATP and SUM stay zero.
+    for mut csr in simulators_for(false) {
+        csr.write(SATP, 8 << 60 | 0x1234);
+        assert_eq!(csr.read(SATP), 0);
+        csr.write(SSTATUS, 1 << 18);
+        assert_eq!(csr.read(SSTATUS) & 1 << 18, 0);
     }
 }

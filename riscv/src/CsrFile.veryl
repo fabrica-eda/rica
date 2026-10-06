@@ -5,12 +5,15 @@
 /// The implemented state is nevertheless architectural: trap entry records
 /// xEPC/xCAUSE/xTVAL in the mode selected by MEDELEG/MIDELEG and updates the
 /// status stack, while MRET and SRET restore it and return to xEPC.
-/// Supervisor address translation is Bare only: SATP reads zero and ignores
-/// writes, which the privileged ISA permits for an unsupported MODE.
+/// Without ENABLE_SV39, supervisor address translation is Bare only: SATP
+/// reads zero and ignores writes, as the privileged ISA permits for an
+/// unsupported MODE. ENABLE_SV39 adds MODE 8 with ASID width 0 and a root PPN
+/// within the 32-bit physical space; any other write has no effect.
 module CsrFile #(
     param ENABLE_M         : bit = 0,
     param ENABLE_U: bit = 0,
     param ENABLE_S: bit = 0,
+    param ENABLE_SV39: bit = 0,
     param ENABLE_A         : bit = 0,
     param ENABLE_B         : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
@@ -32,6 +35,9 @@ module CsrFile #(
     // Supervisor state. Status bits are the SSTATUS view of MSTATUS:
     // {TSR, TW, TVM, MXR, SPP, SPIE, SIE}.
     var supervisor_status_q: logic<7>;
+    var satp_sv39_q: logic;
+    var satp_root_q: logic<20>;
+    var supervisor_user_memory_q: logic;
     var supervisor_status_write: logic<7>;
     var supervisor_counter_enable_q: logic<3>;
     var stvec_q: logic<ADDRESS_BITS - 2>;
@@ -302,6 +308,7 @@ module CsrFile #(
             sstatus_read_value[5] = supervisor_status_q[1];
             sstatus_read_value[8] = supervisor_status_q[2];
             sstatus_read_value[19] = supervisor_status_q[3];
+            sstatus_read_value[18] = ENABLE_SV39 && supervisor_user_memory_q;
             sstatus_read_value[33:32] = 2'd2;
             mstatus_read_value = mstatus_read_value | sstatus_read_value;
             mstatus_read_value[22:20] = supervisor_status_q[6:4];
@@ -328,6 +335,13 @@ module CsrFile #(
         csr.trap_virtual_memory = ENABLE_S && supervisor_status_q[4];
         csr.timeout_wait = ENABLE_S && supervisor_status_q[5];
         csr.trap_sret = ENABLE_S && supervisor_status_q[6];
+        csr.fetch_user = ENABLE_U && user_q;
+        csr.data_user = ENABLE_U && (user_q || (mprv_q && (mstatus_q[3:2] == 2'b00)));
+        csr.translate_fetch = ENABLE_SV39 && satp_sv39_q && csr.below_machine;
+        csr.translate_data = ENABLE_SV39 && satp_sv39_q && csr.data_below_machine;
+        csr.translation_root = satp_root_q;
+        csr.supervisor_user_memory = ENABLE_SV39 && supervisor_user_memory_q;
+        csr.make_executable_readable = ENABLE_S && supervisor_status_q[3];
         csr.counter_enable = counter_enable_q;
         if ENABLE_S && user_q {
             csr.counter_enable = counter_enable_q & supervisor_counter_enable_q;
@@ -466,6 +480,9 @@ module CsrFile #(
             csr_supervisor_level0[3] = {sepc_q, 1'b0};
             csr_supervisor_level0[4] = stval_q;
             csr_supervisor_level0[6] = {54'd0, mideleg_q[2], 3'd0, mideleg_q[1], 3'd0, mideleg_q[0], 1'b0};
+            if ENABLE_SV39 {
+                csr_supervisor_level0[5] = {satp_sv39_q, 43'd0, satp_root_q};
+            }
         }
         for i in 0..4 {
             csr_supervisor_level1[i] = csr_supervisor_level0[2*i];
@@ -671,6 +688,28 @@ module CsrFile #(
             } else {
                 supervisor_status_q = supervisor_status_write;
             }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            supervisor_user_memory_q = 1'b0;
+        } else if ENABLE_SV39 && csr.write_enable && (csr.write_op != 2'd3)
+            && ((csr.write_index == 6'd1) || ((csr.write_index == 6'd32) && (csr.write_op == 2'd0))) {
+            supervisor_user_memory_q = mstatus_write[18];
+            if csr.write_index == 6'd32 { supervisor_user_memory_q = csr.write_source[18]; }
+        }
+    }
+    always_ff (clk, rst_n) {
+        if_reset {
+            satp_sv39_q = 1'b0;
+            satp_root_q = 20'd0;
+        } else if ENABLE_SV39 && supervisor_write && (csr.write_index == 6'd42)
+            && ((csr.write_source[63:60] == 4'd0) || (csr.write_source[63:60] == 4'd8))
+            // ASID is zero bits wide and ignored; a root beyond the 32-bit
+            // physical space would alias, so such a write has no effect.
+            && (csr.write_source[43:20] == 24'd0) {
+            satp_sv39_q = csr.write_source[63];
+            satp_root_q = csr.write_source[19:0];
         }
     }
     always_ff (clk, rst_n) {

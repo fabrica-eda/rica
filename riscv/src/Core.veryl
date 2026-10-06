@@ -16,6 +16,8 @@ module Core #(
     param ENABLE_U: bit = 0,
     // Supervisor privilege with delegation and Bare translation. Requires U.
     param ENABLE_S: bit = 0,
+    // Sv39 address translation (Svade A/D, ASID width 0). Requires S.
+    param ENABLE_SV39: bit = 0,
     param PMP_DATA_STAGES: u32 = 3,
     param EARLY_ALU: bit = 0,
     param ENABLE_A         : bit = 0,
@@ -584,6 +586,7 @@ module Core #(
         ENABLE_M         : ENABLE_M                              ,
         ENABLE_U: ENABLE_U,
         ENABLE_S: ENABLE_S,
+        ENABLE_SV39: ENABLE_SV39,
         ENABLE_A         : ACTIVE_A                              ,
         ENABLE_B         : ENABLE_ZBA && ENABLE_ZBB && ENABLE_ZBS,
     ) (
@@ -609,6 +612,27 @@ module Core #(
     var atomic_write_data_update: logic;
     var atomic_result: logic<64>;
     var atomic_done: logic;
+    var ex_translate: logic;
+    var cm_translated_q: logic;
+    var cm_access_size_q: logic<2>;
+    var translation_wait: logic;
+    var translation_fault: logic;
+    var translation_fault_cause: logic<4>;
+    var translation_fault_value: logic<64>;
+    var translation_issue: logic;
+    var translation_atomic_ready: logic;
+    var translation_flush: logic;
+    var walker_issue: logic;
+    var walker_owns_port: logic;
+    var port_override: logic;
+    var port_address: logic<64>;
+    var port_memory_address: logic<64>;
+    var sv39_check_address: logic<64>;
+    var sv39_check_size: logic<2>;
+    var sv39_check_read: logic;
+    var sv39_check_write: logic;
+    var sv39_check_user: logic;
+    var sv39_pmp_allowed: logic;
     var atomic_fault_raw: logic;
     var atomic_fault: logic;
     var atomic_cause: logic<4>;
@@ -630,7 +654,7 @@ module Core #(
         }
         inst lsu: AtomicLsu (
             clk, rst_n,
-            start: cm_atomic_active_q && !redirect_discards_cm,
+            start: cm_atomic_active_q && !redirect_discards_cm && translation_atomic_ready,
             cancel: redirect_discards_cm,
             // Consume is inspected only in DONE. A valid atomic then has no
             // ordinary memory/MDU wait. Successful retirement may preserve CM
@@ -639,7 +663,7 @@ module Core #(
             consume: cm_atomic_active_q && !pmp_data_wait
                 && (!redirect_pending_q || (!redirect_flush_wb_q && !atomic_fault_raw)),
             invalidate: invalidate_q,
-            address: cm_lsu_address_q,
+            address: if ENABLE_SV39 && port_override ? port_address : cm_lsu_address_q,
             operation: cm_raw_instr_q[31:27], word_op: cm_load_size_q == 2'd2,
             source_value: cm_lsu_wdata_q, memory_value: data_rdata,
             memory_done: (if SPLIT_MEMORY_RESPONSES ? data_load_response_sequence : data_response_sequence) == data_request_sequence_q,
@@ -881,6 +905,10 @@ module Core #(
     }
 
     var rx_user_illegal: logic;
+    // Sv39 data translation. A translated load/store/AMO issues no request
+    // from EX; at CM, where it is the oldest instruction and owns the data
+    // port, the DTLB (or the page-table walker) supplies its physical page,
+    // the physical region and PMP are checked, and CM issues the request.
     var ex_pmp_fetch_fault_q: logic;
     var ex_pmp_second_parcel_q: logic;
     var pmp_fetch_allowed: logic;
@@ -1061,6 +1089,24 @@ module Core #(
             pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
             allowed: pmp_data_comb_allowed, first_parcel_allowed: pmp_data_first_unused,
         );
+        if ENABLE_SV39 :g_sv39_pmp {
+            var sv39_last: logic<33>;
+            var sv39_first_last_unused: logic<33>;
+            var sv39_first_unused: logic;
+            inst sv39_end: PmpAccessEnd (
+                address: sv39_check_address, size: sv39_check_size,
+                last: sv39_last, first_last: sv39_first_last_unused,
+            );
+            inst sv39_check: PmpPermissionDecodedBounds #(CHECK_FIRST_PARCEL: 0) (
+                address: sv39_check_address, last: sv39_last, first_last: 33'd0,
+                user_access: sv39_check_user,
+                read_access: sv39_check_read, write_access: sv39_check_write, execute_access: 1'b0,
+                pmp_config: decoded_config, lower, upper, nonempty: range_nonempty,
+                allowed: sv39_pmp_allowed, first_parcel_allowed: sv39_first_unused,
+            );
+        } else :g_no_sv39_pmp {
+            assign sv39_pmp_allowed = 1'b1;
+        }
         // The issue path selects between two registered results in its
         // existing permission LUT.
         assign pmp_data_allowed = if pmp_data_hit_q ? pmp_data_hit_allow_q : pmp_data_allowed_q;
@@ -1074,6 +1120,7 @@ module Core #(
         assign pmp_data_first_unused = 1'b1;
         assign pmp_fetch_allowed = 1'b1;
         assign pmp_data_allowed = 1'b1;
+        assign sv39_pmp_allowed = 1'b1;
         assign pmp_data_comb_allowed = 1'b1;
         assign pmp_none_active = 1'b1;
         assign dpc_entry_hit = 1'b0;
@@ -1085,6 +1132,265 @@ module Core #(
         assign dpc_page_uniform = 1'b0;
         assign dpc_page_read = 1'b0;
         assign dpc_page_write = 1'b0;
+    }
+
+    // Sv39 data translation. A translated load/store issues no request from
+    // EX; it reaches CM, where it is the oldest instruction and owns the data
+    // port. There a one-entry DTLB (or the walker on a miss) supplies the
+    // physical page, the physical access is checked against PMA and PMP, and
+    // the request is issued from the registered physical address. Faults
+    // become CM traps with xtval set to the virtual address.
+    if ENABLE_SV39 :g_sv39 {
+        enum TranslationState: logic<3> {
+            Idle,
+            Walk,
+            Verdict,
+            Decide,
+            Issue,
+            Done,
+        }
+        var state_q        : TranslationState;
+        var fault_q        : logic           ;
+        var fault_cause_q  : logic<4>        ;
+        var physical_q     : logic<20>       ;
+        var check_denied_q : logic           ;
+        var tlb_valid_q    : logic           ;
+        var tlb_page_q     : logic<27>       ;
+        var tlb_frame_q    : logic<20>       ;
+        var tlb_perms_q    : logic<5>        ;
+        var virtual_address: logic<64>       ;
+        var store_access   : logic           ;
+        var noncanonical   : logic           ;
+        var crosses_page   : logic           ;
+        var tlb_hit        : logic           ;
+        var hit_denied     : logic           ;
+        var walk_denied    : logic           ;
+        var walker_start   : logic           ;
+        var walker_busy    : logic           ;
+        var walker_done    : logic           ;
+        var walker_page_fault  : logic       ;
+        var walker_access_fault: logic       ;
+        var walker_page    : logic<20>       ;
+        var walker_perms   : logic<5>        ;
+        var walker_address : logic<32>       ;
+        var walker_request : logic           ;
+        var walker_response: logic           ;
+        var physical_address: logic<32>      ;
+        var pma_allowed    : logic           ;
+        var pma_cross_unused: logic          ;
+        var pma_fault_address_unused: logic<64>;
+        var restart        : logic           ;
+
+        // Leaf permissions {D, U, X, W, R} against the access and the current
+        // effective privilege, SUM and MXR. Svade: a store needs D set.
+        function permission_denied (
+            perms    : input logic<5>,
+            store    : input logic   ,
+            user     : input logic   ,
+            sum      : input logic   ,
+            mxr      : input logic   ,
+        ) -> logic {
+            var denied: logic;
+            denied = if user ? !perms[3] : (perms[3] && !sum);
+            if store {
+                denied = denied || !perms[1] || !perms[4];
+            } else {
+                denied = denied || !(perms[0] || (mxr && perms[2]));
+            }
+            return denied;
+        }
+
+        inst walker: PageTableWalker (
+            clk, rst_n,
+            start         : walker_start            ,
+            virtual_page  : virtual_address[38:12]  ,
+            root          : csr_bus.translation_root,
+            request_address: walker_address         ,
+            request_denied: check_denied_q          ,
+            request_issue : walker_request          ,
+            response_valid: walker_response         ,
+            response_data : data_rdata              ,
+            busy          : walker_busy             ,
+            done          : walker_done             ,
+            page_fault    : walker_page_fault       ,
+            access_fault  : walker_access_fault     ,
+            physical_page : walker_page             ,
+            permissions   : walker_perms            ,
+        );
+
+        inst physical_check: PhysicalAccessCheck #(ENABLE_TIMER: ENABLE_INTERRUPTS) (
+            address      : {32'd0, sv39_check_address[31:0]},
+            size         : sv39_check_size                 ,
+            instruction  : 1'b0                            ,
+            allowed      : pma_allowed                     ,
+            crosses_bound: pma_cross_unused                ,
+            fault_address: pma_fault_address_unused        ,
+        );
+
+        always_comb {
+            virtual_address = cm_lsu_address_q;
+            // AMOs and SC are stores for permissions and causes; LR is a load.
+            store_access = cm_is_store_q;
+            noncanonical = virtual_address[63:39] != {virtual_address[38] repeat 25};
+            crosses_page = 1'b0;
+            case cm_access_size_q {
+                2'd1: crosses_page = virtual_address[11:0] == 12'hfff;
+                2'd2: crosses_page = (virtual_address[11:2] == 10'h3ff) && (virtual_address[1:0] != 2'd0);
+                2'd3: crosses_page = (virtual_address[11:3] == 9'h1ff) && (virtual_address[2:0] != 3'd0);
+                default: {}
+            }
+            tlb_hit = tlb_valid_q && (tlb_page_q == virtual_address[38:12]);
+            hit_denied = permission_denied(tlb_perms_q, store_access, csr_bus.data_user,
+                csr_bus.supervisor_user_memory, csr_bus.make_executable_readable);
+            walk_denied = permission_denied(walker_perms, store_access, csr_bus.data_user,
+                csr_bus.supervisor_user_memory, csr_bus.make_executable_readable);
+            restart = !backend_wait || redirect_discards_cm;
+            walker_start = (state_q == TranslationState::Idle) && cm_valid_q && cm_translated_q && !restart
+                && !noncanonical && !crosses_page && !tlb_hit;
+            walker_response = (if SPLIT_MEMORY_RESPONSES ? data_load_response_sequence : data_response_sequence)
+                == data_request_sequence_q;
+            physical_address = {physical_q, virtual_address[11:0]};
+
+            // One PMA/PMP checker serves the walker's PTE reads (S-level 8-byte
+            // reads) and the final access. Its verdict is registered.
+            sv39_check_user = 1'b1;
+            if walker_busy {
+                sv39_check_address = {32'd0, walker_address};
+                sv39_check_size    = 2'd3;
+                sv39_check_read    = 1'b1;
+                sv39_check_write   = 1'b0;
+            } else {
+                sv39_check_address = {32'd0, physical_address};
+                sv39_check_size    = cm_access_size_q;
+                sv39_check_read    = cm_is_load_q;
+                sv39_check_write   = cm_is_store_q;
+            }
+
+            walker_issue     = walker_request;
+            walker_owns_port = walker_busy;
+            port_override    = cm_valid_q && cm_translated_q;
+            port_address     = {32'd0, physical_address};
+            if walker_busy { port_address = {32'd0, walker_address}; }
+            // RAM and the timer are identity-mapped on the memory port; the
+            // boot ROM page is relocated as for untranslated accesses.
+            port_memory_address = port_address;
+            if port_address[31:12] == 20'd0 {
+                port_memory_address = {46'd0, 6'h3f, port_address[11:0]};
+            }
+
+            translation_wait = cm_valid_q && cm_translated_q && !cm_exception_q && !redirect_discards_cm
+                && (state_q != TranslationState::Done) && !fault_q;
+            translation_fault = cm_valid_q && cm_translated_q && fault_q;
+            translation_fault_cause = fault_cause_q;
+            translation_fault_value = cm_lsu_address_q;
+            translation_issue = (state_q == TranslationState::Issue) && !cm_is_atomic_q;
+            translation_atomic_ready = !cm_translated_q || (state_q == TranslationState::Done);
+            translation_flush = cm_fence_i_event
+                || (cm_retire_event && cm_is_csr_q && cm_csr_write_q && (cm_csr_index_q == 6'd42));
+        }
+
+        always_ff (clk, rst_n) {
+            if_reset {
+                state_q        = TranslationState::Idle;
+                fault_q        = 1'b0;
+                fault_cause_q  = 4'd0;
+                physical_q     = 20'd0;
+                check_denied_q = 1'b0;
+                tlb_valid_q    = 1'b0;
+                tlb_page_q     = 27'd0;
+                tlb_frame_q    = 20'd0;
+                tlb_perms_q    = 5'd0;
+                cm_translated_q  = 1'b0;
+                cm_access_size_q = 2'd0;
+            } else {
+                check_denied_q = !(pma_allowed && sv39_pmp_allowed);
+                if !backend_wait {
+                    cm_translated_q  = ex_translate && !ex_exception;
+                    cm_access_size_q = lsu_access_size;
+                }
+                if translation_flush { tlb_valid_q = 1'b0; }
+                if restart {
+                    state_q = TranslationState::Idle;
+                    fault_q = 1'b0;
+                } else if cm_valid_q && cm_translated_q && !cm_exception_q && !fault_q {
+                    case state_q {
+                        TranslationState::Idle: {
+                            if noncanonical {
+                                fault_q       = 1'b1;
+                                fault_cause_q = if store_access ? 4'd15 : 4'd13;
+                            } else if crosses_page {
+                                fault_q       = 1'b1;
+                                fault_cause_q = if store_access ? 4'd6 : 4'd4;
+                            } else if tlb_hit {
+                                if hit_denied {
+                                    fault_q       = 1'b1;
+                                    fault_cause_q = if store_access ? 4'd15 : 4'd13;
+                                } else {
+                                    physical_q = tlb_frame_q;
+                                    state_q    = TranslationState::Verdict;
+                                }
+                            } else {
+                                state_q = TranslationState::Walk;
+                            }
+                        }
+                        TranslationState::Walk: if walker_done {
+                            if walker_page_fault {
+                                fault_q       = 1'b1;
+                                fault_cause_q = if store_access ? 4'd15 : 4'd13;
+                            } else if walker_access_fault {
+                                fault_q       = 1'b1;
+                                fault_cause_q = if store_access ? 4'd7 : 4'd5;
+                            } else {
+                                tlb_valid_q = 1'b1;
+                                tlb_page_q  = virtual_address[38:12];
+                                tlb_frame_q = walker_page;
+                                tlb_perms_q = walker_perms;
+                                if walk_denied {
+                                    fault_q       = 1'b1;
+                                    fault_cause_q = if store_access ? 4'd15 : 4'd13;
+                                } else {
+                                    physical_q = walker_page;
+                                    state_q    = TranslationState::Verdict;
+                                }
+                            }
+                        }
+                        // The checker sees the physical address in Verdict;
+                        // its registered result is used in Decide.
+                        TranslationState::Verdict: state_q = TranslationState::Decide;
+                        TranslationState::Decide : {
+                            if check_denied_q {
+                                fault_q       = 1'b1;
+                                fault_cause_q = if store_access ? 4'd7 : 4'd5;
+                            } else {
+                                state_q = TranslationState::Issue;
+                            }
+                        }
+                        TranslationState::Issue: state_q = TranslationState::Done;
+                        default                : {}
+                    }
+                }
+            }
+        }
+    } else :g_no_sv39 {
+        assign cm_translated_q          = 1'b0;
+        assign cm_access_size_q         = 2'd0;
+        assign translation_wait         = 1'b0;
+        assign translation_fault        = 1'b0;
+        assign translation_fault_cause  = 4'd0;
+        assign translation_fault_value  = 64'd0;
+        assign translation_issue        = 1'b0;
+        assign translation_atomic_ready = 1'b1;
+        assign translation_flush        = 1'b0;
+        assign walker_issue             = 1'b0;
+        assign walker_owns_port         = 1'b0;
+        assign port_override            = 1'b0;
+        assign port_address             = 64'd0;
+        assign port_memory_address      = 64'd0;
+        assign sv39_check_address       = 64'd0;
+        assign sv39_check_size          = 2'd0;
+        assign sv39_check_read          = 1'b0;
+        assign sv39_check_write         = 1'b0;
+        assign sv39_check_user          = 1'b0;
     }
 
     always_comb {
@@ -1469,8 +1775,10 @@ module Core #(
             }
         }
         lsu_access_allowed = lsu_access_allowed && pmp_data_allowed;
+        ex_translate = ENABLE_SV39 && csr_bus.translate_data && ex_valid_q && (ex_is_load_q || ex_is_store_q);
         lsu_access_fault  = STRICT_MEMORY && !(ACTIVE_A && ex_is_atomic_q) && ex_valid_q && (ex_is_load_q || ex_is_store_q) && !lsu_access_allowed;
         if ENABLE_U && ex_is_atomic_q && ex_valid_q && !pmp_data_allowed { lsu_access_fault = 1'b1; }
+        if ex_translate { lsu_access_fault = 1'b0; }
         if ex_bypass_q.store_data {
             execute_store_data = bypass_data;
         } else {
@@ -1712,7 +2020,8 @@ module Core #(
             && (if ACTIVE_A ? cm_memory_active_q : cm_valid_q && (cm_is_load_q || cm_is_store_q))
             && ((if SPLIT_MEMORY_RESPONSES ? (if cm_is_store_q ? data_store_response_sequence : data_load_response_sequence) : data_response_sequence) != data_request_sequence_q);
         muldiv_pending = ENABLE_M && cm_valid_q && cm_muldiv_pending_q;
-        atomic_pending = ACTIVE_A && cm_atomic_active_q && !atomic_done;
+        // A translation fault ends the atomic before the unit starts.
+        atomic_pending = ACTIVE_A && cm_atomic_active_q && !atomic_done && !translation_fault;
         memory_wait = memory_pending && !redirect_discards_cm;
         muldiv_wait = muldiv_pending && !redirect_discards_cm;
         atomic_wait = atomic_pending && !redirect_discards_cm;
@@ -1725,14 +2034,16 @@ module Core #(
         // A registered data-cache hit ends the wait for the current EX owner.
         pmp_data_wait = ENABLE_U && ex_pmp_pending_q && !pmp_data_hit_q && !redirect_pending_q;
         pmp_data_resolve = pmp_data_wait && (pmp_data_stage_q == 2'd2);
-        backend_wait = memory_wait || muldiv_wait || atomic_wait || pmp_data_wait;
+        backend_wait = memory_wait || muldiv_wait || atomic_wait || pmp_data_wait || translation_wait;
         // Consumers gated by !redirect_pending_q or !redirect_discards_cm may
         // use the raw pending work: no CM work is discarded while either
         // gate is open.
         // Keep the cancellation-qualified waits for pipeline recovery and
         // counters, where a pending redirect must still be able to drain CM.
         backend_pending = backend_wait;
-        if ACTIVE_A { backend_pending = memory_pending || muldiv_pending || atomic_pending || pmp_data_wait; }
+        if ACTIVE_A {
+            backend_pending = memory_pending || muldiv_pending || atomic_pending || pmp_data_wait || translation_wait;
+        }
 
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
@@ -1759,14 +2070,15 @@ module Core #(
         cm_irq_fence_event = (ENABLE_INTERRUPTS || ENABLE_U) && cm_valid_q && cm_is_csr_q && cm_csr_write_q
             && ((cm_csr_index_q == 6'd1) || (cm_csr_index_q == 6'd16) || (cm_csr_index_q == 6'd17) || (ENABLE_U && (cm_csr_index_q >= 6'd18))) && !cm_exception_q
             && !backend_pending && !redirect_pending_q;
-        cm_trap_event      = cm_valid_q && (cm_exception_q || atomic_fault) && !backend_pending && !redirect_pending_q;
+        cm_trap_event      = cm_valid_q && (cm_exception_q || atomic_fault || translation_fault) && !backend_pending
+            && !redirect_pending_q;
         cm_mret_event      = cm_valid_q && cm_is_mret_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
         cm_fence_i_event   = cm_valid_q && cm_is_fence_i_q && !cm_exception_q && !backend_pending && !redirect_pending_q;
         instruction_flush  = cm_fence_i_event;
         cm_system_redirect = cm_trap_event || cm_mret_event || cm_fence_i_event || cm_irq_fence_event
             || interrupt_event;
         normal_memory_issue = !backend_pending && ex_valid_q && (ex_is_load_q || ex_is_store_q)
-            && !(ACTIVE_A && ex_is_atomic_q) && !ex_exception && !lsu_access_fault
+            && !(ACTIVE_A && ex_is_atomic_q) && !ex_exception && !lsu_access_fault && !ex_translate
             && !branch_redirect_valid && !cm_system_redirect && !redirect_pending_q;
         if ACTIVE_A {
             // EX ownership/exception tags and CM system serialization are
@@ -1787,7 +2099,7 @@ module Core #(
         // This is the architectural retirement boundary: a successful CM
         // instruction transfers to WB here. A pending taken branch explicitly
         // discards its wrong-path CM follower; JAL itself remains retireable.
-        cm_retire_event      = cm_valid_q && !cm_exception_q && !atomic_fault && !backend_wait
+        cm_retire_event      = cm_valid_q && !cm_exception_q && !atomic_fault && !translation_fault && !backend_wait
             && !(redirect_pending_q && redirect_flush_wb_q);
         csr_bus.write_index  = cm_csr_index_q;
         // The final discard gate also qualifies the pending work. Using the
@@ -1826,6 +2138,11 @@ module Core #(
             csr_bus.trap_cause = {60'd0, atomic_cause};
             csr_bus.trap_supervisor = if atomic_cause[0] ? cm_atomic_delegated_q[0] : cm_atomic_delegated_q[1];
             csr_bus.trap_value = cm_lsu_address_q;
+        }
+        if translation_fault {
+            csr_bus.trap_cause = {60'd0, translation_fault_cause};
+            csr_bus.trap_supervisor = csr_bus.exception_delegated[translation_fault_cause];
+            csr_bus.trap_value = translation_fault_value;
         }
         if interrupt_event {
             csr_bus.trap_pc    = interrupt_resume_pc_q;
@@ -2023,6 +2340,12 @@ module Core #(
         // address-space mux between a pipeline register and every BRAM bank.
         data_addr        = cm_lsu_address_q;
         data_memory_addr = cm_lsu_memory_address_q;
+        // A translated access or a page walk drives the port from CM-owned
+        // registers; ordinary accesses keep their EX-registered address.
+        if ENABLE_SV39 && port_override {
+            data_addr        = port_address;
+            data_memory_addr = port_memory_address;
+        }
         atomic_write_data_update = atomic_store_issue && (cm_raw_instr_q[31:27] != 5'd3);
         cm_write_data_enable = !backend_wait || atomic_write_data_update;
         cm_write_data_next = execute_store_data;
@@ -2046,6 +2369,12 @@ module Core #(
         data_request_sequence = data_request_sequence_q;
         data_load_size        = cm_load_size_q;
         data_load_unsigned    = cm_load_unsigned_q;
+        // PTE reads are unsigned doublewords and never write.
+        if ENABLE_SV39 && walker_owns_port {
+            data_we            = 1'b0;
+            data_load_size     = 2'd3;
+            data_load_unsigned = 1'b1;
+        }
         // There is no architectural halt instruction. This output remains for
         // the board debug ABI and will be used by a future debug halt request.
         halted    = 1'b0;
@@ -2353,7 +2682,9 @@ module Core #(
     // One sequence owner for normal transfers and both phases of an AMO.
     always_ff (clk, rst_n) {
         if_reset { data_request_sequence_q = 1'b0; }
-        else if normal_memory_issue || atomic_issue { data_request_sequence_q = !data_request_sequence_q; }
+        else if normal_memory_issue || atomic_issue || translation_issue || walker_issue {
+            data_request_sequence_q = !data_request_sequence_q;
+        }
     }
 
     // Normal stores and AMOs share this registered memory write bus. AMO data
@@ -2684,7 +3015,7 @@ module Core #(
                 // keeping the bit-manipulation cone off the common CM bypass.
                 rx_execution_hazard_q = (ENABLE_ZBB || ENABLE_ZBS) && execution_hazard && ex_valid_q && ex_alu_op_q[5]
                     && !ex_early_bitmanip;
-                wb_valid_q            = cm_valid_q && !cm_exception_q && !atomic_fault;
+                wb_valid_q            = cm_valid_q && !cm_exception_q && !atomic_fault && !translation_fault;
                 if COMMIT_PAYLOAD {
                     wb_pc_q        = cm_pc_q;
                     wb_raw_instr_q = cm_raw_instr_q;
@@ -2872,7 +3203,8 @@ module Core #(
                 ex_subtract_q            = rx_alu_op_q == 4'd1;
                 ex_write_enable_q        = rx_write_enable_q;
                 ex_can_bypass_q          = rx_result_can_bypass;
-                ex_pmp_pending_q = ENABLE_U && rx_valid_q && (rx_is_load_q || rx_is_store_q || rx_is_atomic_q);
+                ex_pmp_pending_q = ENABLE_U && rx_valid_q && (rx_is_load_q || rx_is_store_q || rx_is_atomic_q)
+                    && !(ENABLE_SV39 && csr_bus.translate_data);
                 ex_pmp_read_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd3 : rx_is_load_q);
                 ex_pmp_write_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd2 : rx_is_store_q);
                 ex_is_load_q             = rx_is_load_q;
@@ -2908,6 +3240,7 @@ module Core #(
                         && ((rx_csr_index_q == 6'd1) || (rx_csr_index_q == 6'd16)
                             || (rx_csr_index_q == 6'd17) || (ENABLE_U && (rx_csr_index_q >= 6'd18))));
                 ex_normal_memory_q = (rx_is_load_q || rx_is_store_q) && !rx_is_atomic_q
+                    && !(ENABLE_SV39 && csr_bus.translate_data)
                     && !rx_illegal_q && !rx_user_illegal && pmp_fetch_allowed && !rx_is_ecall_q && !rx_is_ebreak_q
                     && !(STRICT_MEMORY && rx_fetch_fault_q);
                 ex_illegal_q             = rx_illegal_q || rx_user_illegal;

@@ -23,6 +23,12 @@ return_pc: output logic<64>,
 supervisor_return_pc: output logic<64>,
 interrupt_pending: output logic,
 interrupt_cause: output logic<4>,
+translate_fetch: output logic,
+translate_data: output logic,
+fetch_user: output logic,
+data_user: output logic,
+translation_root: output logic<20>,
+supervisor_user_memory: output logic,
 ) {
  inst b: CsrBus;
  inst c: CsrFile #(ENABLE_U:1, ENABLE_S:1, ENABLE_INTERRUPTS:1, FULL_ADDRESS:1)(clk,rst_n,csr:b);
@@ -71,5 +77,11 @@ return_pc = b.return_pc;
 supervisor_return_pc = b.supervisor_return_pc;
 interrupt_pending = b.interrupt_pending;
 interrupt_cause = b.interrupt_cause;
+translate_fetch = b.translate_fetch;
+translate_data = b.translate_data;
+fetch_user = b.fetch_user;
+data_user = b.data_user;
+translation_root = b.translation_root;
+supervisor_user_memory = b.supervisor_user_memory;
 }
 }

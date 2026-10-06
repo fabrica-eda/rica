@@ -68,16 +68,22 @@ _start:
     li t0, 0x1f
     csrw pmpcfg0, t0
 
-    # 1: MISA reports S and U; SATP is Bare only.
+    # 1: MISA reports S and U. SATP either is Bare only or accepts Sv39;
+    # the remaining steps run Bare.
     STEP 1
     csrr t0, misa
     li t1, (1 << 18) | (1 << 20)
     and t2, t0, t1
     bne t2, t1, fail
-    li t0, (8 << 60) | 0x1234
-    csrw satp, t0
+    li t1, (8 << 60) | 0x1234
+    csrw satp, t1
+    csrr t0, satp
+    beqz t0, 1f
+    bne t0, t1, fail
+    csrw satp, zero
     csrr t0, satp
     bnez t0, fail
+1:
 
     # 2: S cannot access M CSRs; undelegated, the trap goes to M with MPP = S.
     STEP 2
