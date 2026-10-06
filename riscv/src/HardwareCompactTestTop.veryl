@@ -1006,6 +1006,7 @@ module HardwareCompactUserTestTop (
     inst board: HardwareTestTop #(
         ENABLE_U: 1,
         ENABLE_S: 1,
+        ENABLE_SV39: 1,
         PMP_DATA_STAGES: UserPlatform::PMP_DATA_STAGES,
         EARLY_ALU: UserPlatform::EARLY_ALU,
         DIRECT_LOAD_RETURN: UserPlatform::DIRECT_LOAD_RETURN,
