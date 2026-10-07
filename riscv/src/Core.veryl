@@ -1202,6 +1202,7 @@ module Core #(
             Idle,
             Walk,
             Verdict,
+            Settle,
             Decide,
             Issue,
             Done,
@@ -1263,6 +1264,11 @@ module Core #(
         var itlb_written_q : logic           ;
         var fetch_walk_address: logic<64>    ;
         var walk_page      : logic<27>       ;
+        var walk_previous  : logic<27>       ;
+        var check_address_q: logic<32>       ;
+        var check_size_q   : logic<2>        ;
+        var check_read_q   : logic           ;
+        var check_write_q  : logic           ;
         var first_pma_cross_unused : logic   ;
         var first_pma_fault_unused : logic<64>;
         var second_pma_cross_unused: logic   ;
@@ -1403,7 +1409,18 @@ module Core #(
             fetch_walk = cm_valid_q && cm_itlb_miss_q;
             fetch_walk_address = cm_pc_q;
             if cm_fetch_second_q { fetch_walk_address = cm_pc_q + 64'd2; }
-            walk_page = if fetch_walk ? fetch_walk_address[38:12] : cm_lsu_address_q[38:12];
+            // A second-parcel walk is for the page after the instruction's own
+            // (the instruction starts in its page's last halfword). The ITLB
+            // also stores the page minus one, so neither needs pc + 2.
+            walk_page = cm_lsu_address_q[38:12];
+            walk_previous = cm_pc_q[38:12] - 27'd1;
+            if fetch_walk {
+                walk_page = cm_pc_q[38:12];
+                if cm_fetch_second_q {
+                    walk_page     = cm_pc_q[38:12] + 27'd1;
+                    walk_previous = cm_pc_q[38:12];
+                }
+            }
             // Round-robin replacement: a fill never evicts the entry filled
             // just before it, so an instruction's two pages coexist.
             itlb_fill_entry = itlb_victim_q;
@@ -1432,19 +1449,14 @@ module Core #(
             physical_address = {physical_q, virtual_address[11:0]};
 
             // One PMA/PMP checker serves the walker's PTE reads (S-level 8-byte
-            // reads) and the final access. Its verdict is registered.
-            sv39_check_user = 1'b1;
-            if walker_busy {
-                sv39_check_address = {32'd0, walker_address};
-                sv39_check_size    = 2'd3;
-                sv39_check_read    = 1'b1;
-                sv39_check_write   = 1'b0;
-            } else {
-                sv39_check_address = {32'd0, physical_address};
-                sv39_check_size    = cm_access_size_q;
-                sv39_check_read    = cm_is_load_q;
-                sv39_check_write   = cm_is_store_q;
-            }
+            // reads) and the final access. Both its inputs and its verdict are
+            // registered: the verdict is used two cycles after the address
+            // changes (walker Settle, translation Settle).
+            sv39_check_user    = 1'b1;
+            sv39_check_address = {32'd0, check_address_q};
+            sv39_check_size    = check_size_q;
+            sv39_check_read    = check_read_q;
+            sv39_check_write   = check_write_q;
 
             walker_issue     = walker_request;
             walker_owns_port = walker_busy;
@@ -1478,6 +1490,10 @@ module Core #(
                 fault_cause_q  = 4'd0;
                 physical_q     = 20'd0;
                 check_denied_q = 1'b0;
+                check_address_q = 32'd0;
+                check_size_q    = 2'd0;
+                check_read_q    = 1'b0;
+                check_write_q   = 1'b0;
                 tlb_valid_q    = 1'b0;
                 tlb_page_q     = 27'd0;
                 tlb_frame_q    = 20'd0;
@@ -1500,6 +1516,17 @@ module Core #(
                 }
             } else {
                 check_denied_q = !(pma_allowed && sv39_pmp_allowed);
+                if walker_busy {
+                    check_address_q = walker_address;
+                    check_size_q    = 2'd3;
+                    check_read_q    = 1'b1;
+                    check_write_q   = 1'b0;
+                } else {
+                    check_address_q = physical_address;
+                    check_size_q    = cm_access_size_q;
+                    check_read_q    = cm_is_load_q;
+                    check_write_q   = cm_is_store_q;
+                }
                 fetch_page_q       = fetch_virtual_pc[38:12];
                 fetch_frame_q      = if fetch_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
                 fetch_next_frame_q = if fetch_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
@@ -1533,7 +1560,7 @@ module Core #(
                             } else {
                                 itlb_valid_q[itlb_fill_entry]    = 1'b1;
                                 itlb_page_q[itlb_fill_entry]     = walk_page;
-                                itlb_previous_q[itlb_fill_entry] = walk_page - 27'd1;
+                                itlb_previous_q[itlb_fill_entry] = walk_previous;
                                 itlb_frame_q[itlb_fill_entry]    = walker_page;
                                 itlb_perms_q[itlb_fill_entry]    = walker_perms;
                                 itlb_victim_q                    = !itlb_fill_entry;
@@ -1585,9 +1612,10 @@ module Core #(
                                 }
                             }
                         }
-                        // The checker sees the physical address in Verdict;
-                        // its registered result is used in Decide.
-                        TranslationState::Verdict: state_q = TranslationState::Decide;
+                        // The checker's inputs take the physical address in
+                        // Verdict; its registered result is used in Decide.
+                        TranslationState::Verdict: state_q = TranslationState::Settle;
+                        TranslationState::Settle : state_q = TranslationState::Decide;
                         TranslationState::Decide : {
                             if check_denied_q {
                                 fault_q       = 1'b1;

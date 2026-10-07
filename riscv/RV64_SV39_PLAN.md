@@ -166,7 +166,8 @@ load/store/AMO/LR/SC（13/15）、他タスクの物理ページ（13/15）、�
 store（6）。タイマ割り込みによるプリエンプション、ECALLのyield、不正なユーザーSPでもカーネル
 スタックが壊れないことも確認する。タスク切替は `satp` 書換えとSFENCE.VMA。
 
-同時クロックモデルと実機で合格（mcycle 477,807。U/PMPカーネル231,190の約2.1倍）。主因はTLBが
+同時クロックモデルと実機で合格（mcycle 477,807。U/PMPカーネル231,190の約2.1倍。7段目の
+タイミング修正後は512,104）。主因はTLBが
 小さく4 KiB単位であること（カーネルの1 GiB恒等写像が多数のエントリを要する）。SFENCE.VMAで
 I-cacheを消さないようにして約5%短縮した。superpageを1エントリで持つTLBは今後の改善候補。
 
@@ -192,3 +193,38 @@ I-cacheを消さないようにして約5%短縮した。superpageを1エント�
 
 記録は `toolchain/measurements/2026-10-06-rv64-sv39-112/`（配置配線・bitgen・監査・ソース、
 実機ログ、変異試験、データ側のみの段階の配置配線）。
+
+## 7段目：Struo bee70eb／Texo 92331edへの更新（2026-10-07）
+
+Struo bee70eb（定数CEの修正、#158）で写像後のネットリストが変わり、同じRTLがTexo fadec1cでも
+新しいTexoでも112 MHzで閉じなくなった（setup −393〜−574 ps）。RTLとTexoの両方を直した。
+
+- RTL：PMA/PMP検査器の入力をレジスタ化した（`check_address_q` ほか。ウォーク中はウォーカーの
+  アドレス、それ以外は変換後の物理アドレス）。データ変換は Verdict→Settle→Decide、ウォーカーは
+  Check→Settle→Issue と1状態ずつ増え、`request_denied` はアドレス変化の2サイクル後に見る。
+  ITLB補充の「ページ−1」は補充するページから直接作る（`walk_previous`）。
+- Veryl 0.22がSVのキーワードを識別子として拒否するため、`byte`→`byte_lane`、
+  `instance`→`copy` に改名した（動作は同じ）。
+- Texo #106：配線後の再配置候補（重み指数8/16/32）をすべて残し、上位6候補でsetup探索を100手ずつ
+  試してから最良の候補で続ける。
+
+| 項目 | 値 |
+| --- | --- |
+| 回帰 | `--sv39`・基本構成で既存270 ELFのサイクル数が全件不変（基本構成の `supervisor.elf` はS-modeが要るため従来どおり不合格）。Sv39の4 ELFは両クロック順で合格 |
+| 配置配線 | 素のフロー（Texo 92331ed）：setup 0 ps／hold +1 ps、timing closure met（既存4例外）、2,544 s。setup予算は3,000 s（1,800 sでは他の負荷で時間切れになり −20 ps。探索の経過は同一で、予算以外は変えていない） |
+| bitstream | `riscv/build/riscv-hardware-compact-user-112-sv39-20261007.bit` |
+| SHA-256 | `03521a98b6715062a7e6828b9bd860b32f50b072231471947b5248f590b1b611` |
+| チェック付きbitgen | プロファイル・PLL照合、JTCK 515 setup／515 hold一致 |
+| 実機 | 274 ELF全件合格（tapir、6分6秒。1回目はusbipdのUSB切断で224件目の後に中断し、再書込みしてやり直した） |
+
+| ELF | 実機 mcycle | 同時クロックモデル | 6段目の実機 |
+| --- | --- | --- | --- |
+| `sv39-data.elf` | 29,745 | 29,745 | 29,662 |
+| `sv39-fetch.elf` | 33,696 | 33,697 | 33,593 |
+| `kernel-supervisor.elf` | 512,104 | 512,105 | 477,807 |
+| `supervisor.elf` | 6,339 | 6,339 | 6,339 |
+| `kernel-user.elf` | 231,189 | 231,189 | 231,190 |
+
+kernel-supervisorの+7%はウォークとデータ変換のSettle状態による（TLBが4 KiB単位なので
+ウォークが多い）。変異試験はこの修正後に再実行していない。記録は
+`toolchain/measurements/2026-10-07-rv64-sv39-112-struo-bee70eb/`。

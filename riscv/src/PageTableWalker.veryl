@@ -22,8 +22,8 @@ module PageTableWalker (
     /// Physical address of the PTE being read, stable while `busy`.
     request_address: output logic<32>,
     /// The caller's verdict on `request_address` (PMP for an S-level read and
-    /// physical memory attributes). Sampled one cycle after the address
-    /// changes, so the caller may register it.
+    /// physical memory attributes). Sampled two cycles after the address
+    /// changes, so the caller may register both its inputs and its result.
     request_denied: input logic,
     /// One-cycle pulse: issue a read of `request_address`.
     request_issue: output logic,
@@ -39,9 +39,10 @@ module PageTableWalker (
     /// Leaf {D, U, X, W, R}.
     permissions: output logic<5>,
 ) {
-    enum State: logic<2> {
+    enum State: logic<3> {
         Idle,
         Check,
+        Settle,
         Issue,
         Wait,
     }
@@ -140,6 +141,8 @@ module PageTableWalker (
             } else if load_root || descend {
                 state_q = State::Check;
             } else if state_q == State::Check {
+                state_q = State::Settle;
+            } else if state_q == State::Settle {
                 state_q = State::Issue;
             } else if state_q == State::Issue {
                 state_q = State::Wait;
