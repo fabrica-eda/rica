@@ -83,7 +83,7 @@ def qualify(directory,legacy_batch_size=238,transport_retries=0):
     run('integrated-jtck',['python3',ROOT/'riscv/tools/check_integrated_jtck_sta.py',cp_path,'--architecture',arch,'--output',out/'jtck.json','--supplemental-binary',ROOT/'target/texo-sta-replacement/release/examples/measured_jtag_sta'])
     bit=out/'rv64-a-measured-sta-124p8.bit'
     run('checked-bitgen',[binary,'bitgen',cp_path,'--architecture',arch,'--database','/usr/share/trellis/database',
-        '--base-config','/home/user/.cache/texo/targets/LFE5UM5G-85F-texo-LFE5UM5G-85F-schema7-cache5-x86_64-unknown-linux-gnu/base.config',
+        '--base-config',str(Path.home()/'.cache/texo/targets/LFE5UM5G-85F-texo-LFE5UM5G-85F-schema7-cache5-x86_64-unknown-linux-gnu/base.config'),
         '--ecppack','/usr/bin/ecppack','--bit',bit])
     require(sha(cp_path)==record['checkpoint_sha256'],'checkpoint changed during bitgen')
     record['bitstream_sha256']=sha(bit);runner=ROOT/'target/release/hardware-riscv-tests';record['runner_sha256']=sha(runner)
