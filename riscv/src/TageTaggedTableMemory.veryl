@@ -18,7 +18,7 @@ module TageTaggedTableMemory (
     port_b_data   : input  logic<16>,
     port_b_read   : output logic<16>,
 ) {
-    for instance in 0..1 :g_memory {
+    for copy in 0..1 :g_memory {
         #[sv("struo_memory = \"required\"")]
         var memory: logic<16> [512];
 

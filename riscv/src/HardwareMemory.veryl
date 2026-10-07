@@ -301,12 +301,12 @@ module HardwareMemory #(
         // Four parallel terms followed by a 32-bit half swap keep the data
         // path shallow without the fanout of a full eight-way crossbar.
         // Request and response edges are unchanged.
-        for byte in 0..BANK_COUNT {
-            data_read_low_rotation[byte step 8] =
-                (data_bank_read[(byte + 0) % BANK_COUNT] & {data_response_select_q[0] repeat 8})
-                | (data_bank_read[(byte + 1) % BANK_COUNT] & {data_response_select_q[1] repeat 8})
-                | (data_bank_read[(byte + 2) % BANK_COUNT] & {data_response_select_q[2] repeat 8})
-                | (data_bank_read[(byte + 3) % BANK_COUNT] & {data_response_select_q[3] repeat 8});
+        for byte_lane in 0..BANK_COUNT {
+            data_read_low_rotation[byte_lane step 8] =
+                (data_bank_read[(byte_lane + 0) % BANK_COUNT] & {data_response_select_q[0] repeat 8})
+                | (data_bank_read[(byte_lane + 1) % BANK_COUNT] & {data_response_select_q[1] repeat 8})
+                | (data_bank_read[(byte_lane + 2) % BANK_COUNT] & {data_response_select_q[2] repeat 8})
+                | (data_bank_read[(byte_lane + 3) % BANK_COUNT] & {data_response_select_q[3] repeat 8});
         }
         data_read_mux = if data_response_rotate4_q ?
             {data_read_low_rotation[31:0], data_read_low_rotation[63:32]} : data_read_low_rotation;
@@ -713,9 +713,9 @@ module MachineTimer #(param TIMEBASE_HZ: u64 = 62_400_000) (
         compare_write    = write_enable && (address[15:3] == 13'h0800);
         software_write   = write_enable && (address[15:3] == 13'h0000) && shifted_mask[0];
         time_write_value = time_value;
-        for byte in 0..8 {
-            if shifted_mask[byte] {
-                time_write_value[byte step 8] = shifted_data[byte step 8];
+        for byte_lane in 0..8 {
+            if shifted_mask[byte_lane] {
+                time_write_value[byte_lane step 8] = shifted_data[byte_lane step 8];
             }
         }
         register_read = 64'd0;
@@ -757,9 +757,9 @@ module MachineTimer #(param TIMEBASE_HZ: u64 = 62_400_000) (
         if_reset {
             compare_q = 64'hffff_ffff_ffff_ffff;
         } else if compare_write {
-            for byte in 0..8 {
-                if shifted_mask[byte] {
-                    compare_q[byte step 8] = shifted_data[byte step 8];
+            for byte_lane in 0..8 {
+                if shifted_mask[byte_lane] {
+                    compare_q[byte_lane step 8] = shifted_data[byte_lane step 8];
                 }
             }
         }
