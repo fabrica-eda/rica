@@ -30,5 +30,4 @@ orders are tested. Compare like intervals and memory models.
 
 These are diagnostic workloads, not a representative application score.
 In particular, `load_store` measures one-word dependency latency, not cache
-capacity or streaming bandwidth. The architecture plan records cycles,
-routed frequency ceilings, and the limits of the resulting comparison.
+capacity or streaming bandwidth.

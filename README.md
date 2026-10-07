@@ -1,185 +1,106 @@
-# RICA RISC-V bring-up
+# Rica
 
-This workspace now contains the RISC-V implementation under `riscv/` and
-the I2C block used to establish host-driven hardware debug under `i2c/`.
+Rica is a 64-bit RISC-V CPU written in [Veryl](https://veryl-lang.org/) for the
+Lattice ECP5 **LFE5UM5G-85F** (the LFE5UM5G-85F-EVN evaluation board). It is a
+scalar, in-order core with M/S/U privilege levels and Sv39 virtual memory, and it
+is developed together with an open FPGA toolchain:
 
-Historical measurement logs, trial scripts, machine-specific records and binary
-artifacts under `toolchain/measurements/` are local archives excluded from Git.
-Links and commands pointing into that directory in older reports require the
-local archive; those files are not included in a fresh checkout. Maintained
-comparison tools and their portable input data live under `riscv/tools/`.
+- [Struo](https://github.com/fabrica-eda/struo) synthesizes Veryl to ECP5 primitives.
+- [Texo](https://github.com/fabrica-eda/texo) places, routes, runs static timing
+  analysis (STA) and generates bitstreams.
+- [Celox](https://github.com/celox-sim/celox) simulates the RTL.
+- [tapir](https://github.com/fabrica-eda/tapir) programs the board and serves JTAG
+  over XVC.
 
-The ECP5 RV64 architecture comparison, measurements, and implementation plan
-are recorded in [the architecture plan](riscv/RV64_ARCHITECTURE_PLAN.md).
-The current development build is scalar RV64 with a **64-entry BTB, two-bit
-direction prediction, eight-entry RAS and 4 KiB instruction cache**
-(`HardwareCompact4KTestTop`). The current image retains the mandatory
-**124.8/62.4 MHz PLL clocks**, with **+1 ps setup / +290 ps hold** and
-14,406 setup/hold checks, including 515 in the JTAG domain, in normal STA.
-It passed **100/100 distinct physical ELFs**, including **118 executions**
-with repeats and eleven counter checks per execution, through Windows D2XX.
+Every image described as "on hardware" below was built with this toolchain,
+closed timing in routed STA, and passed its test suite on a physical board.
 
-The JTAG receiver now samples on falling edges and registers the control
-boundary. This repairs the placement-dependent zero-response failure and the
-former WRITE64 corruption. The hardware runner defaults to the native-JTCK-STA
-image and **eight-byte writes**; the updated default also passed the basic eight ELFs.
-CPU performance
-remains within one cycle of the previous compact image on the original four
-diagnostics, whose speedup over the static image was about **1.223×**.
-The new timing-margin and LSU candidates failed routed timing and were not
-adopted. Their implementations, results and next steps are recorded in the
-[JTCK/LSU report](riscv/RV64_JTCK_LSU_PLAN.md).
-See the [earlier cause, repair and physical results](riscv/RV64_JTAG_FIX.md),
-[architecture/performance study](riscv/RV64_COMPACT_PREDICTOR.md), and
-[repair evidence](toolchain/measurements/2026-09-06-rv64-jtag-zero/README.md).
-The [static 4 KiB record](riscv/RV64_124P8_TIMING.md) remains the baseline.
+## Status
 
-The former fifteen-cycle 250 MHz `Core250` design was a useful synthesis,
-placement, routing, BRAM, PLL, JTAGG, setup, and hold stress case, but it is
-not the CPU architecture being developed here. That frozen design and its
-structural regression have moved to Texo's `examples/core250-qor`.
+| Profile | Board top | Clocks (CPU/memory) | ISA and platform | Hardware result |
+| --- | --- | --- | --- | --- |
+| **Working profile** | `HardwareCompactUserTestTop` | 112 / 56 MHz | RV64IMAC (C = Zca), Zba/Zbb/Zbs, Zicsr, Zifencei; M/S/U, PMP, **Sv39** | 274 ELFs pass (2026-10-07) |
+| Atomic M-mode profile | `HardwareCompactAtomicTestTop` | 124.8 / 62.4 MHz | RV64IMAC (C = Zca), Zba/Zbb/Zbs; M-mode only | 267 runs pass (2026-09-22) |
 
-Run the selected predictor's source RTL regression with:
+The working profile's clock is set by [`riscv/platform-user.json`](riscv/platform-user.json).
+The 274-ELF suite covers the pinned official RISC-V architecture tests (ACT4:
+RV64I, Zca, M, Zba, Zbb, Zbs), the project's own instruction, cache, predictor,
+memory, interrupt, PMP, S-mode and Sv39 diagnostics, and four Rust test kernels,
+including an S-mode kernel that runs isolated user tasks in their own page tables.
+On hardware, `mcycle` matches the simultaneous-clock simulation model within one
+cycle for the Sv39 tests and kernels.
 
-```sh
-cargo run --locked --offline -p verify-riscv --bin verify-riscv -- --rtl-only --compact-predictor
-```
+Not implemented: F/D/V, hypervisor, multiple harts, PLIC/AIA, an SBI
+implementation, and Linux compatibility. See [docs/history.md](docs/history.md)
+for the milestones and their measurements.
 
-The mandatory board CPU PLL runs at 124.8 MHz. Performance work is measured as instruction
-throughput, not Fmax alone: consecutive dependent ALU instructions sustain one
-instruction per clock through registered EX bypasses, while load-, shift-, and
-compare-use dependencies wait only for their producing stage. Board BRAM runs
-at 62.4 MHz behind response-token handshakes. The selected board configuration
-uses a synchronous L1 instruction cache; a two-line buffer is also available
-for comparisons. FENCE.I invalidates instruction storage and restarts fetch.
-The CPU frontend separately keeps a three-slot head/middle/tail fetch FIFO, so
-the predictor pipeline can remain full without conflating instruction-cache
-capacity with prediction-response capacity.
+## Documentation
 
-The core implements writable RV64 `mcycle`/`minstret` counters with
-`PerformanceCounter64`. Custom CSRs 0x7C0/0x7C1 select nine implementation
-events: selectors 0..3 count dependency bubbles, memory waits, redirects, and
-front-end bubbles in the shared-incrementer `PerformanceEventCounters4`, while
-selectors 4..8 count conditional resolutions, direction misses, BTB misses,
-RAS fallbacks, and prediction repairs. The current simulation suite contains
-eight bundled ELFs and exercises the dual-clock memory model in both possible
-serializations of coincident CPU/memory edges. The official ACT4 Zca catalog
-is pinned at
-`f7ba06c3d1a01428b172fe851ab56931a0624fee`; all 32 generated ELFs with set digest
-`8938083a2a0e5cd9ae7b74c6b1f6be9c8afec0da593b07478c8385a421e2a12e`
-pass the ordinary and dual-clock RTL models.
+| Document | Contents |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | Pipeline, front end, branch prediction, caches, execution units, LSU |
+| [docs/privileged.md](docs/privileged.md) | M/S/U, CSRs, traps and delegation, PMP, Sv39 |
+| [docs/platform.md](docs/platform.md) | Memory map, timer, console, boot, JTAG debug transport, clocks |
+| [docs/building-and-simulation.md](docs/building-and-simulation.md) | Development shell, building tests and kernels, simulation |
+| [docs/fpga-flow.md](docs/fpga-flow.md) | Synthesis, place-and-route, timing sign-off, checked bitgen |
+| [docs/hardware-testing.md](docs/hardware-testing.md) | Programming the board and running tests on hardware |
+| [docs/verification.md](docs/verification.md) | Test suites, ACT4, clock-order models, mutation testing |
+| [docs/kernels.md](docs/kernels.md) | The Rust test kernels |
+| [docs/timing-characterization.md](docs/timing-characterization.md) | On-board delay measurements behind the STA library |
+| [docs/design-notes.md](docs/design-notes.md) | Hazards and timing lessons that shaped the RTL |
+| [docs/toolchain-issues.md](docs/toolchain-issues.md) | Tool defects found while bringing up Rica |
+| [docs/history.md](docs/history.md) | Milestones, dates and key numbers |
+| [i2c/README.md](i2c/README.md) | The JTAG-to-I2C debug target used for early board bring-up |
 
-### Archived September 2 predictor checkpoint
+## Repository layout
 
-The September 2 predictor-enabled source RTL regressions and Struo's
-proof-signed logical mapping transformations passed, but that board map did
-not close physical timing. From that checkpoint's 31,450-cell Struo map,
-official nextpnr 0.11.1 static seed 5 reaches 89.598 MHz and Texo 0.1.6 reaches
--1.813 ns setup WNS; both fail the 124.8 MHz target. The nextpnr critical path
-runs from an automatically retimed fetch-line bit to a TAGE write-enable with
-9.161 ns of routing, while Texo's worst capture is another retimed fetch-line
-register. The nextpnr result also misses the one-CPU-period memory-to-CPU
-boundary guard (9.205/8.012 ns). Disabling automatic retiming makes the routed
-CPU period 2.038 ns worse, so the unusual retimed path is not catalogued as a
-confirmed synthesis defect. No current bitstream or hardware qualification is
-claimed for that checkpoint; the retained hashes and path breakdowns are in
-[`toolchain/measurements/2026-09-02-rica-qor.md`](toolchain/measurements/2026-09-02-rica-qor.md).
+| Path | Contents |
+| --- | --- |
+| `riscv/src/` | CPU and board RTL (Veryl) |
+| `riscv/verify/` | Simulation runners, the hardware test runner and Rust RTL tests (`verify-riscv`) |
+| `riscv/tests/` | Self-checking assembly tests, ACT4 enable lists and Veryl native testbenches |
+| `riscv/kernel/` | Rust `no_std` test kernels |
+| `riscv/tools/` | Texo launchers, bitgen wrapper, test generators and build scripts |
+| `riscv/characterization/` | On-board delay measurement and STA-library fitting scripts |
+| `riscv/act4/` | ACT4 configurations for Rica |
+| `i2c/` | Debug I2C target and its verifier |
+| `toolchain/` | Veryl testbench runner (`rica-tb`), Texo launcher crate, vendored crates, nextpnr experiments |
+| `third_party/riscv-arch-test` | Official architecture tests (git submodule) |
 
-### Archived pre-predictor hardware checkpoint
+## Quick start
 
-The following result predates the predictor frontend and eleven-
-counter readback ABI. It is retained as provenance, not as timing or hardware
-qualification of the current RTL.
-
-Texo 0.1.6 revision `f8c57e09` closed that earlier RV64C/six-counter board
-design at the 124.8 MHz PLL clock. The recorded result for the checkpoint
-formerly written as `riscv/build/riscv-hardware-test-125-ce8.texo.json` was
-+0.011 ns setup WNS and +0.290 ns hold WNS, both with zero TNS. It contained
-20,588 mapped cells, 16,771 implemented cells, 18,497 nets, and 228,641 routed
-PIPs; STA checked 10,406 of 10,926 endpoints. That ignored JSON was not retained
-immutably and has since been reused by an experimental predictor build; these
-numbers are provenance, not a description of the file currently on disk. The
-generated
-`riscv/build/riscv-hardware-test-125-texo.bit` has SHA-256
-`e53d19fd33bf89d365fb7d4b3c2b790b163fe13296906f7dc90bbb600b2a9320`.
-On the EVN at 124.8 MHz this exact historical bitstream passed all eight
-bundled ELFs, all 51 pinned ACT4 RV64I ELFs, and all 32 pinned ACT4 RV64Zca
-ELFs. The then-current hardware runner also read and validated its six 64-bit
-performance counters after every ELF. The current compact/L1I image has separate
-timing and physical evidence linked above, including its byte-write loading
-requirement; the historical results do not qualify its eight-byte JTAG path.
-
-Run the I2C regressions with:
+Requirements: Linux (x86_64 or aarch64, WSL2 works) with Nix flakes enabled.
 
 ```sh
-cargo run --locked --release --offline -p verify-i2c
+git clone --recurse-submodules <this repository>
+cd rica
+nix develop                      # pinned Rust, Python, compilers and mbx
+cargo test --workspace --locked  # Rust and RTL unit tests
 ```
 
-See [riscv/README.md](riscv/README.md) for the CPU plan and
-[i2c/README.md](i2c/README.md) for the debug protocol. Confirmed synthesis,
-simulation, STA, P&R, and bitgen defects are tracked separately in
-[TOOLCHAIN_ISSUES.md](TOOLCHAIN_ISSUES.md).
-
-Veryl native testbenches run on Celox with `cargo test --locked --offline -p rica-tb`;
-see [test instructions](riscv/tests/README.md). The [MRE inventory](toolchain/mre/README.md)
-currently has no active reproducers; fixed cases are covered by upstream regressions.
-
-## Current synthesis tools and output formats
-
-The workspace pins Celox 0.8.1 and the Struo/Texo revisions in `Cargo.toml` and
-`Cargo.lock`. Run Texo through `riscv/tools/texo`; it builds the pinned CLI with
-Nix and MBX, sharing the workspace target directory. `riscv/tools/texo-measured`
-also supplies the hash-checked board measurement models and the 194 ps guard.
-Archived STA libraries and their evidence can be read directly from `.zst`;
-hash verification uses the original decompressed bytes without JSON staging.
-The old qualified executable is available only with `--historical-toolchain`;
-its qualification does not transfer to a new implementation.
+Build and run the bundled RV64 tests in simulation:
 
 ```sh
-riscv/tools/texo --version
-riscv/tools/texo-measured pnr riscv --top HardwareCompactUserTestTop \
-  --device LFE5UM5G-85F --package CABGA381 --speed 8 \
-  --lpf riscv/lfe5um5g-85f-evn.lpf --pll-binding riscv/pll-12-to-124p8.json \
-  --jtagg-prefix jtag --clock-constraints riscv/jtck-clock-constraints.json \
-  --timing-exceptions riscv/timing-coverage-exceptions.json \
-  --output riscv/build/current-user.txcp
+cargo run --locked --release -p verify-riscv --bin rv64-riscv-tests
 ```
 
-New Texo checkpoints use `.txcp` (CBOR + Zstd). The `nextpnr-riscv` and
-`nextpnr-i2c` mapping helpers now write compressed `.stnet` files by default.
-Add `--nextpnr-json` only when exporting for external nextpnr; its input format
-is JSON. Physical feedback accepts both the compressed artifacts and old JSON.
-These formats describe different artifacts: a Struo `.stnet` is not a Texo
-PNR checkpoint. Old archived JSON remains readable.
-
-The Texo launcher disables `TEXO_METRICS`, `TEXO_PNR_METRICS`, and
-`TEXO_PNR_VERBOSE_METRICS` by default.
-Set `RICA_VERBOSE=1` to preserve explicitly enabled diagnostic logging. Historical
-measurement manifests and immutable experimental executables are retained for
-reproduction; do not copy their old dependency pins into new development builds.
-
-## Nix development environment
-
-On x86_64 or aarch64 Linux (including WSL2), enter the pinned development shell:
+Run an ELF on the working profile's RTL model (both CPU/memory clock orders):
 
 ```sh
-nix develop
-cargo --version
-mbx --version
-cargo test --workspace --locked
+cargo build --locked --release -p verify-riscv
+target/release/verify-riscv --hardware-memory-rtl --compact-predictor --icache-kib 4 \
+  --m-extension --dsp-multiplier --zba-extension --zbb-extension --zbs-extension \
+  --early-bitmanip --early-taken-fetch --early-divide --machine-interrupts \
+  --machine-console --strict-memory --a-extension --u-mode --sv39 --fast-lsu 6 \
+  --max-cycles 2000000 path/to/test.elf
 ```
 
-Enable Nix flakes and `nix-command` if your installation does not already do so.
-The shell supplies Rust, rustfmt, Clippy, rust-analyzer, C/C++ compilers, CMake,
-pkg-config, OpenSSL, Python and mbx. Rust follows `rust-toolchain.toml`. Plain `cargo`
-commands automatically run through mbx's shared build cache; no global Cargo
-configuration or `mbx setup` is required. The mbx package comes from
-[tignear/nix-packages](https://github.com/tignear/nix-packages), pinned in
-`flake.lock`. Existing mbx user configuration is respected.
+Place and route the working profile, then follow
+[docs/fpga-flow.md](docs/fpga-flow.md) for timing sign-off and bitgen and
+[docs/hardware-testing.md](docs/hardware-testing.md) to run it on the board.
 
-For automatic activation, install direnv, enable its shell hook, then run
-`direnv allow` in this repository. FPGA target packs, released Fabrica tools,
-and board programming tools still follow the project-specific instructions above.
+## License
 
-Update the shared cache package with `nix flake update nix-packages`, or all
-pinned development dependencies with `nix flake update`.
+Rica is licensed under the [MIT License](LICENSE). Vendored crates under
+`toolchain/vendor/` and the `third_party/riscv-arch-test` submodule keep their
+own licenses.

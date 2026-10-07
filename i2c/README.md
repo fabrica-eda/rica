@@ -67,37 +67,28 @@ one dedicated `JTAGG` cell and verifies that `texo-struo` preserves its
 ER1/ER2 configuration and one `EHXPLLL` with a 4.000 ns generated-clock
 constraint.
 
-## Timing-oriented structure
+## Board transport and timing
 
-The initial monolithic FSM produced 963 Boolean nodes, 625 ECP5 cells, and a
-mapped estimate of 8.72 ns. The current one-hot implementation separates
-next-state logic, receive shifting, bit counting, SDA drive control, and the
-debug bus. With Struo `69e7ec13`, the standalone debug top reports 443 nodes,
-68 RTL registers and 244 mapped cells. Its 250 MHz mapping estimate improves
-the critical combinational path from 4.22 ns to 3.72 ns.
+The board build does not use external SCL/SDA pins. `JtagI2cDebugTop` drives the
+I2C target from inside the FPGA through the ECP5 `JTAGG` user chain: ER1 is a
+two-bit I2C bit-bang command register, and the SVF transport appends one dummy
+scan clock because JTAGG presents JTDI one TCK late. ER2 exposes PLL lock and
+other status independently of the I2C state machine.
 
-The board debug transport uses the on-board FT2232 JTAG connection and the
-ECP5 `JTAGG` user scan chain. TCK/TDI/TDO/TMS remain dedicated JTAG pins; SCL
-and SDA are generated inside the fabric by a JTAG-to-I2C bridge and therefore
-do not receive ordinary LPF pin assignments or external pull-ups.
-`JtagI2cDebugTop` implements ER1 as a two-bit I2C bit-bang command register.
-JTAGG exports `JTDI` one TCK late, so the SVF transport appends one dummy scan
-clock after the two command bits. The host command API remains two bits.
-The board's 12 MHz clock drives an `EHXPLLL`; `CLKOS` is the sole 250 MHz
-fabric clock. The 12 MHz pin is sampled as asynchronous data in that domain,
-so it is not promoted to a second global clock. A 65536-cycle window observes
-about 3146 reference rising edges and publishes the result at register `0x03`.
+The board's 12 MHz clock feeds one `EHXPLLL` whose `CLKOS` is the only 250 MHz
+fabric clock (4.000 ns constraint). The 12 MHz pin is sampled as data through a
+two-register synchronizer instead of being promoted to a second global clock
+(promoting both left overused wires). A 65,536-cycle window counts about 3,146
+reference edges and reports the result in register `0x03`.
 
-The Texo 0.1.6 P&R run closes the 4.000 ns constraint at **+9 ps setup
-slack and +290 ps hold slack**, with zero setup and hold TNS. Native bitgen
-produces the final ECP5 bitstream
-through Texo's public Cargo API. The hardware SVF passed after SRAM programming:
-scratch write `0xa5`, ID `0x52`, protocol `0x02`, PLL lock, synchronized reset
-release, activity, ratio-window completion, and the measured 250/12 ratio.
+The target is a one-hot FSM with next-state logic, receive shifting, bit
+counting, SDA drive and the debug bus separated. Register reads use a two-level
+decode (upper nibble selects a bank, low bits an entry); a flat seven-arm read
+mux routed at only 232 MHz.
 
-The workspace pins the current synthesis stack in the root `Cargo.toml` and
-`Cargo.lock`. Use the repository launcher to build and run that exact Texo with
-Nix/MBX. New checkpoints use compressed `.txcp` files.
+With the pinned toolchain the design closes 250 MHz in Texo, and the native
+bitstream passes the hardware SVF regression: scratch write `0xa5`, ID `0x52`,
+protocol `0x02`, PLL lock, reset release, activity and the 250/12 MHz ratio.
 
 ```sh
 cargo run --locked --offline -p verify-i2c
@@ -111,3 +102,14 @@ cargo run --locked --offline -p verify-i2c --bin hardware-i2c
 openFPGALoader -b ecp5_evn --write-sram i2c/build/jtag-i2c-target-250.bit
 openFPGALoader -b ecp5_evn i2c/build/jtag-i2c-hardware.svf
 ```
+
+## History
+
+This block was the first design brought up on the board with Struo and Texo.
+It exposed several toolchain defects, all fixed upstream: lowering of module
+constants and dynamic packed selects, open-drain I/O binding, Texo emitting a
+nonexistent `JTAG.MODE` setting, a hold ECO that kept a stale route after a
+pin-only rebinding, and a Texo configuration that was functionally wrong
+although nextpnr implemented the same netlist correctly. It also found that a
+32-bit activity counter, retimed into a carry chain at 225 MHz and above,
+violated slice adjacency; the probe now uses only a 16-bit counter.

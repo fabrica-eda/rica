@@ -1,0 +1,163 @@
+# Building and simulation
+
+## Development shell
+
+Rica uses a Nix flake for its toolchain. On x86_64 or aarch64 Linux (WSL2
+included), with flakes and `nix-command` enabled:
+
+```sh
+nix develop
+cargo test --workspace --locked
+```
+
+The shell provides Rust (from `rust-toolchain.toml`, currently 1.98.1),
+rustfmt, Clippy, rust-analyzer, C/C++ compilers, CMake, pkg-config, OpenSSL,
+Python (with `cbor2` and `zstandard`) and [mbx](https://github.com/tignear/nix-packages).
+Plain `cargo` runs through mbx's shared build cache. With direnv installed,
+`direnv allow` activates the shell automatically. Update the pins with
+`nix flake update`.
+
+Struo, Texo and Celox are ordinary Cargo dependencies, pinned in `Cargo.toml`
+and `Cargo.lock`. Veryl's analyzer is vendored with a local patch under
+`toolchain/vendor/veryl-const-value`.
+
+The architecture tests are a git submodule:
+
+```sh
+git submodule update --init
+```
+
+## Simulation runners
+
+`verify-riscv` (package `verify-riscv`) provides three simulation binaries:
+
+| Binary | Purpose |
+| --- | --- |
+| `verify-riscv` | Core and board-memory RTL simulation of ELFs, register-file and mapping checks |
+| `rv64-riscv-tests` | Builds and runs the bundled assembly suites and ACT4 catalogs |
+| `hardware-riscv-tests` | Runs ELFs on the FPGA ([hardware-testing.md](hardware-testing.md)) |
+
+Build them once in release mode:
+
+```sh
+cargo build --locked --release -p verify-riscv
+```
+
+### Models
+
+- **Core model** (default): the core with immediate instruction and data memory.
+  Fast; used for architectural regression of the bundled suites.
+- **Board-memory model** (`--hardware-memory-rtl`): the core with the real
+  `HardwareMemory` RTL, I-cache and dual-clock memory. Each ELF runs twice, once
+  with coincident CPU/memory edges evaluated memory-first and once CPU-first, so
+  that neither order can hide a handshake bug.
+- **Simultaneous-clock model** (`--hardware-memory-rtl --timed-clocks`): Celox's
+  timed scheduler evaluates coincident edges together. Its `mcycle`/`minstret`
+  match the FPGA, so use it for cycle counts. It compiles one model per ELF and
+  needs explicit ELF paths.
+
+### Feature flags
+
+The model is configured with flags matching the board parameters:
+
+| Flag | Feature |
+| --- | --- |
+| `--compact-predictor`, `--icache-kib 4` | Working-profile front end (`--icache-kib` needs `--hardware-memory-rtl`) |
+| `--m-extension`, `--dsp-multiplier`, `--early-divide` | M extension |
+| `--zba-extension`, `--zbb-extension`, `--zbs-extension`, `--early-bitmanip` | B extension |
+| `--a-extension` | A extension (needs `--strict-memory`) |
+| `--machine-interrupts`, `--machine-console`, `--strict-memory` | Platform |
+| `--u-mode`, `--s-mode`, `--sv39` | Privilege; `--sv39` implies `--s-mode` |
+| `--fast-lsu 6`, `--early-taken-fetch` | LSU and fetch timing |
+| `--kernel-console` | Host side of the console kernel's ping/pong protocol |
+| `--project PATH` | Read RTL and `platform-user.json` from another project snapshot |
+| `--max-cycles N` | Timeout |
+
+The working profile:
+
+```sh
+target/release/verify-riscv --hardware-memory-rtl --compact-predictor --icache-kib 4 \
+  --m-extension --dsp-multiplier --zba-extension --zbb-extension --zbs-extension \
+  --early-bitmanip --early-taken-fetch --early-divide --machine-interrupts \
+  --machine-console --strict-memory --a-extension --u-mode --sv39 --fast-lsu 6 \
+  --max-cycles 2000000 ELF...
+```
+
+Add `--timed-clocks` for cycle-accurate counts. Without flags the core uses the
+legacy TAGE comparison configuration.
+
+## Building test programs
+
+### Assembly suites
+
+`rv64-riscv-tests` assembles its suites with LLVM 20's `llvm-mc` and Rust's
+bundled `rust-lld` (override with `LLVM_MC` / `RUST_LLD`) and runs them:
+
+```sh
+cargo run --locked --release -p verify-riscv --bin rv64-riscv-tests             # bundled RV64I/C/system tests
+cargo run --locked --release -p verify-riscv --bin rv64-riscv-tests -- --m-tests --max-cycles 1000000
+```
+
+Other suites: `--benchmarks`, `--memory-tests`, `--cache-tests`,
+`--predictor-tests`, `--m-benchmarks`, `--zba-tests`, `--zbb-tests`,
+`--zbs-tests`, and the ACT4 catalogs (`--act4`, `--act4-suite NAME`). Outputs go
+to `riscv/build/`. See [verification.md](verification.md).
+
+Generators and builders for the remaining diagnostics live in `riscv/tools/`:
+
+| Script | Output |
+| --- | --- |
+| `build_rv64_a.py` | A-extension diagnostics (`riscv/build/rv64-a/`) |
+| `build_rv64_machine_interrupts.py` | `machine_interrupts.elf`, `timer_context_switch.elf` |
+| `build_rv64_zba_c.py`, `build_rv64_zbb_c.py`, `build_rv64_zbs_c.py`, `build_rv64_divide_c.py` | Paired C workloads with and without the extension |
+| `generate_rv64_m_tests.py`, `generate_rv64_m_benchmarks.py`, `generate_rv64_z*_tests.py` | Generated instruction tests |
+
+C workloads need Clang 20; set `RISCV_CLANG` to its path.
+
+### Kernels and privileged diagnostics
+
+```sh
+rustup component add rust-src --toolchain 1.98.1
+python3 riscv/kernel/build.py       # M-mode kernels -> riscv/build/rust-kernel/
+python3 riscv/kernel/build-user.py  # U/S kernels and PMP/S-mode/Sv39 tests -> riscv/build/user-kernel/
+python3 riscv/kernel/check.py       # build, audit and simulate the M-mode kernels
+```
+
+`build-user.py` produces `kernel-user.elf`, `kernel-supervisor.elf`, and the
+assembly diagnostics `pmp-machine.elf`, `pmp-cache.elf`, `system.elf`,
+`supervisor.elf`, `sv39-data.elf` and `sv39-fetch.elf`. Both scripts write a
+manifest with compiler arguments and source/ELF hashes, and audit the
+disassembly against an allowed instruction set. See [kernels.md](kernels.md).
+
+## Veryl native testbenches
+
+Some unit tests are Veryl testbenches run by Celox:
+
+```sh
+cargo run --locked -p rica-tb -- native                       # all testbenches
+cargo run --locked -p rica-tb -- native performance_counter   # one testbench
+cargo test --locked -p rica-tb                                # all backends
+```
+
+`riscv/tests/suite.txt` lists each testbench and its sources; they are read at
+run time, so HDL edits need no Rust rebuild.
+
+## Rust RTL tests
+
+`riscv/verify/tests/` holds the larger RTL tests: native and ECP5-mapped
+equivalence for units such as the PMP checker, CSR file, page-table walker,
+atomic units, ALU, multiplier and JTAG transport, plus predictor and pipeline
+integration tests.
+
+```sh
+cargo test --locked --release -p verify-riscv
+cargo test --locked --release -p verify-riscv --test page_table_walker
+```
+
+## I2C debug target
+
+```sh
+cargo run --locked --release -p verify-i2c
+```
+
+See [i2c/README.md](../i2c/README.md).

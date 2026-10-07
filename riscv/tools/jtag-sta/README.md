@@ -4,7 +4,7 @@ This is the supplemental checker used by `../bitgen_jtag_checked.py`. It was
 retained from the repaired JTAG investigation after its obsolete MRE/ECO tools
 were removed. It shares the root workspace's Texo pin, Cargo.lock, and build
 directory. Both compressed `.txcp` checkpoints and legacy JSON are accepted.
-Run through the bitgen wrapper; see `../../RV64_JTAG_FIX.md` for scope and limits.
+Run it through the bitgen wrapper; see [docs/fpga-flow.md](../../../docs/fpga-flow.md#checked-bitgen).
 
 For a measured checkpoint, the checker installs the exact hash-bound timing
 library recorded in `target.measured_timing`, verifies its measurement inputs,

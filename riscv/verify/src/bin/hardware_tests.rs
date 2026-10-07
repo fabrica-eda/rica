@@ -1157,7 +1157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut act4_suite = Act4Suite::I;
     let mut xvc_address = None::<String>;
     // CPU/memory stay at 124.8/62.4 MHz. This console image passed
-    // STA with 200 ps setup/hold reserves and RV64_OS_ISA_PLAN.md qualification.
+    // STA with 200 ps setup/hold reserves and its hardware qualification.
     let mut bitstream = project.join("build/riscv-hardware-compact-console-124p8-20260911.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
