@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use celox::{BigUint, NativeBackend, NativeProgramImage, OptLevel, Simulator, SimulatorBuilder};
+use celox::{NativeBackend, NativeProgramImage, OptLevel, Simulator, SimulatorBuilder};
 
 const NOP: u32 = 0x0000_0013;
 const EARLY_DIVIDE_CONFIG: u64 = 32_648;
@@ -26,20 +26,14 @@ fn project_path() -> PathBuf {
 
 fn native_image(config: u64) -> &'static NativeProgramImage {
     static ACCESS: OnceLock<NativeProgramImage> = OnceLock::new();
-    static ACCESS_TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
     static ACCESS_STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static INTERRUPTS: OnceLock<NativeProgramImage> = OnceLock::new();
-    static INTERRUPTS_TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
     static INTERRUPTS_STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
-    static TAGE: OnceLock<NativeProgramImage> = OnceLock::new();
-    static BIMODAL: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_EARLY_DIVIDE: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_TAKEN_FETCH: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT32: OnceLock<NativeProgramImage> = OnceLock::new();
-    static TAGE_M: OnceLock<NativeProgramImage> = OnceLock::new();
-    static BIMODAL_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static STATIC_M: OnceLock<NativeProgramImage> = OnceLock::new();
     static COMPACT_ZBB_ONLY: OnceLock<NativeProgramImage> = OnceLock::new();
@@ -58,10 +52,8 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
     static EARLY_3976: OnceLock<NativeProgramImage> = OnceLock::new();
     let image = match config {
         ACCESS_CONFIG => &ACCESS,
-        98_432 => &ACCESS_TAGE,
         98_436 => &ACCESS_STATIC,
         INTERRUPTS_CONFIG => &INTERRUPTS,
-        32_896 => &INTERRUPTS_TAGE,
         32_900 => &INTERRUPTS_STATIC,
         EARLY_DIVIDE_CONFIG => &COMPACT_EARLY_DIVIDE,
         8200 => &COMPACT_TAKEN_FETCH,
@@ -69,13 +61,9 @@ fn native_image(config: u64) -> &'static NativeProgramImage {
         6152 => &EARLY_2056,
         6024 => &EARLY_1928,
         5640 => &EARLY_1544,
-        0 => &TAGE,
-        2 => &BIMODAL,
         4 => &STATIC,
         8 => &COMPACT,
         24 => &COMPACT32,
-        128 => &TAGE_M,
-        130 => &BIMODAL_M,
         136 => &COMPACT_M,
         132 => &STATIC_M,
         392 => &COMPACT_DSP_M,
@@ -194,14 +182,9 @@ struct Cycle {
     ex_mismatch: bool,
     ex_exception: bool,
     recover: bool,
-    maintenance_recover: bool,
     discard: bool,
     retire: bool,
     predicted_kind: u64,
-    predicted_taken: bool,
-    predicted_next_pc: u32,
-    actual_taken: bool,
-    actual_next_pc: u32,
     ex_kind: u64,
     predictor_request_ready: bool,
     predictor_request: bool,
@@ -226,11 +209,7 @@ struct CoreDriver {
 
 impl CoreDriver {
     fn new(program: impl IntoIterator<Item = (u32, u32)>) -> Self {
-        Self::with_predictor(program, true)
-    }
-
-    fn with_predictor(program: impl IntoIterator<Item = (u32, u32)>, use_tage: bool) -> Self {
-        Self::with_config(program, if use_tage { 0 } else { 2 })
+        Self::with_config(program, 8)
     }
 
     fn with_config(program: impl IntoIterator<Item = (u32, u32)>, config: u64) -> Self {
@@ -282,13 +261,6 @@ impl CoreDriver {
             .unwrap_or(0)
     }
 
-    fn predictor_value(&mut self, name: &str) -> BigUint {
-        let signal = self
-            .simulator
-            .child_signal(&[("branch_predictor", 0)], name);
-        self.simulator.get(signal)
-    }
-
     fn csr_value(&mut self, name: &str) -> u64 {
         let signal = self.simulator.child_signal(&[("csr_file", 0)], name);
         self.simulator
@@ -299,10 +271,17 @@ impl CoreDriver {
             .unwrap_or(0)
     }
 
-    fn counter(&mut self, index: u8) -> u64 {
-        let selector = self.simulator.signal("debug_counter_index");
-        self.simulator.modify(|io| io.set(selector, index)).unwrap();
-        self.value("debug_counter_data")
+    /// The compact predictor scrubs its table after reset and accepts no
+    /// request until the sweep finishes.
+    fn wait_for_predictor_scrub(&mut self) {
+        for _ in 0..256 {
+            if self.value("predictor_ready") != 0 {
+                return;
+            }
+            let clock = self.simulator.event("clk");
+            self.simulator.tick(clock).unwrap();
+        }
+        panic!("the predictor scrub never finished");
     }
 
     fn set_interrupts(&mut self, levels: u8) {
@@ -369,14 +348,9 @@ impl CoreDriver {
             ex_mismatch: self.value("ex_prediction_mismatch") != 0,
             ex_exception: self.value("ex_exception") != 0,
             recover: self.value("predictor_recover_valid") != 0,
-            maintenance_recover: self.value("predictor_recover_valid_q") != 0,
             discard: self.value("predictor_discard_all") != 0,
             retire: self.value("cm_retire_event") != 0,
-            predicted_kind: self.value("cm_predicted_kind_q"),
-            predicted_taken: self.value("cm_predicted_taken_q") != 0,
-            predicted_next_pc: self.value("cm_predicted_next_pc_q") as u32,
-            actual_taken: self.value("cm_branch_taken") != 0,
-            actual_next_pc: self.value("cm_actual_next_pc") as u32,
+            predicted_kind: self.value("rx_predicted_kind_q"),
             ex_kind: self.value("ex_control_kind_q"),
             predictor_request_ready: self.value("predictor_request_ready") != 0,
             predictor_request: self.value("predictor_request_valid") != 0,
@@ -397,20 +371,6 @@ impl CoreDriver {
         observed
     }
 
-    fn assert_predictor_frontiers_equal(&mut self) {
-        assert_eq!(
-            self.predictor_value("speculative_history_q"),
-            self.predictor_value("committed_history_q"),
-            "speculative GHR did not recover to the committed GHR"
-        );
-        for fold in ["index", "tag_a", "tag_b"] {
-            assert_eq!(
-                self.predictor_value(&format!("speculative_{fold}_q")),
-                self.predictor_value(&format!("committed_{fold}_q")),
-                "{fold} folds did not recover"
-            );
-        }
-    }
 }
 
 fn direct_trained_driver(config: u64) -> CoreDriver {
@@ -418,7 +378,7 @@ fn direct_trained_driver(config: u64) -> CoreDriver {
         CoreDriver::with_config([(0, encode_jal(0, 4)), (4, encode_jal(0, -4))], config);
     for _ in 0..300 {
         let cycle = driver.step();
-        if cycle.cm_valid && cycle.cm_pc == 0 && cycle.predicted_kind == KIND_DIRECT {
+        if cycle.rx_valid && cycle.rx_pc == 0 && cycle.predicted_kind == KIND_DIRECT {
             return driver;
         }
     }
@@ -478,6 +438,7 @@ fn non_bypass_dependency_stalls_exactly_once() {
 #[test]
 fn registered_decision_queue_sustains_one_not_taken_request_per_clock() {
     let mut driver = CoreDriver::new([]);
+    driver.wait_for_predictor_scrub();
     let mut consecutive = 0;
     let mut longest = 0;
     let mut previous_request_pc = None;
@@ -687,59 +648,12 @@ fn taken_target_preview_preserves_load_dependencies_and_mispredicted_loop_exit()
 }
 
 #[test]
-fn invalid_fetch_refreshes_masked_payload_without_issuing_or_advancing() {
-    let instruction = encode_addi(1, 0, 7);
-    let mut driver = CoreDriver::new([(0, instruction)]);
-    driver.set_instr_valid(false);
-    let initial_lookup_sequence = driver.predictor_value("lookup_sequence_q");
-
-    for _ in 0..3 {
-        let cycle = driver.step();
-        assert_eq!(cycle.fetch_pc, 0);
-        assert!(!cycle.predictor_request);
-        assert!(!cycle.predictor_request_accept);
-        assert_eq!(driver.value("pc"), 0, "invalid fetch advanced the cursor");
-        assert_eq!(
-            driver.value("fetch_valid_q"),
-            0,
-            "invalid payload became visible"
-        );
-        assert_eq!(
-            // Packed tail: compressed, valid, access_fault, fault_boundary,
-            // frame (20 bits).
-            (driver.value("fetch_q") >> 24) as u32,
-            instruction,
-            "masked payload did not refresh independently of instr_valid",
-        );
-        assert_eq!(
-            driver.predictor_value("lookup_sequence_q"),
-            initial_lookup_sequence,
-            "invalid payload capture launched a semantic predictor lookup",
-        );
-    }
-
-    assert_eq!(driver.value("fetch_payload_capture"), 1);
-    assert_eq!(driver.value("predictor_request_ready"), 1);
-    driver.set_instr_valid(true);
-    let accepted = driver.step();
-    assert_eq!(accepted.fetch_pc, 0);
-    assert!(accepted.predictor_request);
-    assert!(accepted.predictor_request_accept);
-    assert_eq!(
-        driver.value("pc"),
-        4,
-        "valid retry did not advance exactly once"
-    );
-    assert_eq!(driver.value("fetch_valid_q"), 1);
-    assert_eq!((driver.value("fetch_q") >> 24) as u32, instruction);
-}
-
-#[test]
 fn memory_wait_refreshes_only_invalid_payload_slots() {
     let load = encode_ld(2, 0, 0);
     let first = encode_addi(5, 0, 1);
     let second = encode_addi(5, 0, 2);
     let mut driver = CoreDriver::new([(0, load), (4, first)]);
+    driver.wait_for_predictor_scrub();
     driver.set_data_response_sequence(0);
 
     let first_cycle = driver.step();
@@ -790,108 +704,6 @@ fn memory_wait_refreshes_only_invalid_payload_slots() {
         refreshed,
         "the load never exposed a second memory-wait cycle for payload refresh"
     );
-}
-
-#[test]
-fn learned_taken_branch_to_fallthrough_repairs_direction_history() {
-    // beq x0,x0,+4 is taken, but its target is numerically identical to the
-    // ordinary 32-bit fallthrough.  The JAL closes the two-instruction loop.
-    let mut driver = CoreDriver::new([(0, encode_branch(0, 0, 0, 4)), (4, encode_jal(0, -4))]);
-
-    let mut cold_branch_recoveries = 0;
-    for _ in 0..300 {
-        let cycle = driver.step();
-        if cycle.recover && cycle.branch_redirect && cycle.cm_valid && cycle.cm_pc == 0 {
-            if cycle.predicted_kind != KIND_CONDITIONAL {
-                cold_branch_recoveries += 1;
-                continue;
-            }
-
-            assert_eq!(cold_branch_recoveries, 1);
-            assert_eq!(cycle.predicted_kind, KIND_CONDITIONAL);
-            assert!(!cycle.predicted_taken);
-            assert!(cycle.actual_taken);
-            assert_eq!(cycle.predicted_next_pc, 4);
-            assert_eq!(cycle.actual_next_pc, 4);
-            let next = driver.step();
-            assert!(
-                !next.recover,
-                "conditional recovery lasted more than one cycle"
-            );
-            assert!(
-                next.maintenance_recover && next.redirect_pending,
-                "queued predictor recovery did not occupy the redirect window"
-            );
-            driver.assert_predictor_frontiers_equal();
-            assert!(driver.counter(6) > 0, "conditional counter did not advance");
-            assert!(
-                driver.counter(7) > 0,
-                "direction-wrong counter did not advance"
-            );
-            assert!(driver.counter(8) > 0, "BTB-miss counter did not advance");
-            assert_eq!(
-                driver.counter(9),
-                0,
-                "branch incorrectly used the RAS metric"
-            );
-            assert!(driver.counter(10) > 0, "repair counter did not advance");
-            return;
-        }
-    }
-    panic!("the learned direction-only conditional mismatch was not observed");
-}
-
-#[test]
-fn pending_cold_jal_redirect_drops_the_wrong_path_jal_ras_action() {
-    let mut driver = CoreDriver::new([
-        (0, encode_jal(1, 16)),
-        (4, encode_jal(1, 28)),
-        (16, NOP),
-        (20, NOP),
-    ]);
-
-    let mut recoveries = 0;
-    let mut wrong_path_jal_seen = false;
-    let mut call_retired = false;
-    for _ in 0..100 {
-        let cycle = driver.step();
-        recoveries += usize::from(cycle.recover);
-        if cycle.redirect_pending && cycle.ex_valid && cycle.ex_pc == 4 {
-            wrong_path_jal_seen = true;
-            assert_eq!(cycle.ex_kind, KIND_CALL);
-            assert!(cycle.ex_mismatch);
-            assert!(!cycle.recover, "wrong-path JAL enqueued a second recovery");
-            assert!(!cycle.discard);
-        }
-        if cycle.retire && cycle.cm_pc == 0 {
-            call_retired = true;
-        }
-        if wrong_path_jal_seen && call_retired && cycle.fetch_pc >= 16 && !cycle.redirect_pending {
-            break;
-        }
-    }
-
-    assert!(
-        wrong_path_jal_seen,
-        "the younger JAL never occupied EX during redirect_pending"
-    );
-    assert!(call_retired, "the architectural JAL did not retire");
-    assert_eq!(
-        recoveries, 1,
-        "cold JAL plus wrong-path JAL recovered more than once"
-    );
-    assert_eq!(driver.predictor_value("committed_count_q"), 1_u8.into());
-    assert_eq!(driver.predictor_value("speculative_count_q"), 1_u8.into());
-    assert_eq!(
-        driver.predictor_value("speculative_ras_valid_q"),
-        0_u8.into(),
-        "wrong-path JAL left a speculative RAS overlay"
-    );
-}
-
-#[test]
-fn memory_wait_defers_ex_exception_discard_until_the_pipeline_advances() {
-    check_exception_during_memory_wait(0);
 }
 
 #[test]
@@ -962,11 +774,6 @@ fn check_exception_during_memory_wait(config: u64) {
         "exception discard pulsed more than once"
     );
     assert!(!following.recover);
-}
-
-#[test]
-fn memory_wait_defers_ex_mismatch_recovery_until_the_pipeline_advances() {
-    check_mismatch_during_memory_wait(0);
 }
 
 #[test]
@@ -1119,16 +926,6 @@ fn static_redirect_drops_wrong_path_memory_and_csr_side_effects() {
     assert_eq!(driver.csr_value("mscratch_q"), 0);
 }
 
-#[test]
-fn stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
-    check_stale_load(0);
-}
-
-#[test]
-fn bimodal_stale_taken_prediction_on_a_load_does_not_bypass_memory_wait() {
-    check_stale_load(2);
-}
-
 fn check_stale_load(config: u64) {
     // First learn a direct-control BTB entry at PC zero. Replacing that
     // instruction with a load models stale predictor state after executable
@@ -1183,16 +980,6 @@ fn check_stale_load(config: u64) {
     panic!("the repaired load never retired after its response");
 }
 
-#[test]
-fn stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
-    check_stale_store(0);
-}
-
-#[test]
-fn bimodal_stale_taken_prediction_on_a_store_preserves_the_memory_side_effect() {
-    check_stale_store(2);
-}
-
 fn check_stale_store(config: u64) {
     let mut driver = direct_trained_driver(config);
     driver.program.insert(0, encode_sd(0, 0, 0));
@@ -1239,16 +1026,6 @@ fn check_stale_store(config: u64) {
     panic!("the repaired store never retired after its response");
 }
 
-#[test]
-fn stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
-    check_stale_csr(0);
-}
-
-#[test]
-fn bimodal_stale_taken_prediction_on_a_csr_preserves_the_csr_write() {
-    check_stale_csr(2);
-}
-
 fn check_stale_csr(config: u64) {
     let mut driver = direct_trained_driver(config);
     driver.program.insert(0, encode_csrrwi(0, 0x340, 7));
@@ -1276,7 +1053,7 @@ fn check_stale_csr(config: u64) {
 
 #[test]
 fn fence_i_waits_for_the_older_store_then_retires_once_and_restarts_at_fallthrough() {
-    for config in [0, 2, 4, 8, 24] {
+    for config in [4, 8, 24] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_sd(0, 0, 0)),
@@ -1323,7 +1100,7 @@ fn fence_i_waits_for_the_older_store_then_retires_once_and_restarts_at_fallthrou
 
 #[test]
 fn wrong_path_fence_i_neither_invalidates_nor_retires() {
-    for config in [0, 2, 4, 8, 24] {
+    for config in [4, 8, 24] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_branch(0, 0, 0, 8)),
@@ -1375,7 +1152,7 @@ fn encode_muldiv(rd: u32, rs1: u32, rs2: u32, operation: u32) -> u32 {
 
 #[test]
 fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
-    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
+    for config in [132, 136, 392, EARLY_DIVIDE_CONFIG] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 123)),
@@ -1425,7 +1202,7 @@ fn muldiv_holds_younger_memory_and_releases_dependencies_exactly_once() {
 #[test]
 fn older_branch_squashes_muldiv_and_younger_csr_store() {
     let mut exercised_speculative_start_and_cancel = false;
-    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
+    for config in [132, 136, 392, EARLY_DIVIDE_CONFIG] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 7)),
@@ -1463,7 +1240,7 @@ fn older_branch_squashes_muldiv_and_younger_csr_store() {
 
 #[test]
 fn muldiv_defers_a_younger_exception_until_its_result_retires() {
-    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
+    for config in [132, 136, 392, EARLY_DIVIDE_CONFIG] {
         let mut driver = CoreDriver::with_config(
             [
                 (0, encode_addi(1, 0, 7)),
@@ -1633,7 +1410,7 @@ fn zba_wrong_path_does_not_commit_and_disabled_zba_traps_precisely() {
 
 #[test]
 fn system_trap_flushes_a_younger_muldiv_before_it_can_start() {
-    for config in [128, 130, 132, 136, 392, EARLY_DIVIDE_CONFIG] {
+    for config in [132, 136, 392, EARLY_DIVIDE_CONFIG] {
         for trap in [0x0000_0073, 0x0010_0073] {
             let mut driver = CoreDriver::with_config(
                 (0..8).map(|i| (i * 4, NOP)).chain([
@@ -2111,7 +1888,7 @@ fn append_constant(program: &mut BTreeMap<u32, u32>, pc: &mut u32, rd: u32, valu
 
 #[test]
 fn access_faulting_loads_and_stores_never_issue_or_commit() {
-    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+    for config in [ACCESS_CONFIG, 98_436] {
         for (address, fault_address, sizes) in [
             (0x1000_u64, 0x1000, 0..4),
             (0x8003_f000, 0x8003_f000, 0..4),
@@ -2286,7 +2063,7 @@ fn access_effective_address_uses_signed_offset_and_xlen_wraparound() {
 
 #[test]
 fn access_fault_on_invalid_control_target_preserves_full_pc_and_jalr_link() {
-    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+    for config in [ACCESS_CONFIG, 98_436] {
         for target in [
             0x1000,
             0x8003_f000,
@@ -2369,7 +2146,7 @@ fn access_instruction_boundary_reports_first_inaccessible_parcel() {
 
 #[test]
 fn access_fault_waits_for_older_store_and_precedes_pending_interrupt() {
-    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+    for config in [ACCESS_CONFIG, 98_436] {
         let mut program = interrupt_program([]);
         let mut pc = 20;
         append_constant(&mut program, &mut pc, 2, 0x0000_0001_0000_0300);
@@ -2458,7 +2235,7 @@ fn access_pc_relative_jump_and_jalr_carry_keep_full_rv64_target() {
 
 #[test]
 fn access_jalr_upper_carry_and_borrow_survive_forwarding_and_memory_waits() {
-    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+    for config in [ACCESS_CONFIG, 98_436] {
         for (base, offset) in [
             (0x0000_0000_ffff_fff8_u64, 16_i32),
             (0x0000_0001_0000_0008, -16),
@@ -2535,7 +2312,7 @@ fn access_jalr_upper_carry_and_borrow_survive_forwarding_and_memory_waits() {
 
 #[test]
 fn access_wrong_path_faults_and_boundary_prefetch_have_no_architectural_effect() {
-    for config in [ACCESS_CONFIG, 98_432, 98_436] {
+    for config in [ACCESS_CONFIG, 98_436] {
         for store in [false, true] {
             let mut program = access_program();
             let mut pc = 8;
@@ -2599,7 +2376,7 @@ fn interrupt_program(body: impl IntoIterator<Item = (u32, u32)>) -> BTreeMap<u32
 
 #[test]
 fn interrupts_precede_enable_successor_and_each_mret_rechecks_all_levels() {
-    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+    for config in [INTERRUPTS_CONFIG, 32_900] {
         let mut driver = CoreDriver::with_config(
             interrupt_program([
                 (20, encode_sd(1, 0, 0x300)),
@@ -2669,7 +2446,7 @@ fn interrupt_arrival_sweep_preserves_load_divide_store_and_taken_compressed_trac
     // trace, including the taken-branch target at IALIGN=16. Delayed memory
     // responses keep both loads and stores owned by CM during interruption.
     let expected_pcs = [0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 50];
-    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+    for config in [INTERRUPTS_CONFIG, 32_900] {
         for arrival in (0..180).step_by(3) {
             let mut driver = CoreDriver::with_config(
                 interrupt_program([
@@ -2772,10 +2549,8 @@ fn interrupt_arrival_sweep_preserves_load_divide_store_and_taken_compressed_trac
 fn interrupt_acceptance_preserves_cause_and_pc_when_pending_levels_change() {
     for config in [
         INTERRUPTS_CONFIG,
-        32_896,
         32_900,
         ACCESS_CONFIG,
-        98_432,
         98_436,
     ] {
         for (pending, changed, cause) in [(7, 0, 11), (7, 2, 11), (2, 7, 7)] {
@@ -2829,10 +2604,8 @@ fn interrupt_acceptance_preserves_cause_and_pc_when_pending_levels_change() {
 fn interrupt_withdrawn_at_empty_boundary_is_not_accepted() {
     for config in [
         INTERRUPTS_CONFIG,
-        32_896,
         32_900,
         ACCESS_CONFIG,
-        98_432,
         98_436,
     ] {
         let mut driver = CoreDriver::with_config(
@@ -2902,7 +2675,7 @@ fn withdrawn_interrupt_during_memory_wait_resumes_held_operands_without_a_trap()
 
 #[test]
 fn older_synchronous_exception_owns_trap_while_interrupt_drain_is_pending() {
-    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+    for config in [INTERRUPTS_CONFIG, 32_900] {
         let mut program = interrupt_program([
             (20, 0x0000_0073), // ecall
             (24, encode_sd(1, 0, 0x300)),
@@ -2935,7 +2708,7 @@ fn older_synchronous_exception_owns_trap_while_interrupt_drain_is_pending() {
 
 #[test]
 fn interrupt_predicate_is_rechecked_after_an_inflight_disabling_csr_write() {
-    for config in [INTERRUPTS_CONFIG, 32_896, 32_900] {
+    for config in [INTERRUPTS_CONFIG, 32_900] {
         for csr in [0x300, 0x304] {
             for (form, source) in [(1, 0), (3, 1), (5, 0), (7, 8)] {
                 let mut driver = CoreDriver::with_config(

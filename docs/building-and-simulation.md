@@ -82,8 +82,8 @@ target/release/verify-riscv --hardware-memory-rtl --compact-predictor --icache-k
   --max-cycles 2000000 ELF...
 ```
 
-Add `--timed-clocks` for cycle-accurate counts. Without flags the core uses the
-legacy TAGE comparison configuration.
+Add `--timed-clocks` for cycle-accurate counts. Without a predictor flag the
+core uses the compact predictor.
 
 ## Building test programs
 

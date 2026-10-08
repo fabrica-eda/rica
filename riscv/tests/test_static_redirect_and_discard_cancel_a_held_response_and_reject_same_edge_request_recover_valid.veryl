@@ -14,7 +14,6 @@ module test_static_redirect_and_discard_cancel_a_held_response_and_reject_same_e
     var response_taken: logic;
     var response_next_pc: logic<32>;
     var response_btb_hit: logic;
-    var response_tage_hit: logic;
     var response_ras_fallback: logic;
     var retire_valid: logic;
     var retire_kind: logic<3>;
@@ -25,7 +24,7 @@ module test_static_redirect_and_discard_cancel_a_held_response_and_reject_same_e
     var direction_wrong_event: logic;
     var btb_miss_event: logic;
     var ras_fallback_event: logic;
-    inst dut: StaticBranchPredictor (clk, rst_n, ready, request_ready, request_valid, request_accept, request_fallthrough, response_accept, response_valid, response_token, response_kind, response_taken, response_next_pc, response_btb_hit, response_tage_hit, response_ras_fallback, retire_valid, retire_kind, retire_taken, recover_valid, discard_all, conditional_resolved_event, direction_wrong_event, btb_miss_event, ras_fallback_event);
+    inst dut: StaticBranchPredictor (clk, rst_n, ready, request_ready, request_valid, request_accept, request_fallthrough, response_accept, response_valid, response_token, response_kind, response_taken, response_next_pc, response_btb_hit, response_ras_fallback, retire_valid, retire_kind, retire_taken, recover_valid, discard_all, conditional_resolved_event, direction_wrong_event, btb_miss_event, ras_fallback_event);
     initial {
         rst_n = 0;
         request_valid = 0;

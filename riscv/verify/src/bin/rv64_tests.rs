@@ -361,7 +361,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let mut arguments = env::args_os().skip(1);
     let mut max_cycles = DEFAULT_MAX_CYCLES;
-    let mut predictor_config = 0;
+    let mut predictor_config = None;
     let mut benchmarks = false;
     let mut cache_tests = false;
     let mut predictor_tests = false;
@@ -382,10 +382,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if let Some(config) = argument.to_str().and_then(verify_riscv::predictor_option) {
-            if predictor_config != 0 && predictor_config != config {
+            if predictor_config.is_some_and(|selected| selected != config) {
                 return Err("select only one predictor configuration".into());
             }
-            predictor_config = config;
+            predictor_config = Some(config);
         } else if argument == "--benchmarks" {
             benchmarks = true;
         } else if argument == "--cache-tests" {
@@ -452,6 +452,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             requested_elfs.push(PathBuf::from(argument));
         }
     }
+    let predictor_config = predictor_config.unwrap_or(verify_riscv::DEFAULT_PREDICTOR);
     if act4 {
         if benchmarks
             || cache_tests

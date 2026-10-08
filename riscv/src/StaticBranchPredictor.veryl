@@ -17,7 +17,6 @@ module StaticBranchPredictor (
     response_taken            : output logic    ,
     response_next_pc          : output logic<32>,
     response_btb_hit          : output logic    ,
-    response_tage_hit         : output logic    ,
     response_ras_fallback     : output logic    ,
     retire_valid              : input  logic    ,
     retire_kind               : input  logic<3> ,
@@ -46,7 +45,6 @@ module StaticBranchPredictor (
         response_taken             = 1'b0;
         response_next_pc           = fallthrough_q;
         response_btb_hit           = 1'b0;
-        response_tage_hit          = 1'b0;
         response_ras_fallback      = 1'b0;
         conditional_resolved_event = retire_valid && (retire_kind == 3'd1);
         direction_wrong_event      = conditional_resolved_event && retire_taken;

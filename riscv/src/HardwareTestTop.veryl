@@ -5,7 +5,7 @@
 /// programmed `tohost` address. ER1 returns the selected response bit while
 /// each command frame is scanned; ER2 independently reports PLL lock.
 module HardwareTestTop #(
-    param PREDICTOR_MODE   : u32 = 0,
+    param PREDICTOR_MODE   : u32 = 4,
     param ICACHE_INDEX_BITS: u32 = 0,
     param FAST_LSU         : u32 = 0,
     param ENABLE_ZBA       : bit = 0,

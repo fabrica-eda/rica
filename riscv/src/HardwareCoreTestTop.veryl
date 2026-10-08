@@ -3,7 +3,7 @@
 /// debug/system reset while `run` independently releases the CPU, matching the
 /// board contract that keeps memory alive while a stopped CPU is being loaded.
 module HardwareCoreTestTop #(
-    param PREDICTOR_MODE   : u32 = 0,
+    param PREDICTOR_MODE   : u32 = 4,
     param ICACHE_INDEX_BITS: u32 = 0,
     param FAST_LSU         : u32 = 0,
     param ENABLE_ZBA       : bit = 0,

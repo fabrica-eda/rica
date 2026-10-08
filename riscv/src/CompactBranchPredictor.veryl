@@ -23,7 +23,6 @@ module CompactBranchPredictor #(
     response_taken            : output logic    ,
     response_next_pc          : output logic<32>,
     response_btb_hit          : output logic    ,
-    response_tage_hit         : output logic    ,
     response_ras_fallback     : output logic    ,
     retire_valid              : input  logic    ,
     retire_token              : input  logic<3> ,
@@ -198,7 +197,6 @@ module CompactBranchPredictor #(
         response_kind         = decoded_kind_q;
         response_taken        = decoded_taken_q;
         response_btb_hit      = decoded_hit_q;
-        response_tage_hit     = 1'b0;
         response_ras_fallback = ras_fallback;
         response_fire         = response_valid && response_accept;
         lookup_transfer       = lookup_valid_q && (!response_present_q || response_fire) && !flush

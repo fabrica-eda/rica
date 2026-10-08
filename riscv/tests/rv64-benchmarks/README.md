@@ -10,7 +10,7 @@ These self-checking, multiplication-free RV64 programs isolate four costs:
 | `load_store` | 256 load-use/store dependencies to one aligned word | 256 |
 
 Run `rv64-riscv-tests --benchmarks --max-cycles 100000`, then repeat with
-`--bimodal` and `--static-predictor`. The runner builds the same ELFs for all configurations, compiles
+`--static-predictor`. The runner builds the same ELFs for all configurations, compiles
 one model per configuration, and creates fresh simulator state per ELF so
 predictor training cannot leak between measurements. Every program checks its
 result before reporting through the existing `tohost` protocol.

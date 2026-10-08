@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Route RV64 configurations with identical constraints and retain evidence.
 
-Build maps with nextpnr-riscv Hardware{,Bimodal,Static,Cached2K,Cached4K,Cached8K}TestTop --nextpnr-json first.
+Build maps with nextpnr-riscv Hardware{,Static,Cached2K,Cached4K,Cached8K}TestTop --nextpnr-json first.
 This runner never generates or programs a bitstream. A reported frequency
 ceiling is an STA estimate, not a qualified operating clock.
 """
@@ -61,8 +61,7 @@ def timing(report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tage", type=Path)
-    parser.add_argument("--bimodal", type=Path)
+    parser.add_argument("--compact", type=Path)
     parser.add_argument("--static", dest="static_map", type=Path)
     parser.add_argument("--cache2k", type=Path)
     parser.add_argument("--cache4k", type=Path)
@@ -75,11 +74,10 @@ def main():
                         default=ROOT / "target/release/nextpnr-riscv")
     args = parser.parse_args()
     variants = [(name, source) for name, source in
-                [("tage", args.tage), ("bimodal", args.bimodal),
-                 ("static", args.static_map), ("cache2k", args.cache2k),
+                [("compact", args.compact), ("static", args.static_map), ("cache2k", args.cache2k),
                  ("cache4k", args.cache4k), ("cache8k", args.cache8k)] if source is not None]
     if not variants:
-        parser.error("provide at least one of --tage, --bimodal, --static, --cache2k, --cache4k or --cache8k")
+        parser.error("provide at least one of --compact, --static, --cache2k, --cache4k or --cache8k")
     if len(set(args.seeds)) != len(args.seeds):
         parser.error("seeds must be distinct")
     args.output.mkdir(parents=True, exist_ok=True)

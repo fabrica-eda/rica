@@ -433,11 +433,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let (output_name, timing_goal_mhz) = match top.as_str() {
         "Core" => ("riscv-125.nextpnr.json", 125),
-        "BranchPredictor" => ("branch-predictor-125.nextpnr.json", 125),
-        "TageDirectionPredictor" => ("tage-direction-125.nextpnr.json", 125),
         "Top" => ("riscv-top-125.nextpnr.json", 125),
         "HardwareTestTop" => ("riscv-hardware-test-125.nextpnr.json", 125),
-        "HardwareBimodalTestTop" => ("riscv-hardware-bimodal-test-125.nextpnr.json", 125),
         "HardwareStaticTestTop" => ("riscv-hardware-static-test-125.nextpnr.json", 125),
         "HardwareCached2KTestTop" => ("riscv-hardware-cached-2k-test-125.nextpnr.json", 125),
         "HardwareCached4KTestTop" => ("riscv-hardware-cached-4k-test-125.nextpnr.json", 125),
@@ -448,7 +445,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "FunnelShiftTimingTop" => ("funnel-shift-single-cycle-150.nextpnr.json", 150),
         _ => {
             return Err(format!(
-                "expected Core, BranchPredictor, TageDirectionPredictor, Top, HardwareTestTop, HardwareBimodalTestTop, HardwareStaticTestTop, HardwareCached2KTestTop, HardwareCached4KTestTop, HardwareCached8KTestTop, FullAluTimingTop, or FunnelShiftTimingTop, received {top}"
+                "expected Core, Top, HardwareTestTop, HardwareStaticTestTop, HardwareCached2KTestTop, HardwareCached4KTestTop, HardwareCached8KTestTop, FullAluTimingTop, or FunnelShiftTimingTop, received {top}"
             )
             .into());
         }
@@ -463,7 +460,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         "HardwareMemory.veryl",
         "JtagDebugTransport.veryl",
         "HardwareTestTop.veryl",
-        "HardwareBimodalTestTop.veryl",
         "HardwareStaticTestTop.veryl",
     ] {
         source.push('\n');
@@ -490,7 +486,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let is_board = matches!(
         top.as_str(),
         "HardwareTestTop"
-            | "HardwareBimodalTestTop"
             | "HardwareStaticTestTop"
             | "HardwareCached2KTestTop"
             | "HardwareCached4KTestTop"

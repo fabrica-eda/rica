@@ -10,7 +10,7 @@ pub mod console_host;
 pub mod platform;
 pub mod timed_memory;
 
-const CORE_SOURCES: [&str; 29] = [
+const CORE_SOURCES: [&str; 25] = [
     "UserPlatform.veryl",
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
@@ -18,10 +18,6 @@ const CORE_SOURCES: [&str; 29] = [
     "Decoder.veryl",
     "PerformanceCounter64.veryl",
     "PerformanceEventCounters4.veryl",
-    "BranchTargetBuffer.veryl",
-    "TageTaggedTableMemory.veryl",
-    "TageDirectionPredictor.veryl",
-    "BranchPredictor.veryl",
     "CsrFile.veryl",
     "PmpCheck.veryl",
     "ExecuteUnit.veryl",
@@ -42,10 +38,12 @@ const CORE_SOURCES: [&str; 29] = [
     "CompactBranchPredictor.veryl",
 ];
 
-/// Shared experiment selectors for the ELF and board-model runners.
+/// Shared experiment selectors for the ELF and board-model runners. Without a
+/// selector the runners use the compact predictor (`DEFAULT_PREDICTOR`).
+pub const DEFAULT_PREDICTOR: u64 = 8;
+
 pub fn predictor_option(argument: &str) -> Option<u64> {
     match argument {
-        "--bimodal" => Some(2),
         "--static-predictor" => Some(4),
         "--compact-predictor" => Some(8),
         "--compact-predictor-32" => Some(24),
@@ -57,8 +55,6 @@ pub fn predictor_option(argument: &str) -> Option<u64> {
 
 pub fn predictor_name(config: u64) -> &'static str {
     match config {
-        0 => "tage",
-        2 => "bimodal",
         4 => "static",
         8 => "compact64",
         24 => "compact32",

@@ -38,31 +38,15 @@ dual I-cache tag compare and the registered PMA/PMP checker inputs in Sv39.
 
 ## Branch prediction
 
-**A held taken decision cancels every pending fall-through shadow.** The
-registered predictor can hold two sequential shadows behind a taken response;
-cancelling only the one launched on the accept edge let the other become a
-visible decision. (`taken_held_decision_cancels_an_already_pending_shadow`)
-
 **A repair owned by EX keeps its own side effects.** A stale BTB alias can mark
 a load, store or CSR instruction as a branch. The resulting redirect is pending
 while that same instruction owns CM; the redirect records its origin so the
 instruction's memory transaction or CSR write is preserved.
-(`core_predictor_recovery`: `stale_taken_prediction_on_a_*`)
+(`core_predictor_recovery`: `compact_stale_predictions_preserve_load_store_and_csr_effects`)
 
-**Cold BTB misses reserve their victim at lookup.** Updates are deferred to
-retirement, so two misses to the same set could pick the same way. Each accepted
-response now advances the set's replacement bit immediately.
-
-**Deferred invalidations check that the entry is unchanged.** A token's saved
-BTB way may be overwritten by an older branch before the younger instruction
-retires; each token tracks whether its `(set, way)` has changed and skips a stale
-invalidation.
-
-**Scrub predictor BRAM before fetching.** BTB and TAGE valid bits live in block
-RAM, which has no reset. Board builds sweep every row on reset (128 BTB sets,
-2048 TAGE base entries) and hold fetch until the sweep finishes. The regression
-poisons the rows first, so a simulator that zero-initializes memory cannot hide
-a missing scrub.
+**Scrub the predictor table before fetching.** The table has no reset, so the
+compact predictor sweeps every row after reset and reports not-ready until the
+sweep finishes.
 
 ## Board
 

@@ -32,9 +32,10 @@ module Core #(
     // Separate registered load/store acknowledgments avoid data_we feedback.
     param SPLIT_MEMORY_RESPONSES: bit = 0,
     param RELOCATE_LOW_DATA  : bit = 0,
-    // Bits 0/1/2: scrub/bimodal/static. Bit 3 selects compact; bit 4 selects
-    // its 32-entry variant, bit 5 disables RAS, bit 6 disables direction prediction.
-    param BRANCH_PREDICTOR_CONFIG: u32 = 0,
+    // Bit 3 selects the compact predictor, otherwise static prediction is
+    // used. With the compact predictor, bit 4 selects its 32-entry variant,
+    // bit 5 disables RAS and bit 6 disables direction prediction.
+    param BRANCH_PREDICTOR_CONFIG: u32 = 8,
 ) (
     clk                   : input  clock    ,
     rst_n                 : input  reset    ,
@@ -137,7 +138,6 @@ module Core #(
     var fetch_next_parcel        : logic       <2>               ;
     var fetch_cross_line         : logic                         ;
     var fetch_fallthrough        : logic       <ADDRESS_BITS>    ;
-    var fetch_is_conditional     : logic                         ;
     var debug_x31_q              : logic       <64>              ;
     var fetch_packet             : FetchPacket                   ;
     var fetch_payload_q          : FetchPayload                  ;
@@ -234,7 +234,6 @@ module Core #(
     var ex_normal_memory_q: logic;
     var ex_illegal_q            : logic              ;
     var ex_prediction_token_q   : logic<3>           ;
-    var ex_predicted_kind_q     : logic<3>           ;
     var ex_predicted_taken_q    : logic              ;
     var ex_predicted_next_pc_q  : logic<32>          ;
     var ex_fallthrough_pc_q     : logic<ADDRESS_BITS>;
@@ -268,7 +267,6 @@ module Core #(
     var cm_is_store_q           : logic                     ;
     var cm_store_size_q         : logic<2>                  ;
     var cm_is_branch_q          : logic                     ;
-    var cm_branch_taken_q       : logic                     ;
     var cm_linear_match_q       : logic<TARGET_MATCH_SLICES>;
     var ex_kind_match_q         : logic                     ;
     var cm_taken_match_q        : logic<TARGET_MATCH_SLICES>;
@@ -320,9 +318,6 @@ module Core #(
     var ex_exception_delegated  : logic                     ;
     var cm_is_fence_i_q         : logic                     ;
     var cm_prediction_token_q   : logic<3>                  ;
-    var cm_predicted_kind_q     : logic<3>                  ;
-    var cm_predicted_taken_q    : logic                     ;
-    var cm_predicted_next_pc_q  : logic<32>                 ;
     var cm_fallthrough_pc_q     : logic<ADDRESS_BITS>       ;
     var cm_control_kind_q       : logic<3>                  ;
 
@@ -363,12 +358,6 @@ module Core #(
     var redirect_high_c1        : logic<17>              ;
     var redirect_high           : logic<17>              ;
     var redirect_sum            : logic<64>              ;
-    var ex_branch_equal         : logic                  ;
-    var ex_compare_less_high    : logic                  ;
-    var ex_compare_less_low     : logic                  ;
-    var ex_compare_unsigned     : logic                  ;
-    var ex_compare_result       : logic                  ;
-    var ex_branch_taken         : logic                  ;
     var cm_branch_taken         : logic                  ;
     var cm_compare_unsigned     : logic                  ;
     var cm_compare_result       : logic                  ;
@@ -460,7 +449,6 @@ module Core #(
     var compressed_illegal      : logic                  ;
     var rx_control_kind         : logic<3>               ;
     var ex_control_kind_q       : logic<3>               ;
-    var ex_actual_next_pc       : logic<ADDRESS_BITS>    ;
     var ex_prediction_mismatch  : logic                  ;
     var cm_actual_next_pc       : logic<ADDRESS_BITS>    ;
     var cm_prediction_mismatch  : logic                  ;
@@ -482,14 +470,9 @@ module Core #(
     var predictor_response_taken       : logic    ;
     var predictor_response_next_pc     : logic<32>;
     var predictor_response_btb_hit     : logic    ;
-    var predictor_response_tage_hit    : logic    ;
     var predictor_response_ras_fallback: logic    ;
     var predictor_frontend_redirect    : logic    ;
     var predictor_recover_valid        : logic    ;
-    var predictor_recover_token        : logic<3> ;
-    var predictor_recover_kind         : logic<3> ;
-    var predictor_recover_taken        : logic    ;
-    var predictor_recover_fallthrough  : logic<32>;
     var predictor_discard_all          : logic    ;
     var predictor_conditional_event    : logic    ;
     var predictor_direction_wrong_event: logic    ;
@@ -499,7 +482,7 @@ module Core #(
     // Predictor maintenance is deliberately one stage behind architectural
     // resolution.  A redirect already blocks frontend requests while its
     // registered target is installed, so applying recovery in that window
-    // cuts EX forwarding/redirect arithmetic away from TAGE and RAS state
+    // cuts EX forwarding/redirect arithmetic away from predictor and RAS state
     // without adding a normal-path bubble.
     struct PredictorRetirePayload {
         token      : logic<3> ,
@@ -509,17 +492,9 @@ module Core #(
         target     : logic<32>,
         fallthrough: logic<32>,
     }
-    struct PredictorRecoverPayload {
-        token      : logic<3> ,
-        kind       : logic<3> ,
-        taken      : logic    ,
-        fallthrough: logic<32>,
-    }
     var predictor_retire_valid_q  : logic                  ;
     var predictor_retire_q        : PredictorRetirePayload ;
     var predictor_recover_valid_q : logic                  ;
-    var predictor_recover_branch_q: logic                  ;
-    var predictor_recover_q       : PredictorRecoverPayload;
     var predictor_discard_all_q   : logic                  ;
 
     inst registers: RegisterFile (
@@ -857,7 +832,6 @@ module Core #(
             response_taken            : predictor_response_taken       ,
             response_next_pc          : predictor_response_next_pc     ,
             response_btb_hit          : predictor_response_btb_hit     ,
-            response_tage_hit         : predictor_response_tage_hit    ,
             response_ras_fallback     : predictor_response_ras_fallback,
             retire_valid              : predictor_retire_valid_q       ,
             retire_token              : predictor_retire_q.token       ,
@@ -867,47 +841,6 @@ module Core #(
             retire_target             : predictor_retire_q.target      ,
             retire_fallthrough        : predictor_retire_q.fallthrough ,
             recover_valid             : predictor_recover_valid_q      ,
-            discard_all               : predictor_discard_all_q        ,
-            conditional_resolved_event: predictor_conditional_event    ,
-            direction_wrong_event     : predictor_direction_wrong_event,
-            btb_miss_event            : predictor_btb_miss_event       ,
-            ras_fallback_event        : predictor_ras_fallback_event   ,
-        );
-    } else if (BRANCH_PREDICTOR_CONFIG & 4) == 0 :g_dynamic {
-        inst branch_predictor: BranchPredictor #(
-            SCRUB_ON_RESET: (BRANCH_PREDICTOR_CONFIG & 1) != 0,
-            USE_TAGE      : (BRANCH_PREDICTOR_CONFIG & 2) == 0,
-        ) (
-            clk                       : clk                            ,
-            rst_n                     : rst_n                          ,
-            ready                     : predictor_ready                ,
-            request_ready             : predictor_request_ready        ,
-            request_valid             : predictor_request_valid        ,
-            request_accept            : predictor_request_accept       ,
-            request_pc                : fetch_packet.pc                ,
-            request_fallthrough       : fetch_fallthrough              ,
-            request_is_conditional    : fetch_is_conditional           ,
-            response_accept           : predictor_response_accept      ,
-            response_valid            : predictor_response_valid       ,
-            response_token            : predictor_response_token       ,
-            response_kind             : predictor_response_kind        ,
-            response_taken            : predictor_response_taken       ,
-            response_next_pc          : predictor_response_next_pc     ,
-            response_btb_hit          : predictor_response_btb_hit     ,
-            response_tage_hit         : predictor_response_tage_hit    ,
-            response_ras_fallback     : predictor_response_ras_fallback,
-            retire_valid              : predictor_retire_valid_q       ,
-            retire_token              : predictor_retire_q.token       ,
-            retire_pc                 : predictor_retire_q.pc          ,
-            retire_kind               : predictor_retire_q.kind        ,
-            retire_taken              : predictor_retire_q.taken       ,
-            retire_target             : predictor_retire_q.target      ,
-            retire_fallthrough        : predictor_retire_q.fallthrough ,
-            recover_valid             : predictor_recover_valid_q      ,
-            recover_token             : predictor_recover_token        ,
-            recover_kind              : predictor_recover_kind         ,
-            recover_taken             : predictor_recover_taken        ,
-            recover_fallthrough       : predictor_recover_fallthrough  ,
             discard_all               : predictor_discard_all_q        ,
             conditional_resolved_event: predictor_conditional_event    ,
             direction_wrong_event     : predictor_direction_wrong_event,
@@ -932,7 +865,6 @@ module Core #(
             response_taken            : predictor_response_taken       ,
             response_next_pc          : predictor_response_next_pc     ,
             response_btb_hit          : predictor_response_btb_hit     ,
-            response_tage_hit         : predictor_response_tage_hit    ,
             response_ras_fallback     : predictor_response_ras_fallback,
             retire_valid              : predictor_retire_valid_q       ,
             retire_kind               : predictor_retire_q.kind        ,
@@ -1839,22 +1771,6 @@ module Core #(
         fetch_lookahead_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
         fetch_lookahead_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
         fetch_lookahead_q.valid           = fetch_lookahead_valid_q;
-        // Exact RV64I/RV64C conditional predecode. Reserved standard branch
-        // funct3 values 010/011 are illegal and must not perturb history.
-        // C.BEQZ/C.BNEZ are the only compressed conditional encodings; every
-        // encoding in those two funct3 spaces is legal in RV64C/Zca.
-        fetch_is_conditional = 1'b0;
-        if fetch_packet.is_compressed {
-            fetch_is_conditional = (fetch_packet.raw_instruction[1:0] == 2'b01)
-                && ((fetch_packet.raw_instruction[15:13] == 3'b110) || (fetch_packet.raw_instruction[15:13] == 3'b111));
-        } else if fetch_packet.raw_instruction[6:0] == 7'b1100011 {
-            case fetch_packet.raw_instruction[14:12] {
-                3'b000, 3'b001, 3'b100, 3'b101, 3'b110, 3'b111: {
-                    fetch_is_conditional = 1'b1;
-                }
-                default: {}
-            }
-        }
         fetch_fallthrough = fetch_packet.pc + 32'd4;
         if fetch_packet.is_compressed {
             fetch_fallthrough = fetch_packet.pc + 32'd2;
@@ -1894,7 +1810,7 @@ module Core #(
                 decode_packet.predicted_next_pc = fetch_q.pc + 32'd2;
             }
         }
-        if (BRANCH_PREDICTOR_CONFIG & 4) != 0 {
+        if (BRANCH_PREDICTOR_CONFIG & 8) == 0 {
             decode_packet.predicted_next_pc = 32'd0;
         }
 
@@ -2133,31 +2049,9 @@ module Core #(
             ex_exception_delegated = csr_bus.exception_delegated[5];
             if ex_is_store_q { ex_exception_delegated = csr_bus.exception_delegated[7]; }
         }
-        // Dynamic prediction keeps its EX direction result. Static prediction
-        // finishes the reduction from the same registered compare slices as
-        // SLT/SLTU, removing a full-width reduction from the EX bypass path.
-        ex_branch_equal      = execute_bus.compare_equal == 4'b1111;
-        ex_compare_less_high = execute_bus.compare_less[3]
-            || (execute_bus.compare_equal[3] && execute_bus.compare_less[2]);
-        ex_compare_less_low  = execute_bus.compare_less[1]
-            || (execute_bus.compare_equal[1] && execute_bus.compare_less[0]);
-        ex_compare_unsigned  = ex_compare_less_high
-            || ((execute_bus.compare_equal[3] && execute_bus.compare_equal[2]) && ex_compare_less_low);
-        if (ex_alu_op_q == 4'd9) && (execute_bus.compare_sign_a != execute_bus.compare_sign_b) {
-            ex_compare_result = execute_bus.compare_sign_a;
-        } else {
-            ex_compare_result = ex_compare_unsigned;
-        }
-        case ex_branch_op_q {
-            3'b000 : ex_branch_taken = ex_branch_equal;
-            3'b001 : ex_branch_taken = !ex_branch_equal;
-            3'b100 : ex_branch_taken = ex_compare_result;
-            3'b101 : ex_branch_taken = !ex_compare_result;
-            3'b110 : ex_branch_taken = ex_compare_result;
-            3'b111 : ex_branch_taken = !ex_compare_result;
-            default: ex_branch_taken = 1'b0;
-        }
-        cm_branch_taken     = cm_branch_taken_q;
+        // CM finishes the branch reduction from the same registered compare
+        // slices as SLT/SLTU, removing a full-width reduction from the EX
+        // bypass path.
         cm_compare_unsigned = cm_compare_less_q[3] || (cm_branch_equal_q[3] && cm_compare_less_q[2])
             || (cm_branch_equal_q[3] && cm_branch_equal_q[2]
                 && (cm_compare_less_q[1] || (cm_branch_equal_q[1] && cm_compare_less_q[0])));
@@ -2165,14 +2059,12 @@ module Core #(
         if cm_compare_signed_q && (cm_compare_sign_a_q != cm_compare_sign_b_q) {
             cm_compare_result = cm_compare_sign_a_q;
         }
-        if (BRANCH_PREDICTOR_CONFIG & 12) != 0 {
-            case cm_branch_op_q {
-                3'b000        : cm_branch_taken = cm_branch_equal_q == 4'b1111;
-                3'b001        : cm_branch_taken = cm_branch_equal_q != 4'b1111;
-                3'b100, 3'b110: cm_branch_taken = cm_compare_result;
-                3'b101, 3'b111: cm_branch_taken = !cm_compare_result;
-                default       : cm_branch_taken = 1'b0;
-            }
+        case cm_branch_op_q {
+            3'b000        : cm_branch_taken = cm_branch_equal_q == 4'b1111;
+            3'b001        : cm_branch_taken = cm_branch_equal_q != 4'b1111;
+            3'b100, 3'b110: cm_branch_taken = cm_compare_result;
+            3'b101, 3'b111: cm_branch_taken = !cm_compare_result;
+            default       : cm_branch_taken = 1'b0;
         }
 
         if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
@@ -2262,25 +2154,16 @@ module Core #(
             redirect_target_match[2] = redirect_match_predicted[47:32] == redirect_upper_c0[15:0];
             redirect_target_match[3] = redirect_match_predicted[63:48] == redirect_upper_c0[31:16];
         }
-        ex_actual_next_pc = ex_fallthrough_pc_q;
-        if ex_link_q {
-            ex_actual_next_pc = ex_redirect_target;
-        }
-        // Dynamic predictors repair stale type/history even when the PC is
-        // right. Static prediction predecodes PC-relative fallthrough targets
-        // in RX. JALR always redirects, so its sum need not feed an equality
-        // comparator and then the pipeline's redirect-valid fanout.
-        ex_prediction_mismatch = ex_valid_q && !ex_is_branch_q && !ex_exception && !ex_is_mret_q && !ex_is_fence_i_q
-            && ((((BRANCH_PREDICTOR_CONFIG & 4) == 0) && (ex_predicted_kind_q != ex_control_kind_q))
-                || (ex_predicted_next_pc_q != ex_actual_next_pc));
-        if (BRANCH_PREDICTOR_CONFIG & 4) != 0 {
+        // Static prediction predecodes PC-relative fallthrough targets in RX.
+        // JALR always redirects, so its sum need not feed an equality
+        // comparator and then the pipeline's redirect-valid fanout. The
+        // compact predictor compares registered targets in CM instead; the
+        // JALR adder must not also traverse the PC comparator and the global
+        // redirect enables.
+        ex_prediction_mismatch = 1'b0;
+        if (BRANCH_PREDICTOR_CONFIG & 8) == 0 {
             ex_prediction_mismatch = ex_valid_q && ex_static_redirect_q && !ex_exception && !ex_is_mret_q
                 && !ex_is_fence_i_q;
-        }
-        if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
-            // Compare registered targets in CM; the JALR adder must not also
-            // traverse the PC comparator and the global redirect enables.
-            ex_prediction_mismatch = 1'b0;
         }
 
         if cm_branch_taken {
@@ -2297,14 +2180,8 @@ module Core #(
         // A faulting branch must enter the trap vector; a future branch-side
         // access/alignment exception must never let prediction repair outrank
         // the older architectural exception.
-        cm_prediction_mismatch = cm_valid_q && cm_is_branch_q && !cm_exception_q
-            && ((((BRANCH_PREDICTOR_CONFIG & 4) == 0)
-                    && ((cm_predicted_kind_q != 3'd1) || (cm_predicted_taken_q != cm_branch_taken)))
-                || (cm_predicted_next_pc_q != cm_actual_next_pc));
-        if (BRANCH_PREDICTOR_CONFIG & 4) != 0 {
-            cm_prediction_mismatch = cm_valid_q && cm_is_branch_q && !cm_exception_q && cm_branch_taken
-                && !cm_control_fallthrough_q;
-        }
+        cm_prediction_mismatch = cm_valid_q && cm_is_branch_q && !cm_exception_q && cm_branch_taken
+            && !cm_control_fallthrough_q;
         if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
             cm_prediction_mismatch = cm_valid_q && !cm_exception_q && !cm_is_mret_q && !cm_is_fence_i_q
                 && ((!cm_is_branch_q && !(&cm_linear_match_q))
@@ -2585,23 +2462,6 @@ module Core #(
         // The CM conditional is older than the EX instruction and therefore
         // owns recovery when both detect a mismatch in the same cycle.
         predictor_recover_valid = redirect_valid && !cm_system_redirect;
-        // Recovery is applied one cycle after redirect detection.  An EX-owned
-        // repair has crossed into CM by then, so its token and control metadata
-        // can be read directly from the CM registers.  An older CM branch is
-        // overwritten on that edge; retain its payload in the independent bank
-        // below and select it with the registered one-bit source tag.  This
-        // keeps the late branch comparison off the 39-bit recovery-payload D
-        // mux without changing the recovery edge.
-        predictor_recover_token       = cm_prediction_token_q;
-        predictor_recover_kind        = cm_control_kind_q;
-        predictor_recover_taken       = cm_control_kind_q != 3'd0;
-        predictor_recover_fallthrough = cm_fallthrough_pc_q;
-        if predictor_recover_branch_q {
-            predictor_recover_token       = predictor_recover_q.token;
-            predictor_recover_kind        = predictor_recover_q.kind;
-            predictor_recover_taken       = predictor_recover_q.taken;
-            predictor_recover_fallthrough = predictor_recover_q.fallthrough;
-        }
         // A data access fault is first registered in CM. It has not performed
         // the earlier EX exception discard, so retire neither its token nor
         // any younger prediction, and reset the speculative queue here.
@@ -2800,10 +2660,8 @@ module Core #(
         }
     }
 
-    // The valid/source bits are reset while both payload banks refresh from
-    // already-registered CM state every cycle.  Retire validity masks its
-    // payload; recovery validity and the one-bit source tag select either the
-    // current CM payload or the independently captured branch payload below.
+    // The valid bits are reset while the retire payload refreshes from
+    // already-registered CM state every cycle; retire validity masks it.
     // Retire and recovery remain independent so a retiring older instruction
     // can share a cycle with a younger EX redirect, exactly as in the
     // unregistered interface.
@@ -2811,17 +2669,15 @@ module Core #(
         if_reset {
             predictor_retire_valid_q   = 1'b0;
             predictor_recover_valid_q  = 1'b0;
-            predictor_recover_branch_q = 1'b0;
             predictor_discard_all_q    = 1'b0;
         } else {
             predictor_retire_valid_q   = cm_retire_event;
             predictor_recover_valid_q  = predictor_recover_valid;
-            predictor_recover_branch_q = branch_redirect_valid;
             predictor_discard_all_q    = predictor_discard_all;
         }
     }
 
-    // Refresh both payload banks unconditionally from already-registered
+    // Refresh the retire payload unconditionally from already-registered
     // source fields.  Their reset-bearing valid/source controls make stale
     // payload unobservable without qualifying all 104 payload FF clock-enables
     // with late retirement/redirect decisions.
@@ -2832,17 +2688,6 @@ module Core #(
         predictor_retire_q.taken       = !cm_is_branch_q || cm_branch_taken;
         predictor_retire_q.target      = cm_redirect_target_q;
         predictor_retire_q.fallthrough = cm_fallthrough_pc_q;
-        // Capture the current CM branch candidate unconditionally.  Only the
-        // adjacent registered source tag makes this bank observable, so no late
-        // branch-valid enable or wide selected D path is required.
-        predictor_recover_q.token = cm_prediction_token_q;
-        predictor_recover_q.kind  = 3'd1;
-        predictor_recover_q.taken = cm_branch_taken;
-        if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
-            predictor_recover_q.kind  = cm_control_kind_q;
-            predictor_recover_q.taken = !cm_is_branch_q || cm_branch_taken;
-        }
-        predictor_recover_q.fallthrough = cm_fallthrough_pc_q;
     }
 
     // Preserve the RF response while RX waits, and fold in producers when
@@ -3169,7 +3014,6 @@ module Core #(
             ex_illegal_q             = 1'b0;
             ex_control_kind_q        = 3'd0;
             ex_prediction_token_q    = 3'd0;
-            ex_predicted_kind_q      = 3'd0;
             ex_predicted_taken_q     = 1'b0;
             ex_predicted_next_pc_q   = 32'h0000_0004;
             ex_fallthrough_pc_q      = 32'h0000_0004;
@@ -3199,7 +3043,6 @@ module Core #(
             cm_is_store_q            = 1'b0;
             cm_store_size_q          = 2'b11;
             cm_is_branch_q           = 1'b0;
-            cm_branch_taken_q        = 1'b0;
             cm_linear_match_q        = 1'b0;
             ex_kind_match_q          = 1'b0;
             cm_taken_match_q         = 1'b0;
@@ -3242,9 +3085,6 @@ module Core #(
             cm_is_fence_i_q          = 1'b0;
             cm_control_kind_q        = 3'd0;
             cm_prediction_token_q    = 3'd0;
-            cm_predicted_kind_q      = 3'd0;
-            cm_predicted_taken_q     = 1'b0;
-            cm_predicted_next_pc_q   = 32'h0000_0004;
             cm_fallthrough_pc_q      = 32'h0000_0004;
 
             wb_valid_q        = 1'b0;
@@ -3403,10 +3243,6 @@ module Core #(
 
                 cm_store_size_q   = ex_store_size_q;
                 cm_is_branch_q    = ex_valid_q && ex_is_branch_q;
-                cm_branch_taken_q = 1'b0;
-                if (BRANCH_PREDICTOR_CONFIG & 12) == 0 {
-                    cm_branch_taken_q = ex_branch_taken;
-                }
                 cm_branch_op_q           = ex_branch_op_q;
                 cm_control_fallthrough_q = ex_control_fallthrough_q;
                 cm_branch_equal_q        = execute_bus.compare_equal;
@@ -3514,9 +3350,6 @@ module Core #(
                 cm_is_fence_i_q        = ex_is_fence_i_q;
                 cm_control_kind_q      = ex_control_kind_q;
                 cm_prediction_token_q  = ex_prediction_token_q;
-                cm_predicted_kind_q    = ex_predicted_kind_q;
-                cm_predicted_taken_q   = ex_predicted_taken_q;
-                cm_predicted_next_pc_q = ex_predicted_next_pc_q;
                 cm_fallthrough_pc_q    = ex_fallthrough_pc_q;
 
                 // Register only the consumer selectors. The producer value enters
@@ -3589,7 +3422,6 @@ module Core #(
                 ex_second_access_fault_q  = rx_straddle_q && !(rx_second_pma_allowed && rx_second_pmp_allowed);
                 ex_control_kind_q        = rx_control_kind;
                 ex_prediction_token_q    = rx_prediction_token_q;
-                ex_predicted_kind_q      = rx_predicted_kind_q;
                 ex_predicted_taken_q     = rx_predicted_taken_q;
                 ex_predicted_next_pc_q   = rx_predicted_next_pc_q;
                 ex_kind_match_q          = 1'b0;

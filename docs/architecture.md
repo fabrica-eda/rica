@@ -76,14 +76,13 @@ The recovery scheme restores the committed history/RAS frontier. That is only
 valid for a scalar in-order core; a wider or out-of-order core would need a
 per-branch checkpoint.
 
-Other predictor configurations remain available for comparison: a TAGE predictor
-(128-set two-way BTB, 2048-entry bimodal plus four 512-entry tagged tables with
-4/12/36/108-bit histories, 16-entry RAS), a 2048-entry bimodal predictor, a
-static not-taken predictor, and compact variants with a 32-entry BTB or without
-the RAS or direction prediction. The runners select them with
-`--compact-predictor`, `--compact-predictor-32`, `--compact-predictor-no-ras`,
-`--compact-predictor-no-direction`, `--bimodal` and `--static-predictor`; no flag
-selects TAGE.
+Other predictor configurations remain available for comparison: a static
+not-taken predictor, and compact variants with a 32-entry BTB or without the RAS
+or direction prediction. The runners select them with `--static-predictor`,
+`--compact-predictor-32`, `--compact-predictor-no-ras` and
+`--compact-predictor-no-direction`; no flag (or `--compact-predictor`) selects
+the compact predictor. An earlier TAGE predictor was removed; see
+[history.md](history.md).
 
 ## Execution units
 

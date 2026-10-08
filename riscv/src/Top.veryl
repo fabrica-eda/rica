@@ -40,7 +40,7 @@ module Top (
 
     inst core: Core #(
         COMMIT_PAYLOAD         : 0,
-        BRANCH_PREDICTOR_CONFIG: 1,
+        BRANCH_PREDICTOR_CONFIG: 8,
     ) (
         clk                   : clk_cpu                     ,
         rst_n                 : core_rst_n                  ,

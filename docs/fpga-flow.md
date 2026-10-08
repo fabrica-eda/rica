@@ -129,5 +129,5 @@ and verifies the pack on first use.
 - **nextpnr comparison.** `cargo run --release -p verify-riscv --bin nextpnr-riscv -- TOP`
   exports a Struo-mapped netlist as a compressed `.stnet`, or as nextpnr JSON
   with `--nextpnr-json`, for reference runs with nextpnr-ecp5. It supports the
-  core, the predictor units and the earlier board tops (`HardwareTestTop` and its
-  static/bimodal/cached variants), not the compact or user-profile tops.
+  core and the earlier board tops (`HardwareTestTop` and its static/cached
+  variants), not the compact or user-profile tops.

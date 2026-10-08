@@ -1562,7 +1562,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if configs.len() > 1 {
         return Err("select only one predictor configuration".into());
     }
-    let predictor_config = configs.first().copied().unwrap_or(0);
+    let predictor_config = configs
+        .first()
+        .copied()
+        .unwrap_or(verify_riscv::DEFAULT_PREDICTOR);
     let static_prediction = predictor_config == 4;
     let cache_option = arguments.iter().position(|arg| arg == "--icache-kib");
     let icache_index_bits = if let Some(index) = cache_option {
@@ -1808,8 +1811,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             max_cycles,
         );
     }
-    if predictor_config != 0 && !rtl_only {
-        return Err("predictor selection requires --rtl-only or --hardware-memory-rtl; use nextpnr-riscv HardwareBimodalTestTop or HardwareStaticTestTop for mapping".into());
+    if predictor_config != verify_riscv::DEFAULT_PREDICTOR && !rtl_only {
+        return Err("predictor selection requires --rtl-only or --hardware-memory-rtl; use nextpnr-riscv HardwareStaticTestTop for mapping".into());
     }
     verify_direct_jtag_transport(project)?;
     if arguments.iter().any(|argument| argument == "--jtag-only") {
@@ -1827,11 +1830,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     verify_native(
         &mut rtl,
         "Celox RTL native",
-        if predictor_config & 8 != 0 {
-            None
-        } else {
-            Some(if static_prediction { 105 } else { 126 })
-        },
+        if static_prediction { Some(105) } else { None },
     )?;
     let mut board_rtl = SimulatorBuilder::new(&core_source, "Core")
         .param("BRANCH_PREDICTOR_CONFIG", predictor_config)
