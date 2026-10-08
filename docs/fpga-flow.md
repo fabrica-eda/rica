@@ -124,4 +124,3 @@ and verifies the pack on first use.
   with `--nextpnr-json`, for reference runs with nextpnr-ecp5. It supports the
   core, the predictor units and the earlier board tops (`HardwareTestTop` and its
   static/bimodal/cached variants), not the compact or user-profile tops.
-  `toolchain/region/` holds a nextpnr region-constraint experiment.

@@ -64,7 +64,7 @@ for the milestones and their measurements.
 | `riscv/characterization/` | On-board delay measurement and STA-library fitting scripts |
 | `riscv/act4/` | ACT4 configurations for Rica |
 | `i2c/` | Debug I2C target and its verifier |
-| `toolchain/` | Veryl testbench runner (`rica-tb`), Texo launcher crate, vendored crates, nextpnr experiments |
+| `toolchain/` | Veryl testbench runner (`rica-tb`) and the Texo launcher crate |
 | `third_party/riscv-arch-test` | Official architecture tests (git submodule) |
 
 ## Quick start
@@ -101,6 +101,5 @@ Place and route the working profile, then follow
 
 ## License
 
-Rica is licensed under the [MIT License](LICENSE). Vendored crates under
-`toolchain/vendor/` and the `third_party/riscv-arch-test` submodule keep their
-own licenses.
+Rica is licensed under the [MIT License](LICENSE). The
+`third_party/riscv-arch-test` submodule keeps its own licenses.

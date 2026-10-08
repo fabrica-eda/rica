@@ -24,10 +24,6 @@ texo-struo = "0.2.0"
 texo-target-ecp5 = "0.2.0"
 texo-timing = "0.2.0"
 
-[patch.crates-io]
-# Keep constant-folding metadata consistent with fitted constant storage.
-veryl-analyzer = { path = "toolchain/vendor/veryl-const-value/veryl-analyzer" }
-
 [profile.release]
 lto = "thin"
 codegen-units = 1
