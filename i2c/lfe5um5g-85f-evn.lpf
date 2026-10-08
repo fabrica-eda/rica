@@ -1,5 +1,6 @@
-# The EVN reference clock is 12 MHz.  The bound EHXPLLL declares its CLKOS
-# output as 250 MHz, which Texo treats as a generated-clock constraint.
+# Lattice LFE5UM5G-85F-EVN pins for the I2C target. The 12 MHz reference
+# clock feeds the EHXPLLL bound by pll-12-to-250.json, whose 250 MHz CLKOS
+# output Texo treats as a generated-clock constraint.
 LOCATE COMP "clk" SITE "A10";
 IOBUF PORT "clk" IO_TYPE=LVCMOS33;
 FREQUENCY PORT "clk" 12 MHZ;

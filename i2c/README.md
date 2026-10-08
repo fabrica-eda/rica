@@ -93,7 +93,7 @@ protocol `0x02`, PLL lock, reset release, activity and the 250/12 MHz ratio.
 ```sh
 cargo run --locked --offline -p verify-i2c
 riscv/tools/texo pnr i2c --package CABGA381 --speed 8 \
-  --lpf i2c/lfe5um5g-85f-evn-250.lpf \
+  --lpf i2c/lfe5um5g-85f-evn.lpf \
   --output i2c/build/jtag-i2c-target-250.txcp \
   --synthesis-goal-mhz 400 --jtagg-prefix jtag \
   --pll-binding i2c/pll-12-to-250.json
