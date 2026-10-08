@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 from checkpoint_io import load_checkpoint
 from user_platform import check_checkpoint_clocks
+from check_integrated_jtck_sta import default_measured_library
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "riscv/tools/jtag-sta/Cargo.toml"
@@ -49,6 +50,8 @@ def main():
     p.add_argument("--bitgen-runtime", type=Path, required=True,
                    help="Installed target pack providing database/, base.config and bin/ecppack")
     p.add_argument("--platform-profile", type=Path)
+    p.add_argument("--measured-timing-library", type=Path,
+                   help="Measured STA library of the checkpoint; defaults to the qualified one in riscv/assets")
     args = p.parse_args()
     require(not args.bit.exists(), "refusing to overwrite an existing bitstream")
     require(not args.audit_report.exists(), "refusing to overwrite an existing audit")
@@ -64,6 +67,9 @@ def main():
     bitgen_command = [str(ROOT / 'riscv/tools/texo'), 'bitgen', str(args.checkpoint.resolve()),
                       '--target-pack', str(selected_runtime),
                       '--bit', str(args.bit.resolve())]
+    library = args.measured_timing_library or default_measured_library()
+    if checkpoint['target'].get('measured_timing'):
+        bitgen_command += ['--measured-timing-library', str(library.resolve())]
     timing = checkpoint["timing"]
     require(timing["met_timing"] and timing["worst_slack_ps"] >= 0 and timing["worst_hold_slack_ps"] >= 0, "CPU/memory STA failed")
     if args.platform_profile:
@@ -83,6 +89,7 @@ def main():
             str(args.checkpoint.resolve()), '--architecture', str(args.architecture.resolve()),
             '--output', str(args.audit_report.resolve()),
             '--platform-profile', str(args.platform_profile.resolve()),
+            '--measured-timing-library', str(library.resolve()),
         ], check=True, cwd=ROOT)
         require(hashlib.sha256(args.checkpoint.read_bytes()).hexdigest() == checkpoint_hash,
                 'checkpoint changed during integrated audit')
@@ -99,7 +106,8 @@ def main():
         args.audit_report.write_text(json.dumps(audit, indent=2) + '\n')
         return
     audit_tool = ROOT / "target/release/jtag-sta"
-    command = [str(audit_tool), str(args.architecture.resolve()), str(args.checkpoint.resolve()), str(args.audit_report.resolve())]
+    command = [str(audit_tool), str(args.architecture.resolve()), str(args.checkpoint.resolve()),
+               str(library.resolve()), str(args.audit_report.resolve())]
     result = subprocess.run(command)
     audit = json.loads(args.audit_report.read_text())
     audit.update(checkpoint_sha256=checkpoint_hash, audit_binary_sha256=hashlib.sha256(audit_tool.read_bytes()).hexdigest(),

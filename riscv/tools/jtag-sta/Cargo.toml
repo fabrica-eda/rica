@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 serde_json.workspace = true
 texo-cli.workspace = true
+texo-flow.workspace = true
 texo-model.workspace = true
 texo-target-ecp5.workspace = true
 texo-timing.workspace = true

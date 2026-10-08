@@ -23,12 +23,19 @@ riscv/tools/texo --version
 `riscv/tools/texo-measured` wraps it for sign-off. For `pnr` it adds the
 measured placement model, the measured timing library and 194 ps setup/hold
 uncertainty, after checking each file's SHA-256 against
-[`riscv/qualified-measured-sta.json`](../riscv/qualified-measured-sta.json). The
-measurement data itself (placement model and timing library) is a large archive
-that is **not included in this repository**; without it `texo-measured` stops
-with an error, and `riscv/tools/texo` uses Texo's built-in ECP5 timing tables
-instead. Timing results from the built-in tables are not comparable to the
-numbers in this documentation. How the library was measured is described in
+[`riscv/qualified-measured-sta.json`](../riscv/qualified-measured-sta.json), and
+defaults `--architecture` to an ECP5 architecture cache that includes DSP timing.
+These files are attached to a GitHub release rather than stored in the
+repository. Download and verify them into `riscv/assets/` once:
+
+```sh
+riscv/tools/fetch-assets
+```
+
+The release also carries the hardware-verified bitstream described under
+[Current result](#current-result). `riscv/tools/texo` alone uses Texo's built-in
+ECP5 timing tables; its timing results are not comparable to the numbers in
+this documentation. How the library was measured is described in
 [timing-characterization.md](timing-characterization.md).
 
 ## Place and route
@@ -52,7 +59,7 @@ riscv/tools/texo-measured pnr riscv --top HardwareCompactUserTestTop \
 | `riscv/pll-user.json` | PLL binding generated from `platform-user.json` |
 | `riscv/jtck-clock-constraints.json` | 6 MHz JTCK constraint on the JTAGG output |
 | `riscv/timing-coverage-exceptions.json` | The four reviewed endpoint exceptions (below) |
-| `--architecture FILE` | Optional ECP5 architecture database; the recorded runs passed a local `.txdb` that includes DSP timing |
+| `--architecture FILE` | ECP5 architecture cache; `texo-measured` defaults it to `riscv/assets/ecp5-dsp-architecture-v6.txdb` |
 
 This is the **plain flow**: no seed placement, route hints, LUT/FF pairing, CE
 fanout limits or modified router limits. Texo places analytically, routes,
@@ -91,7 +98,7 @@ audit report, and then runs Texo bitgen:
 python3 riscv/tools/bitgen_jtag_checked.py riscv/build/user-112.txcp \
   --bit riscv/build/user-112.bit \
   --audit-report riscv/build/user-112-audit.json \
-  --architecture ECP5_ARCHITECTURE.txdb \
+  --architecture riscv/assets/ecp5-dsp-architecture-v6.txdb \
   --bitgen-runtime ~/.cache/texo/targets/<installed ECP5 target pack> \
   --platform-profile riscv/platform-user.json
 ```

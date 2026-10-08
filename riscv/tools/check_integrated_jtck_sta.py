@@ -20,6 +20,13 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def default_measured_library():
+    """The qualified library from riscv/assets (see riscv/tools/fetch-assets)."""
+    profile = json.loads((ROOT / "riscv/qualified-measured-sta.json").read_text())
+    path = ROOT / profile["timing_library"]
+    return path if path.exists() else Path(str(path) + ".zst")
+
+
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
@@ -32,6 +39,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--platform-profile", type=Path,
                         help="Check a redesigned platform's physical PLL and periods")
+    parser.add_argument("--measured-timing-library", type=Path, default=default_measured_library(),
+                        help="Measured STA library of a measured checkpoint (matched by its SHA-256)")
     parser.add_argument("--supplemental-binary", type=Path,
                         default=ROOT / "target/release/jtag-sta")
     args = parser.parse_args()
@@ -81,7 +90,8 @@ def main():
     require(len(globals_) == 1, "expected one promoted JTCK domain")
     pin_names = {d["sink_pin_id"]: d["sink_pin"] for d in delays}
     command = [str(args.supplemental_binary.resolve()), str(args.architecture.resolve()),
-               str(args.checkpoint.resolve()), str(supplemental.resolve())]
+               str(args.checkpoint.resolve()), str(args.measured_timing_library.resolve()),
+               str(supplemental.resolve())]
     result = subprocess.run(command, text=True, capture_output=True)
     audit = json.loads(supplemental.read_text())
     require(result.returncode == 0 and audit["structural_and_internal_timing_gate"],

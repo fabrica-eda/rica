@@ -2018,6 +2018,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "texo-cli",
+ "texo-flow",
  "texo-model",
  "texo-target-ecp5",
  "texo-timing",
@@ -3344,9 +3345,9 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "texo-cli"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f77a22d0410722d0265b4cdc72f7969e04ec9a2906cbf2fb207dec9ef9b4029a"
+checksum = "637b7986cbe2801a068f0b5300e2962db38dd372fd04589bd837bb3ee3fb4f58"
 dependencies = [
  "ciborium",
  "clap",
@@ -3371,9 +3372,9 @@ dependencies = [
 
 [[package]]
 name = "texo-flow"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b506b9ebf31dbf1297a83f5bc5781e2c4dfac820b3bfe5cee79d364483c7cb49"
+checksum = "a2f1bc38ed51f311bcf1bfb6f7588ef6977c1085a89cd01bfd0eb8e1d6007a8d"
 dependencies = [
  "serde",
  "serde_json",
@@ -3388,18 +3389,18 @@ dependencies = [
 
 [[package]]
 name = "texo-model"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62510d85ef504596c027e006e5f15881ebfff7295a2714d92c164671a42a9be7"
+checksum = "fd9dca24a9a370ed491009f3f7e92f2031f002b846546e1da40de6454d80ec28"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "texo-pnr"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d34b94b7e29f22bc0b4d89fadd031f4a6ca194cf939c084234de09068a8f9406"
+checksum = "6375c31fd09b907538875d54c64d90315999dd0b2e3f3ba3ef023deb212ae2ed"
 dependencies = [
  "libm",
  "rayon",
@@ -3409,9 +3410,9 @@ dependencies = [
 
 [[package]]
 name = "texo-struo"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "efb9eb870ee964f3d3d246b5adf0b6855fd876fb61836b115af4e814f3172da5"
+checksum = "5a477bcd21fe3351935f1d355d87ddbf8721fd1aeb639755912f339528bf3cc4"
 dependencies = [
  "celox",
  "struo-celox",
@@ -3422,9 +3423,9 @@ dependencies = [
 
 [[package]]
 name = "texo-target-ecp5"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cbd2ecf1a79620f18d0e43f27d0c5341c200cfac1e6f79836485ec0bc333a06"
+checksum = "d4aac72207991a7fad98242af0f8d8fbb23bf67f81b12253900c21753f8d44ca"
 dependencies = [
  "postcard",
  "serde",
@@ -3435,9 +3436,9 @@ dependencies = [
 
 [[package]]
 name = "texo-timing"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93e450d9ec829119a96e31b6d7aa57c7bc8860fcfaea0d3578b470bf97223a22"
+checksum = "a07e389d5395a0773d0b744cdfa115688fee5f6bb909e27705c553a1fecf1b38"
 dependencies = [
  "texo-model",
  "texo-pnr",

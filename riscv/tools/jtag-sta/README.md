@@ -6,9 +6,10 @@ were removed. It shares the root workspace's Texo pin, Cargo.lock, and build
 directory. Both compressed `.txcp` checkpoints and legacy JSON are accepted.
 Run it through the bitgen wrapper; see [docs/fpga-flow.md](../../../docs/fpga-flow.md#checked-bitgen).
 
-For a measured checkpoint, the checker installs the exact hash-bound timing
-library recorded in `target.measured_timing`, verifies its measurement inputs,
-and selects LUT input delays from the routed input-permutation PIPs. Missing
+For a measured checkpoint, the checker takes the timing library as an argument
+(the wrapper passes `riscv/assets/measured-sta-library-v2.json.zst` unless
+`--measured-timing-library` is given), requires the SHA-256 recorded in
+`target.measured_timing`, and selects LUT input delays from the routed input-permutation PIPs. Missing
 measurement provenance is an error; the architecture's original cell table is
 not a fallback for a measured checkpoint. The integrated checker compares all
 515 setup and 515 hold endpoints, including their edges and declared margins.

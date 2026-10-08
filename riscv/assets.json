@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "repository": "fabrica-eda/rica",
+  "release_tag": "assets-2026-10-08",
+  "directory": "riscv/assets",
+  "files": [
+    {
+      "asset": "measured-model.json",
+      "asset_sha256": "96677ef0b27135dfb8981f93866ee68e0b6411b305a1d9b4773354b01e283f88",
+      "path": "measured-model.json",
+      "description": "Board-measured placement cost model"
+    },
+    {
+      "asset": "measured-sta-library-v2.json.zst",
+      "asset_sha256": "31d5a8dc614c763b27ef6659f7262ec55d2ab79b6286164e807eb38de21f0e50",
+      "path": "measured-sta-library-v2.json.zst",
+      "description": "Board-measured STA library (zstd)"
+    },
+    {
+      "asset": "ecp5-dsp-architecture-v6.txdb.zst",
+      "asset_sha256": "90d2703bfc5023fe35eec55f240ac87fbe555ad198ba358d1ee1112ebfc322e6",
+      "path": "ecp5-dsp-architecture-v6.txdb",
+      "sha256": "b2fc7972942d1e32cb5613c302c8dbea92114959842305e6678bd691edcca1b5",
+      "description": "Texo ECP5 architecture cache with DSP timing (decompressed on fetch)"
+    },
+    {
+      "asset": "riscv-hardware-compact-user-112-sv39-20261007.bit",
+      "asset_sha256": "03521a98b6715062a7e6828b9bd860b32f50b072231471947b5248f590b1b611",
+      "path": "riscv-hardware-compact-user-112-sv39-20261007.bit",
+      "description": "Hardware-verified 112 MHz Sv39 bitstream (274/274 ELFs)"
+    },
+    {
+      "asset": "ecp5-evidence-2026-09-22.tar.zst",
+      "asset_sha256": "a5f1f1e80ea8b96cdddc0ac1ffdbc3e6a8a02df7666590f00cb67dd2bd0ceaef",
+      "path": ".evidence-2026-09-22",
+      "evidence": true,
+      "description": "Measurement evidence behind the model and library (only with --evidence)"
+    }
+  ]
+}

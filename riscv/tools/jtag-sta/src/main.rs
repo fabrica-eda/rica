@@ -27,17 +27,15 @@ fn delay(v: DelayRangeRecord) -> DelayRange {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    assert_eq!(args.len(), 3, "ARCH CHECKPOINT OUTPUT");
+    assert_eq!(args.len(), 4, "ARCH CHECKPOINT LIBRARY OUTPUT");
     let mut arch = read_architecture_cache(BufReader::new(File::open(&args[0])?))?;
     let cp: Value = texo_cli::read_checkpoint(std::path::Path::new(&args[1]))?;
     let measured = &cp["target"]["measured_timing"];
     let installed = if measured.is_object() {
-        Some(texo_cli::measured_timing::install(
-            Path::new(
-                measured["path"]
-                    .as_str()
-                    .ok_or("missing measured library path")?,
-            ),
+        // The checkpoint records only the library's SHA-256; the caller
+        // supplies the file, which must match it.
+        Some(texo_cli::measured_timing::install_with(
+            Path::new(&args[2]),
             &mut arch,
             cp["target"]["package"].as_str().ok_or("missing package")?,
             Some(
@@ -45,6 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .as_str()
                     .ok_or("missing measured library hash")?,
             ),
+            texo_flow::MeasuredEvidence::Skip,
         )?)
     } else {
         if cp["timing"]["delay_model"] == "measured_joint_cell_route_min_max_ps" {
@@ -356,7 +355,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "rising_edge_registers":rising,"other_tap_clock_registers":other_tap_clocks,
         "worst_setup_slack_ps":report.worst_slack_ps,"worst_hold_slack_ps":report.worst_hold_slack_ps,
         "unchecked_endpoints":unchecked,"setup_checks":setup,"hold_checks":hold,"structural_and_internal_timing_gate":pass});
-    serde_json::to_writer_pretty(File::create(&args[2])?, &result)?;
+    serde_json::to_writer_pretty(File::create(&args[3])?, &result)?;
     println!(
         "JTCK FFs={} setup={} hold={} unchecked={} WNS={:?} WHS={:?} gate={pass}",
         selected.len(),

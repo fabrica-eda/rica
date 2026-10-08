@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Download Rica's release assets listed in riscv/assets.json.
+
+Files are checked against their recorded SHA-256 and placed under
+riscv/assets/. Assets already present with the right hash are skipped.
+With --evidence, also download and extract the measurement evidence archive
+that `texo pnr --verify-measured-evidence` checks.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+root = Path(__file__).resolve().parents[2]
+manifest = json.loads((root / 'riscv/assets.json').read_text())
+directory = root / manifest['directory']
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
+def download(name, destination):
+    tag, repository = manifest['release_tag'], manifest['repository']
+    if shutil.which('gh'):
+        # Works for private repositories with the caller's GitHub login.
+        subprocess.run(['gh', 'release', 'download', tag, '--repo', repository,
+                        '--pattern', name, '--output', str(destination), '--clobber'], check=True)
+        return
+    url = f'https://github.com/{repository}/releases/download/{tag}/{name}'
+    with urllib.request.urlopen(url) as response, destination.open('wb') as out:
+        shutil.copyfileobj(response, out)
+
+
+def zstandard():
+    try:
+        import zstandard
+    except ImportError:
+        os.execvp('nix', ['nix', 'develop', str(root), '--command', 'python3',
+                          str(Path(__file__).resolve()), *sys.argv[1:]])
+    return zstandard
+
+
+def decompress(source, destination):
+    with source.open('rb') as raw, destination.open('wb') as out:
+        zstandard().ZstdDecompressor().copy_stream(raw, out)
+
+
+def extract(source, destination):
+    # The archive was written with a 128 MiB window (zstd --long=27).
+    decoder = zstandard().ZstdDecompressor(max_window_size=1 << 27)
+    with source.open('rb') as raw, decoder.stream_reader(raw) as stream, \
+            tarfile.open(fileobj=stream, mode='r|') as archive:
+        archive.extractall(destination, filter='data')
+
+
+evidence = '--evidence' in sys.argv[1:]
+directory.mkdir(parents=True, exist_ok=True)
+for entry in manifest['files']:
+    if entry.get('evidence') and not evidence:
+        continue
+    target = directory / entry['path']
+    expected = entry.get('sha256', entry['asset_sha256'])
+    if entry.get('evidence'):
+        # A marker records which evidence archive was extracted.
+        current = target.exists() and target.read_text().strip() == entry['asset_sha256']
+    else:
+        current = target.exists() and digest(target) == expected
+    if current:
+        print(f'{target.relative_to(root)} is up to date')
+        continue
+    with tempfile.TemporaryDirectory(dir=directory) as scratch:
+        fetched = Path(scratch) / entry['asset']
+        print(f'downloading {entry["asset"]}')
+        download(entry['asset'], fetched)
+        if digest(fetched) != entry['asset_sha256']:
+            raise SystemExit(f'{entry["asset"]} does not match its recorded SHA-256')
+        if entry.get('evidence'):
+            extract(fetched, directory)
+            (directory / entry['path']).write_text(entry['asset_sha256'] + '\n')
+            print(f'evidence extracted under {directory.relative_to(root)}/evidence')
+            continue
+        if 'sha256' in entry:
+            staged = Path(scratch) / entry['path']
+            decompress(fetched, staged)
+            if digest(staged) != entry['sha256']:
+                raise SystemExit(f'{entry["path"]} does not match its recorded SHA-256')
+            fetched = staged
+        fetched.replace(target)
+    print(f'{target.relative_to(root)} verified')

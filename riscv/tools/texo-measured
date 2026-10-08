@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Current Texo with Rica's hash-checked measured models and STA guard.
 
---historical-toolchain explicitly selects the archived, qualified executable.
+`pnr` also defaults --architecture to the DSP-timed ECP5 cache. The models and
+the cache come from the GitHub release; fetch them with riscv/tools/fetch-assets.
+
 Updating the tool does not qualify a new implementation or bitstream.
 """
 import hashlib
@@ -16,6 +18,8 @@ def checked(key):
     path=root/profile[key]
     if not path.exists() and key in ('timing_library', 'placement_model'):
         path = Path(str(path) + '.zst')
+    if not path.exists():
+        raise SystemExit(f'{profile[key]} is missing; run riscv/tools/fetch-assets.')
     if path.suffix == '.zst':
         try:
             import zstandard
@@ -31,13 +35,16 @@ def checked(key):
         raise SystemExit('Qualified '+key+' changed; requalify the profile explicitly.')
     return path
 args=sys.argv[1:]
-historical = '--historical-toolchain' in args
-args = [arg for arg in args if arg != '--historical-toolchain']
-binary = checked('binary') if historical else root/'riscv/tools/texo'
+binary = root/'riscv/tools/texo'
 def supplied(flag):return any(a==flag or a.startswith(flag+'=') for a in args)
 if args and args[0]=='pnr':
     for flag,key in [('--measured-placement-model','placement_model'),('--measured-timing-library','timing_library')]:
         if not supplied(flag):args += [flag,str(checked(key))]
     for flag in ['--setup-uncertainty-ps','--hold-uncertainty-ps']:
         if not supplied(flag):args += [flag,str(profile['setup_hold_guard_ps'])]
+    if not supplied('--architecture'):
+        architecture=root/'riscv/assets/ecp5-dsp-architecture-v6.txdb'
+        if not architecture.exists():
+            raise SystemExit(f'{architecture.relative_to(root)} is missing; run riscv/tools/fetch-assets.')
+        args += ['--architecture',str(architecture)]
 os.execv(binary,[str(binary),*args])

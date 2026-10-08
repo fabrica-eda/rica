@@ -5,8 +5,11 @@ Rica runs on the Lattice **LFE5UM5G-85F-EVN**. The board's on-board FT2232H
 and reads results through the JTAG debug transport
 ([platform.md](platform.md#jtag-debug-transport)). No extra wiring is needed.
 
-Bitstreams are build outputs and are not stored in the repository; produce one
-with [fpga-flow.md](fpga-flow.md).
+Bitstreams are not stored in the repository. `riscv/tools/fetch-assets`
+downloads the hardware-verified image to
+`riscv/assets/riscv-hardware-compact-user-112-sv39-20261007.bit`, which is
+also `hardware-riscv-tests`' default `--bitstream`; build your own with
+[fpga-flow.md](fpga-flow.md).
 
 ## Recommended setup: tapir
 

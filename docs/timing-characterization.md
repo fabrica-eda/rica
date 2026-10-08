@@ -2,8 +2,9 @@
 
 Rica signs off timing with an STA library measured on the board itself instead
 of the vendor-derived delay tables. The measurement and fitting scripts are in
-`riscv/characterization/`; the raw data and fitted library are a large archive
-that is not part of this repository (see [fpga-flow.md](fpga-flow.md)).
+`riscv/characterization/`. The fitted placement model and STA library, and the
+raw measurements behind them, are attached to a GitHub release rather than
+stored in the repository (see [fpga-flow.md](fpga-flow.md)).
 
 All measurements were taken on one LFE5UM5G-85F-EVN (CABGA381) with the board's
 nominal 12 MHz clock, fixed board supply voltage and no external instruments.
@@ -65,11 +66,23 @@ and reverse sweeps.
 
 ```sh
 python3 riscv/characterization/test_measurement.py   # unit tests of the measurement code
-python3 riscv/characterization/validate.py           # re-checks the archived measurements
 ```
 
-`validate.py` needs the measurement archive. `sweep.py` and `phase_sweep.py`
-reprogram the FPGA and refuse to overwrite an existing experiment directory.
+The model and library list every measurement file they were fitted from in
+`input_sha256`, relative to `riscv/assets/`. To check them, download the
+evidence archive (about 1 GB compressed) and let Texo verify each hash:
+
+```sh
+riscv/tools/fetch-assets --evidence
+riscv/tools/texo-measured pnr ... --verify-measured-evidence
+```
+
+Local user and host names in the archived logs and records were replaced with
+placeholders of the same length before publication; the recorded hashes are
+those of the published files. The fitting and sweep scripts still read and
+write experiment directories under `toolchain/measurements/` (ignored by git).
+`sweep.py` and `phase_sweep.py` reprogram the FPGA and refuse to overwrite an
+existing experiment directory.
 
 ## Limits
 
