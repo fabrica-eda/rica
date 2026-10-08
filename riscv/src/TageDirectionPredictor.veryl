@@ -1141,25 +1141,27 @@ module TageDirectionPredictor #(
             tag_bypass_data1_q = 16'd0;
             tag_bypass_data2_q = 16'd0;
             tag_bypass_data3_q = 16'd0;
-        } else if lookup_accept_base {
-            base_read_bypass_q = base_portb_write && (base_portb_addr == lookup_pc[11:1]);
-            base_bypass_data_q = base_portb_data;
-        }
-        if lookup_accept_tag0 {
-            tag_read_bypass0_q = tag_portb_write0 && (tag_portb_addr0 == lookup_index_0);
-            tag_bypass_data0_q = tag_portb_data0;
-        }
-        if lookup_accept_tag1 {
-            tag_read_bypass1_q = tag_portb_write1 && (tag_portb_addr1 == lookup_index_1);
-            tag_bypass_data1_q = tag_portb_data1;
-        }
-        if lookup_accept_tag2 {
-            tag_read_bypass2_q = tag_portb_write2 && (tag_portb_addr2 == lookup_index_2);
-            tag_bypass_data2_q = tag_portb_data2;
-        }
-        if lookup_accept_tag3 {
-            tag_read_bypass3_q = tag_portb_write3 && (tag_portb_addr3 == lookup_index_3);
-            tag_bypass_data3_q = tag_portb_data3;
+        } else {
+            if lookup_accept_base {
+                base_read_bypass_q = base_portb_write && (base_portb_addr == lookup_pc[11:1]);
+                base_bypass_data_q = base_portb_data;
+            }
+            if lookup_accept_tag0 {
+                tag_read_bypass0_q = tag_portb_write0 && (tag_portb_addr0 == lookup_index_0);
+                tag_bypass_data0_q = tag_portb_data0;
+            }
+            if lookup_accept_tag1 {
+                tag_read_bypass1_q = tag_portb_write1 && (tag_portb_addr1 == lookup_index_1);
+                tag_bypass_data1_q = tag_portb_data1;
+            }
+            if lookup_accept_tag2 {
+                tag_read_bypass2_q = tag_portb_write2 && (tag_portb_addr2 == lookup_index_2);
+                tag_bypass_data2_q = tag_portb_data2;
+            }
+            if lookup_accept_tag3 {
+                tag_read_bypass3_q = tag_portb_write3 && (tag_portb_addr3 == lookup_index_3);
+                tag_bypass_data3_q = tag_portb_data3;
+            }
         }
     }
 
