@@ -17,8 +17,8 @@ Plain `cargo` runs through mbx's shared build cache. With direnv installed,
 `direnv allow` activates the shell automatically. Update the pins with
 `nix flake update`.
 
-Struo, Texo and Celox are ordinary Cargo dependencies, pinned in `Cargo.toml`
-and `Cargo.lock`. Veryl's analyzer is vendored with a local patch under
+Struo, Texo and Celox are ordinary crates.io dependencies declared in
+`Cargo.toml`; `Cargo.lock` records the exact versions. Veryl's analyzer is vendored with a local patch under
 `toolchain/vendor/veryl-const-value`.
 
 The architecture tests are a git submodule:

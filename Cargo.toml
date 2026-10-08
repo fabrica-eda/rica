@@ -12,17 +12,17 @@ license = "MIT"
 serde_json = "1"
 object = { version = "0.37", default-features = false, features = ["read_core", "elf", "std"] }
 # Current simulator and compressed-artifact synthesis stack.
-celox = "=0.9.0"
+celox = "=0.10.1"
 # Keep direct and Texo-transitive Struo dependencies aligned.
-struo-celox = { git = "https://github.com/fabrica-eda/struo.git", rev = "bee70eb6d6f473e6e56877f38025cd62e3a79b50" }
-struo-frontend-veryl = { git = "https://github.com/fabrica-eda/struo.git", rev = "bee70eb6d6f473e6e56877f38025cd62e3a79b50" }
-struo-synth = { git = "https://github.com/fabrica-eda/struo.git", rev = "bee70eb6d6f473e6e56877f38025cd62e3a79b50" }
-struo-target-ecp5 = { git = "https://github.com/fabrica-eda/struo.git", rev = "bee70eb6d6f473e6e56877f38025cd62e3a79b50" }
-texo-cli = { git = "https://github.com/fabrica-eda/texo.git", rev = "92331ed0a7abce5d9f091ab6898f3bd307274ed5" }
-texo-model = { git = "https://github.com/fabrica-eda/texo.git", rev = "92331ed0a7abce5d9f091ab6898f3bd307274ed5" }
-texo-struo = { git = "https://github.com/fabrica-eda/texo.git", rev = "92331ed0a7abce5d9f091ab6898f3bd307274ed5" }
-texo-target-ecp5 = { git = "https://github.com/fabrica-eda/texo.git", rev = "92331ed0a7abce5d9f091ab6898f3bd307274ed5" }
-texo-timing = { git = "https://github.com/fabrica-eda/texo.git", rev = "92331ed0a7abce5d9f091ab6898f3bd307274ed5" }
+struo-celox = "0.2.0"
+struo-frontend-veryl = "0.2.0"
+struo-synth = "0.2.0"
+struo-target-ecp5 = "0.2.0"
+texo-cli = "0.2.0"
+texo-model = "0.2.0"
+texo-struo = "0.2.0"
+texo-target-ecp5 = "0.2.0"
+texo-timing = "0.2.0"
 
 [patch.crates-io]
 # Keep constant-folding metadata consistent with fitted constant storage.

@@ -12,7 +12,7 @@ all of the following pass on the exact bitstream:
 
 ## Running Texo
 
-`riscv/tools/texo` builds and runs the Texo CLI pinned in `Cargo.lock` through
+`riscv/tools/texo` builds and runs the Texo CLI locked in `Cargo.lock` through
 the Nix shell (`nix develop`) and mbx. Texo's diagnostic metric logging is off
 unless `RICA_VERBOSE=1` is set.
 

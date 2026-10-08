@@ -66,5 +66,5 @@ Texo's STA handles the related clocks directly.
 
 Record the affected revision, a retained reproducer or numeric comparison, the
 workaround in Rica, the upstream PR, and the regression that guards it. Mark an
-item fixed only after the pinned dependency contains the fix and Rica's
+item fixed only after the dependency version Rica uses contains the fix and Rica's
 regressions pass with it.
