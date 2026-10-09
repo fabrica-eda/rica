@@ -56,7 +56,8 @@ path: one for fetch and one for data, each holding the R/W/X result for one 4 Ki
 page whose permissions are uniform. A page split by a PMP boundary always uses
 the exact two-stage check. A data hit shortens the permission wait from two
 cycles to one; a fetch miss holds RX for one extra cycle. Both entries are
-invalidated while a PMP CSR write is in CM.
+invalidated while a PMP CSR write is in CM. The checkers and both caches are in
+`PmpUnit.veryl`.
 
 ## Supervisor mode
 
