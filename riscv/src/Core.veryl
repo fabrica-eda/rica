@@ -85,7 +85,7 @@ module Core #(
     const ACTIVE_A: bit = ENABLE_A && SYNC_DATA_MEMORY && STRICT_MEMORY;
     const ADDRESS_BITS       : u32 = 32 + 32 * (STRICT_MEMORY as u32);
     const TARGET_MATCH_SLICES: u32 = ADDRESS_BITS / 16;
-    // FetchPayload is the registered boundary after instruction-line selection;
+    // FetchQueue registers the packet after instruction-line selection;
     // FetchPacket adds the separately registered occupancy bit to its view.
     // DecodePacket keeps the original encoding beside its canonical RV64I form:
     // the latter feeds the ordinary decoder while the former remains available
@@ -98,14 +98,6 @@ module Core #(
         access_fault   : logic              ,
         fault_boundary : logic              ,
         // Sv39: the physical page the instruction was fetched from.
-        frame          : logic<20>          ,
-    }
-    struct FetchPayload {
-        pc             : logic<ADDRESS_BITS>,
-        raw_instruction: logic<32>          ,
-        is_compressed  : logic              ,
-        access_fault   : logic              ,
-        fault_boundary : logic              ,
         frame          : logic<20>          ,
     }
     struct DecodePacket {
@@ -140,17 +132,23 @@ module Core #(
     var fetch_fallthrough        : logic       <ADDRESS_BITS>    ;
     var debug_x31_q              : logic       <64>              ;
     var fetch_packet             : FetchPacket                   ;
-    var fetch_payload_q          : FetchPayload                  ;
-    var fetch_lookahead_payload_q: FetchPayload                  ;
-    var fetch_tail_payload_q     : FetchPayload                  ;
     var fetch_valid_q            : logic                         ;
     var fetch_lookahead_valid_q  : logic                         ;
     var fetch_tail_valid_q       : logic                         ;
-    var fetch_payload_write      : logic                         ;
-    var fetch_lookahead_write    : logic                         ;
-    var fetch_tail_write         : logic                         ;
     var fetch_q                  : FetchPacket                   ;
     var fetch_lookahead_q        : FetchPacket                   ;
+    var fetch_queue_head_pc                  : logic<ADDRESS_BITS>;
+    var fetch_queue_head_raw_instruction     : logic<32>          ;
+    var fetch_queue_head_is_compressed       : logic              ;
+    var fetch_queue_head_access_fault        : logic              ;
+    var fetch_queue_head_fault_boundary      : logic              ;
+    var fetch_queue_head_frame               : logic<20>          ;
+    var fetch_queue_lookahead_pc             : logic<ADDRESS_BITS>;
+    var fetch_queue_lookahead_raw_instruction: logic<32>          ;
+    var fetch_queue_lookahead_is_compressed  : logic              ;
+    var fetch_queue_lookahead_access_fault   : logic              ;
+    var fetch_queue_lookahead_fault_boundary : logic              ;
+    var fetch_queue_lookahead_frame          : logic<20>          ;
     var decode_packet            : DecodePacket                  ;
     var fd_q                     : DecodePacket                  ;
 
@@ -1142,10 +1140,14 @@ module Core #(
         );
     }
 
+    // WB register-file write and the decoder input.
     always_comb {
         rf_write_enable  = wb_valid_q && wb_write_enable_q && (wb_rd_q != 5'd0);
         decode_bus.instr = fd_q.instruction;
+    }
 
+    // Fetch: the cursor, the incoming packet and the queue views.
+    always_comb {
         fetch_address                            = {fetch_line_q, fetch_parcel_q, 1'b0};
         fetch_line_plus_one[7:0]                 = fetch_line_q[7:0] + 8'd1;
         fetch_line_plus_one[15:8]                = fetch_line_q[15:8] + ((fetch_line_q[7:0] == 8'hff) as 8);
@@ -1178,19 +1180,19 @@ module Core #(
         }
         // Preserve the packed queue views used by decode and verification while
         // keeping their payload and occupancy in disjoint physical registers.
-        fetch_q.pc                        = fetch_payload_q.pc;
-        fetch_q.access_fault              = fetch_payload_q.access_fault;
-        fetch_q.fault_boundary            = fetch_payload_q.fault_boundary;
-        fetch_q.frame                     = fetch_payload_q.frame;
-        fetch_q.raw_instruction           = fetch_payload_q.raw_instruction;
-        fetch_q.is_compressed             = fetch_payload_q.is_compressed;
+        fetch_q.pc                        = fetch_queue_head_pc;
+        fetch_q.access_fault              = fetch_queue_head_access_fault;
+        fetch_q.fault_boundary            = fetch_queue_head_fault_boundary;
+        fetch_q.frame                     = fetch_queue_head_frame;
+        fetch_q.raw_instruction           = fetch_queue_head_raw_instruction;
+        fetch_q.is_compressed             = fetch_queue_head_is_compressed;
         fetch_q.valid                     = fetch_valid_q;
-        fetch_lookahead_q.pc              = fetch_lookahead_payload_q.pc;
-        fetch_lookahead_q.access_fault    = fetch_lookahead_payload_q.access_fault;
-        fetch_lookahead_q.fault_boundary  = fetch_lookahead_payload_q.fault_boundary;
-        fetch_lookahead_q.frame           = fetch_lookahead_payload_q.frame;
-        fetch_lookahead_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
-        fetch_lookahead_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
+        fetch_lookahead_q.pc              = fetch_queue_lookahead_pc;
+        fetch_lookahead_q.access_fault    = fetch_queue_lookahead_access_fault;
+        fetch_lookahead_q.fault_boundary  = fetch_queue_lookahead_fault_boundary;
+        fetch_lookahead_q.frame           = fetch_queue_lookahead_frame;
+        fetch_lookahead_q.raw_instruction = fetch_queue_lookahead_raw_instruction;
+        fetch_lookahead_q.is_compressed   = fetch_queue_lookahead_is_compressed;
         fetch_lookahead_q.valid           = fetch_lookahead_valid_q;
         fetch_fallthrough = fetch_packet.pc + 32'd4;
         if fetch_packet.is_compressed {
@@ -1201,7 +1203,10 @@ module Core #(
             fetch_next_parcel = fetch_parcel_q + 2'd2;
             fetch_cross_line  = fetch_parcel_q[1];
         }
+    }
 
+    // FD: the decode packet with its prediction.
+    always_comb {
         decode_packet.pc = fetch_q.pc;
 
         decode_packet.access_fault = fetch_q.access_fault;
@@ -1234,7 +1239,10 @@ module Core #(
         if (BRANCH_PREDICTOR_CONFIG & 8) == 0 {
             decode_packet.predicted_next_pc = 32'd0;
         }
+    }
 
+    // CM: completion inputs; the CM result also feeds forwarding.
+    always_comb {
         // The preceding EX result is already registered in the common
         // completion stage. Reuse that copy for the fast EX bypass instead of
         // duplicating two 64-bit result banks in a second bypass register.
@@ -1278,6 +1286,10 @@ module Core #(
         completion_bus.use_load   = cm_is_load_q;
         completion_bus.store_size = cm_store_size_q;
         cm_forward_data           = completion_bus.result;
+    }
+
+    // RX: operand forwarding.
+    always_comb {
         if rx_stalled_q {
             forwarded_rs1 = rx_stall_data_a_q;
         } else {
@@ -1316,7 +1328,10 @@ module Core #(
         } else {
             rx_operand_b = forwarded_rs2;
         }
+    }
 
+    // EX: bypass, ALU operands and the LSU address and permission.
+    always_comb {
         ex_bypass_hit_rs1 = rx_valid_q && ex_valid_q && ex_can_bypass_q && (ex_rd_q == rx_rs1_q);
         ex_bypass_hit_rs2 = rx_valid_q && ex_valid_q && ex_can_bypass_q && (ex_rd_q == rx_rs2_q);
 
@@ -1405,7 +1420,10 @@ module Core #(
         } else {
             execute_store_data = ex_store_data_q;
         }
+    }
 
+    // EX: CSR source and exceptions.
+    always_comb {
         csr_bus.index = ex_csr_index_q;
         if ex_csr_use_imm_q {
             csr_source = {59'd0, ex_csr_immediate_q};
@@ -1470,6 +1488,10 @@ module Core #(
             ex_exception_delegated = csr_bus.exception_delegated[5];
             if ex_is_store_q { ex_exception_delegated = csr_bus.exception_delegated[7]; }
         }
+    }
+
+    // CM: branch resolution.
+    always_comb {
         // CM finishes the branch reduction from the same registered compare
         // slices as SLT/SLTU, removing a full-width reduction from the EX
         // bypass path.
@@ -1496,7 +1518,10 @@ module Core #(
                 cm_branch_taken = cm_compare_result ^ cm_branch_op_q[0];
             }
         }
+    }
 
+    // RX: control-flow classification.
+    always_comb {
         rx_control_fallthrough = rx_immediate_q[31:0] == 32'd4;
         if rx_is_compressed_q {
             rx_control_fallthrough = rx_immediate_q[31:0] == 32'd2;
@@ -1526,6 +1551,10 @@ module Core #(
                 rx_control_kind = 3'd3;
             }
         }
+    }
+
+    // EX/CM: redirect targets and prediction checks.
+    always_comb {
         if ex_bypass_q.redirect {
             redirect_addend_a = bypass_data;
         } else {
@@ -1612,6 +1641,10 @@ module Core #(
         ex_redirect_valid     = ex_prediction_mismatch;
         branch_redirect_valid = cm_prediction_mismatch;
         redirect_discards_cm  = redirect_pending_q && !redirect_preserve_cm_q;
+    }
+
+    // Backend waits.
+    always_comb {
         // Applying an older redirect takes one extra cycle. Control transfers
         // still present in the younger pipeline during that cycle are
         // wrong-path work and must not enqueue another redirect.
@@ -1646,7 +1679,10 @@ module Core #(
         if ACTIVE_A {
             backend_pending = memory_pending || muldiv_pending || atomic_pending || pmp_data_wait || translation_wait;
         }
+    }
 
+    // System events, interrupts and request issue.
+    always_comb {
         // Architectural system side effects occur in CM. If the preceding
         // branch redirected, its registered pending bit suppresses this
         // younger instruction without a compare-result-to-CSR timing path.
@@ -1701,7 +1737,10 @@ module Core #(
         // before it can produce a result. Keep the late CM branch comparison
         // off the MDU state input; architectural ownership remains in CM.
         muldiv_start = ENABLE_M && ex_valid_q && ex_is_muldiv_q && !backend_pending && !redirect_pending_q;
+    }
 
+    // CM: retirement and CSR side effects.
+    always_comb {
         // This is the architectural retirement boundary: a successful CM
         // instruction transfers to WB here. A pending taken branch explicitly
         // discards its wrong-path CM follower; JAL itself remains retireable.
@@ -1756,7 +1795,10 @@ module Core #(
             csr_bus.trap_supervisor = interrupt_delegated_q;
             csr_bus.trap_value = 64'd0;
         }
+    }
 
+    // Redirect selection.
+    always_comb {
         redirect_valid = !backend_pending && !redirect_pending_q
             && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
         // An EX-owned prediction repair redirects only younger frontend work.
@@ -1791,6 +1833,10 @@ module Core #(
                 pending_redirect_target = cm_redirect_target_q;
             }
         }
+    }
+
+    // FD/RX hazards and the frontend hold.
+    always_comb {
         // Classify the FD consumer against the RX producer one edge before
         // that pair becomes RX/EX.  The registered bit makes the eventual
         // stall decision identical, but removes two register-index compares
@@ -1820,7 +1866,10 @@ module Core #(
         }
         execution_hazard = rx_execution_hazard_q;
         frontend_hold    = execution_hazard || interrupt_drain_q || interrupt_claimed_q || ipc_miss_hold;
+    }
 
+    // Predictor handshake and the fetch cursor.
+    always_comb {
         predictor_wait = !predictor_ready || (fetch_q.valid && !predictor_response_valid);
         // A redirect/exception detected in this cycle may consume one younger
         // prediction and launch its shadow lookup.  Both are speculative: the
@@ -1869,17 +1918,10 @@ module Core #(
             fetch_line_next = pending_redirect_target[ADDRESS_BITS - 1:3];
             fetch_parcel_next = pending_redirect_target[2:1];
         }
+    }
 
-        // Keep packet data selection independent from the write enables.  A
-        // payload is non-architectural whenever its corresponding valid bit is
-        // clear, so every empty bank may refresh from the current input.  A
-        // populated bank writes only on the FIFO advance edge.  This exposes a
-        // short native-CE predicate while keeping memory waits and predictor
-        // decisions out of the payload D muxes.
-        fetch_payload_write   = !fetch_valid_q || fetch_queue_advance;
-        fetch_lookahead_write = !fetch_lookahead_valid_q || fetch_queue_advance;
-        fetch_tail_write      = !fetch_tail_valid_q || fetch_queue_advance;
-
+    // Predictor maintenance and performance events.
+    always_comb {
         // The CM conditional is older than the EX instruction and therefore
         // owns recovery when both detect a mismatch in the same cycle.
         predictor_recover_valid = redirect_valid && !cm_system_redirect;
@@ -1918,7 +1960,10 @@ module Core #(
         csr_bus.counter_freeze      = counter_freeze;
         csr_bus.debug_counter_index = debug_counter_index;
         debug_counter_data          = csr_bus.debug_counter_data;
+    }
 
+    // Fetch PC and data port outputs.
+    always_comb {
         fetch_virtual_pc = fetch_address;
         // A registered held prediction prepares the synchronous lookup while
         // its queue entry waits for the backend. Its accept edge clears the
@@ -1974,7 +2019,6 @@ module Core #(
         // the board debug ABI and will be used by a future debug halt request.
         halted    = 1'b0;
         debug_x31 = debug_x31_q;
-
     }
 
 
@@ -2116,95 +2160,41 @@ module Core #(
         }
     }
 
-    // Queue payload is masked by separately reset valid bits.  One clock-only
-    // process owns all three packet banks, avoiding packed-struct partial
-    // writes across processes.  Each bank has an explicit write enable so
-    // synthesis can use the native FF CE instead of putting the stall and
-    // predictor-decision predicates on an old-value D mux.  Old-value FF
-    // semantics make a simultaneous pop/push shift middle -> head and tail
-    // -> middle before appending the incoming packet to the newly opened
-    // slot.
-    always_ff (clk) {
-        if fetch_payload_write {
-            if fetch_lookahead_valid_q {
-                fetch_payload_q.pc              = fetch_lookahead_payload_q.pc;
-                fetch_payload_q.access_fault    = fetch_lookahead_payload_q.access_fault;
-                fetch_payload_q.fault_boundary  = fetch_lookahead_payload_q.fault_boundary;
-                fetch_payload_q.frame           = fetch_lookahead_payload_q.frame;
-                fetch_payload_q.raw_instruction = fetch_lookahead_payload_q.raw_instruction;
-                fetch_payload_q.is_compressed   = fetch_lookahead_payload_q.is_compressed;
-            } else {
-                fetch_payload_q.pc              = fetch_packet.pc;
-                fetch_payload_q.access_fault    = fetch_packet.access_fault;
-                fetch_payload_q.fault_boundary  = fetch_packet.fault_boundary;
-                fetch_payload_q.frame           = fetch_packet.frame;
-                fetch_payload_q.raw_instruction = fetch_packet.raw_instruction;
-                fetch_payload_q.is_compressed   = fetch_packet.is_compressed;
-            }
-
-        }
-        if fetch_lookahead_write {
-            if fetch_tail_valid_q {
-                fetch_lookahead_payload_q.pc              = fetch_tail_payload_q.pc;
-                fetch_lookahead_payload_q.access_fault    = fetch_tail_payload_q.access_fault;
-                fetch_lookahead_payload_q.fault_boundary  = fetch_tail_payload_q.fault_boundary;
-                fetch_lookahead_payload_q.frame           = fetch_tail_payload_q.frame;
-                fetch_lookahead_payload_q.raw_instruction = fetch_tail_payload_q.raw_instruction;
-                fetch_lookahead_payload_q.is_compressed   = fetch_tail_payload_q.is_compressed;
-            } else {
-                fetch_lookahead_payload_q.pc              = fetch_packet.pc;
-                fetch_lookahead_payload_q.access_fault    = fetch_packet.access_fault;
-                fetch_lookahead_payload_q.fault_boundary  = fetch_packet.fault_boundary;
-                fetch_lookahead_payload_q.frame           = fetch_packet.frame;
-                fetch_lookahead_payload_q.raw_instruction = fetch_packet.raw_instruction;
-                fetch_lookahead_payload_q.is_compressed   = fetch_packet.is_compressed;
-            }
-        }
-        if fetch_tail_write {
-            fetch_tail_payload_q.pc              = fetch_packet.pc;
-            fetch_tail_payload_q.access_fault    = fetch_packet.access_fault;
-            fetch_tail_payload_q.fault_boundary  = fetch_packet.fault_boundary;
-            fetch_tail_payload_q.frame           = fetch_packet.frame;
-            fetch_tail_payload_q.raw_instruction = fetch_packet.raw_instruction;
-            fetch_tail_payload_q.is_compressed   = fetch_packet.is_compressed;
-        }
-    }
-
-    // Occupancy is a prefix: tail implies middle, and middle implies head.
-    // Reset/redirect own only these valid bits; the payload bank above remains
-    // reset-free.  The normal equations are the complete three-slot FIFO
-    // pop/push truth table under that invariant.
-    always_ff (clk, rst_n) {
-        if_reset {
-            fetch_valid_q           = 1'b0;
-            fetch_lookahead_valid_q = 1'b0;
-            fetch_tail_valid_q      = 1'b0;
-        } else if !backend_wait {
-            if redirect_pending_q || ex_frontend_block {
-                fetch_valid_q           = 1'b0;
-                fetch_lookahead_valid_q = 1'b0;
-                fetch_tail_valid_q      = 1'b0;
-            } else if predictor_wait {
-                if fetch_queue_push_valid {
-                    if !fetch_lookahead_valid_q {
-                        fetch_lookahead_valid_q = 1'b1;
-                    } else {
-                        fetch_tail_valid_q = 1'b1;
-                    }
-                }
-            } else if frontend_hold {
-                // Hold all three occupied slots.
-            } else if predictor_frontend_redirect {
-                fetch_valid_q           = 1'b0;
-                fetch_lookahead_valid_q = 1'b0;
-                fetch_tail_valid_q      = 1'b0;
-            } else {
-                fetch_valid_q           = fetch_lookahead_valid_q || fetch_queue_push_valid;
-                fetch_lookahead_valid_q = fetch_tail_valid_q || (fetch_lookahead_valid_q && fetch_queue_push_valid);
-                fetch_tail_valid_q      = fetch_tail_valid_q && fetch_queue_push_valid;
-            }
-        }
-    }
+    inst fetch_queue: FetchQueue #(
+        ADDRESS_BITS: ADDRESS_BITS,
+    ) (
+        clk                                                                ,
+        rst_n                                                              ,
+        packet_pc                  : fetch_packet.pc                       ,
+        packet_raw_instruction     : fetch_packet.raw_instruction          ,
+        packet_is_compressed       : fetch_packet.is_compressed            ,
+        packet_access_fault        : fetch_packet.access_fault             ,
+        packet_fault_boundary      : fetch_packet.fault_boundary           ,
+        packet_frame               : fetch_packet.frame                    ,
+        push_valid                 : fetch_queue_push_valid                ,
+        advance                    : fetch_queue_advance                   ,
+        backend_wait                                                       ,
+        redirect_pending_q                                                 ,
+        ex_frontend_block                                                  ,
+        predictor_wait                                                     ,
+        frontend_hold                                                      ,
+        predictor_frontend_redirect                                        ,
+        valid_q                    : fetch_valid_q                         ,
+        lookahead_valid_q          : fetch_lookahead_valid_q               ,
+        tail_valid_q               : fetch_tail_valid_q                    ,
+        head_pc                    : fetch_queue_head_pc                   ,
+        head_raw_instruction       : fetch_queue_head_raw_instruction      ,
+        head_is_compressed         : fetch_queue_head_is_compressed        ,
+        head_access_fault          : fetch_queue_head_access_fault         ,
+        head_fault_boundary        : fetch_queue_head_fault_boundary       ,
+        head_frame                 : fetch_queue_head_frame                ,
+        lookahead_pc               : fetch_queue_lookahead_pc              ,
+        lookahead_raw_instruction  : fetch_queue_lookahead_raw_instruction ,
+        lookahead_is_compressed    : fetch_queue_lookahead_is_compressed   ,
+        lookahead_access_fault     : fetch_queue_lookahead_access_fault    ,
+        lookahead_fault_boundary   : fetch_queue_lookahead_fault_boundary  ,
+        lookahead_frame            : fetch_queue_lookahead_frame           ,
+    );
 
     // One sequence owner for normal transfers and both phases of an AMO.
     always_ff (clk, rst_n) {
@@ -2241,16 +2231,9 @@ module Core #(
         }
     }
 
+    // Stage valid bits, holds and flushes, and the FD/RX capture.
     always_ff (clk, rst_n) {
         if_reset {
-            debug_x31_q             = 64'h0000_0000_0000_0000;
-            redirect_pending_q      = 1'b0;
-            redirect_preserve_cm_q  = 1'b0;
-            redirect_event_delay_q  = 1'b0;
-            redirect_flush_wb_q     = 1'b0;
-            redirect_target_q       = 64'h0000_0000_0000_0000;
-
-
             fd_csr_known_q = 1'b0;
             fd_csr_writable_q = 1'b0;
             fd_q.pc                = 32'h0000_0000;
@@ -2272,19 +2255,7 @@ module Core #(
             rx_fetch_second_q      = 1'b0;
             rx_straddle_q          = 1'b0;
             rx_next_frame_q        = 20'd0;
-            ex_itlb_miss_q            = 1'b0;
-            ex_fetch_page_fault_q     = 1'b0;
-            ex_fetch_second_q         = 1'b0;
-            ex_physical_fetch_fault_q = 1'b0;
-            ex_second_access_fault_q  = 1'b0;
-            cm_itlb_miss_q            = 1'b0;
-            cm_fetch_second_q         = 1'b0;
             rx_fault_boundary_q    = 1'b0;
-            ex_fetch_fault_q       = 1'b0;
-            ex_pmp_fetch_fault_q = 1'b0;
-            ex_pmp_second_parcel_q = 1'b0;
-            ex_fault_boundary_q    = 1'b0;
-
             rx_valid_q             = 1'b0;
             rx_pmp_high_q = 1'b0;
             rx_pmp_last_q = 33'd0;
@@ -2309,7 +2280,6 @@ module Core #(
             rx_is_load_q           = 1'b0;
             rx_is_atomic_q = 1'b0;
             rx_is_muldiv_q         = 1'b0;
-            ex_is_muldiv_q         = 1'b0;
             cm_muldiv_pending_q    = 1'b0;
             rx_load_size_q         = 2'b11;
             rx_load_unsigned_q     = 1'b0;
@@ -2337,139 +2307,12 @@ module Core #(
             rx_predicted_next_pc_q = 32'h0000_0004;
             rx_stalled_q           = 1'b0;
             rx_execution_hazard_q  = 1'b0;
-
             ex_valid_q               = 1'b0;
-            ex_pc_q                  = 64'h0000_0000_0000_0000;
-            ex_raw_instr_q           = 32'h0000_0013;
-            ex_rd_q                  = 5'd0;
-            ex_alu_op_q              = 4'd0;
-            ex_subtract_q            = 1'b0;
-            ex_write_enable_q        = 1'b0;
-            ex_can_bypass_q          = 1'b0;
             ex_pmp_pending_q = 1'b0;
-            ex_pmp_read_q = 1'b0;
-            ex_pmp_write_q = 1'b0;
-            ex_is_load_q             = 1'b0;
-            ex_is_atomic_q = 1'b0;
-            ex_load_size_q           = 2'b11;
-            ex_load_unsigned_q       = 1'b0;
-            ex_is_store_q            = 1'b0;
-            ex_store_size_q          = 2'b11;
-            ex_word_op_q             = 1'b0;
-            ex_is_branch_q           = 1'b0;
-            ex_branch_op_q           = 3'b000;
-            ex_link_q                = 1'b0;
-            ex_static_redirect_q     = 1'b0;
-            ex_control_fallthrough_q = 1'b0;
-            ex_is_csr_q              = 1'b0;
-            ex_csr_op_q              = 2'b00;
-            ex_csr_use_imm_q         = 1'b0;
-            ex_csr_immediate_q       = 5'd0;
-            ex_csr_write_q           = 1'b0;
-            ex_csr_index_q           = 6'd0;
-            ex_is_ecall_q            = 1'b0;
-            ex_is_ebreak_q           = 1'b0;
-            ex_is_mret_q             = 1'b0;
-            ex_is_sret_q             = 1'b0;
-            ex_is_fence_i_q          = 1'b0;
-            ex_frontend_block_q      = 1'b0;
-            ex_normal_memory_q = 1'b0;
-            ex_illegal_q             = 1'b0;
-            ex_control_kind_q        = 3'd0;
-            ex_prediction_token_q    = 3'd0;
-            ex_predicted_taken_q     = 1'b0;
-            ex_predicted_next_pc_q   = 32'h0000_0004;
-            ex_fallthrough_pc_q      = 32'h0000_0004;
-            ex_operand_a_q           = 64'h0000_0000_0000_0000;
-            ex_operand_b_q           = 64'h0000_0000_0000_0000;
-            ex_store_data_q          = 64'h0000_0000_0000_0000;
-            ex_redirect_base_q       = 64'h0000_0000_0000_0000;
-            ex_redirect_offset_q     = 64'h0000_0000_0000_0000;
-            ex_redirect_clear_lsb_q  = 1'b0;
-            ex_bypass_q.operand_a    = 1'b0;
-            ex_bypass_q.operand_b    = 1'b0;
-            ex_bypass_q.store_data   = 1'b0;
-            ex_bypass_q.redirect     = 1'b0;
-
             cm_valid_q               = 1'b0;
             cm_atomic_active_q = 1'b0;
             cm_memory_active_q = 1'b0;
-            cm_system_block_q = 1'b0;
-            cm_pc_q                  = 64'h0000_0000_0000_0000;
-            cm_raw_instr_q           = 32'h0000_0013;
-            cm_rd_q                  = 5'd0;
-            cm_write_enable_q        = 1'b0;
-            cm_is_load_q             = 1'b0;
-            cm_is_atomic_q = 1'b0;
-            cm_load_size_q           = 2'b11;
-            cm_load_unsigned_q       = 1'b0;
-            cm_is_store_q            = 1'b0;
-            cm_store_size_q          = 2'b11;
-            cm_is_branch_q           = 1'b0;
-            cm_linear_match_q        = 1'b0;
-            ex_kind_match_q          = 1'b0;
-            cm_taken_match_q         = 1'b0;
-            cm_untaken_match_q       = 1'b0;
-            cm_branch_op_q           = 3'd0;
-            cm_control_fallthrough_q = 1'b0;
-            cm_branch_equal_q        = 4'b0000;
-            cm_redirect_target_q     = 32'h0000_0000;
-            cm_shift_low_q           = 64'h0000_0000_0000_0000;
-            cm_shift_amount_q        = 3'b000;
-            cm_shift_arithmetic_q    = 1'b0;
-            cm_logic_result_q        = 64'h0000_0000_0000_0000;
-            cm_use_logic_q           = 1'b0;
-            cm_use_shift_q           = 1'b0;
-            cm_use_bitmanip_q        = 1'b0;
-            cm_compare_less_q        = 4'b0000;
-            cm_compare_sign_a_q      = 1'b0;
-            cm_compare_sign_b_q      = 1'b0;
-            cm_compare_signed_q      = 1'b0;
-            cm_use_compare_q         = 1'b0;
-            cm_shift_left_q          = 1'b0;
-            cm_shift_word_q          = 1'b0;
-            cm_lsu_address_q         = 64'h0000_0000_0000_0000;
-            cm_lsu_memory_address_q  = 64'h0000_0000_0000_0000;
-            cm_is_csr_q              = 1'b0;
-            cm_csr_op_q              = 2'd0;
-            cm_csr_write_q           = 1'b0;
-            cm_csr_index_q           = 6'd0;
-            cm_csr_source_q          = 64'd0;
-            cm_exception_q           = 1'b0;
-            cm_exception_cause_q     = 64'd0;
-            cm_exception_value_q     = 64'd0;
-            cm_data_fault_value_q    = 1'b0;
-            cm_data_fault_boot_q     = 1'b0;
-            cm_data_fault_ram_q      = 1'b0;
-            cm_is_mret_q             = 1'b0;
-            cm_is_sret_q             = 1'b0;
-            cm_exception_delegated_q = 1'b0;
-            cm_atomic_delegated_q    = 2'd0;
-            cm_is_fence_i_q          = 1'b0;
-            cm_control_kind_q        = 3'd0;
-            cm_prediction_token_q    = 3'd0;
-            cm_fallthrough_pc_q      = 32'h0000_0004;
-
             wb_valid_q        = 1'b0;
-            wb_pc_q           = 64'h0000_0000_0000_0000;
-            wb_raw_instr_q    = 32'h0000_0013;
-            wb_rd_q           = 5'd0;
-            wb_write_enable_q = 1'b0;
-            wb_result_q       = 64'h0000_0000_0000_0000;
-            wb_mem_we_q       = 1'b0;
-            wb_mem_addr_q     = 64'h0000_0000_0000_0000;
-            wb_mem_wdata_q    = 64'h0000_0000_0000_0000;
-            wb_mem_wmask_q    = 8'h00;
-
-            commit_valid     = 1'b0;
-            commit_pc        = 64'h0000_0000_0000_0000;
-            commit_instr     = 32'h0000_0013;
-            commit_rd        = 5'd0;
-            commit_data      = 64'h0000_0000_0000_0000;
-            commit_mem_we    = 1'b0;
-            commit_mem_addr  = 64'h0000_0000_0000_0000;
-            commit_mem_wdata = 64'h0000_0000_0000_0000;
-            commit_mem_wmask = 8'h00;
         } else {
             // A held RX fetch miss records its exact permission once the PMP
             // snapshot is current. A later FD capture replaces this result.
@@ -2477,54 +2320,6 @@ module Core #(
                 rx_ipc_ready_q = 1'b1;
                 rx_ipc_allow_q = ipc_eval_allowed_q;
                 rx_ipc_first_q = ipc_eval_first_q;
-            }
-            // An EX-owned memory repair keeps its redirect transaction live
-            // while the owner waits in CM.  The completion edge below then
-            // advances that owner to WB and applies the saved frontend target.
-            // Older redirects never enter this hold case.
-            if backend_wait && redirect_pending_q && redirect_preserve_cm_q {
-                redirect_pending_q     = 1'b1;
-                redirect_preserve_cm_q = 1'b1;
-            } else {
-                redirect_event_delay_q = redirect_pending_q;
-                redirect_pending_q     = redirect_valid;
-                redirect_preserve_cm_q = redirect_preserve_cm;
-                // CM access faults can still have a younger EX follower.
-                // That follower must be discarded before it reaches WB.
-                redirect_flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event) || cm_replay_event;
-                // Only a CM-owned pending redirect exposes this payload.
-                // Refresh it on every advancing cycle to keep the late
-                // redirect-valid decision out of a wide old-value mux.
-                redirect_target_q = redirect_target;
-            }
-
-            commit_valid = wb_valid_q;
-            if COMMIT_PAYLOAD {
-                commit_pc    = wb_pc_q;
-                commit_instr = wb_raw_instr_q;
-                commit_rd    = 5'd0;
-                commit_data  = 64'h0000_0000_0000_0000;
-                if wb_write_enable_q && (wb_rd_q != 5'd0) {
-                    commit_rd   = wb_rd_q;
-                    commit_data = wb_result_q;
-                }
-                commit_mem_we    = wb_valid_q && wb_mem_we_q;
-                commit_mem_addr  = wb_mem_addr_q;
-                commit_mem_wdata = wb_mem_wdata_q;
-                commit_mem_wmask = wb_mem_wmask_q;
-            } else {
-                commit_pc        = 64'd0;
-                commit_instr     = 32'd0;
-                commit_rd        = 5'd0;
-                commit_data      = 64'd0;
-                commit_mem_we    = 1'b0;
-                commit_mem_addr  = 64'd0;
-                commit_mem_wdata = 64'd0;
-                commit_mem_wmask = 8'd0;
-            }
-
-            if rf_write_enable && (wb_rd_q == 5'd31) {
-                debug_x31_q = wb_result_q;
             }
 
             if backend_wait {
@@ -2551,28 +2346,6 @@ module Core #(
                 rx_execution_hazard_q = (ENABLE_ZBB || ENABLE_ZBS) && execution_hazard && ex_valid_q && ex_alu_op_q[5]
                     && !ex_early_bitmanip;
                 wb_valid_q            = cm_valid_q && !cm_exception_q && !atomic_fault && !translation_fault;
-                if COMMIT_PAYLOAD {
-                    wb_pc_q        = cm_pc_q;
-                    wb_raw_instr_q = cm_raw_instr_q;
-                    wb_mem_we_q    = data_we;
-                    wb_mem_addr_q  = cm_lsu_address_q;
-                    wb_mem_wdata_q = data_wdata;
-                    wb_mem_wmask_q = completion_bus.store_mask;
-                } else {
-                    wb_pc_q        = 32'd0;
-                    wb_raw_instr_q = 32'd0;
-                    wb_mem_we_q    = 1'b0;
-                    wb_mem_addr_q  = 32'd0;
-                    wb_mem_wdata_q = 64'd0;
-                    wb_mem_wmask_q = 8'd0;
-                }
-                wb_rd_q           = cm_rd_q;
-                wb_write_enable_q = cm_write_enable_q;
-                wb_result_q       = cm_forward_data;
-                if (ENABLE_ZBB || ENABLE_ZBS) && cm_use_bitmanip_q {
-                    wb_result_q = bitmanip_result;
-                }
-
                 // Exceptions enter CM so trap state and redirect are both
                 // registered full-cycle side effects; WB suppresses them.
                 // MRET remains a normally retired instruction.
@@ -2581,241 +2354,10 @@ module Core #(
                 // Ordinary faulting memory instructions retain their existing
                 // token-wait behavior; only atomic operations are excluded.
                 cm_memory_active_q = ex_valid_q && (ex_is_load_q || ex_is_store_q) && !ex_is_atomic_q;
-                cm_system_block_q = ex_frontend_block_q || lsu_access_fault || (ENABLE_U && ex_exception);
                 cm_muldiv_pending_q = ex_is_muldiv_q;
-                cm_pc_q             = ex_pc_q;
-                cm_raw_instr_q      = ex_raw_instr_q;
-                cm_rd_q             = ex_rd_q;
-                cm_write_enable_q   = ex_write_enable_q;
-                // Keep operation tags independent of the late address check.
-                // Faults issue no request token: after the older CM operation
-                // drains, its response already matches the unchanged token,
-                // so a faulting memory tag cannot introduce a memory wait.
-                // Trap/WB and data_we separately suppress all side effects.
-                cm_is_load_q       = ex_is_load_q;
-                cm_is_atomic_q = ex_is_atomic_q;
-                cm_load_size_q     = ex_load_size_q;
-                cm_load_unsigned_q = ex_load_unsigned_q;
-                cm_is_store_q      = ex_is_store_q;
-                // Only an older CM redirect makes the current EX memory
-                // instruction wrong-path.  A prediction-kind repair owned by
-                // this same load/store redirects younger fetch but must not
-                // suppress the architectural memory operation itself. Keeping
-                // ex_redirect_valid out of this CE also avoids routing the
-                // unrelated JALR target adder through the request token.
-
-                cm_store_size_q   = ex_store_size_q;
-                cm_is_branch_q    = ex_valid_q && ex_is_branch_q;
-                cm_branch_op_q           = ex_branch_op_q;
-                cm_control_fallthrough_q = ex_control_fallthrough_q;
-                cm_branch_equal_q        = execute_bus.compare_equal;
-                cm_redirect_target_q     = ex_redirect_target;
-                // Keep the late JALR sum local to 16-bit comparisons in EX.
-                // CM reduces their registered matches while choosing direction,
-                // at the same recovery edge as before.
-                cm_taken_match_q   = 1'b0;
-                cm_untaken_match_q = 1'b0;
-                cm_linear_match_q  = 1'b0;
-                if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
-                    for i in 0..TARGET_MATCH_SLICES {
-                        cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q && redirect_target_match[i];
-                        cm_linear_match_q[i] = ex_kind_match_q
-                            && ((ex_link_q && redirect_target_match[i])
-                                || (!ex_link_q
-                                    && (ex_predicted_address[i * 16+:16] == ex_fallthrough_pc_q[i * 16+:16])));
-                    }
-                    cm_untaken_match_q = ex_kind_match_q && !ex_predicted_taken_q
-                        && (ex_predicted_next_pc_q == ex_fallthrough_pc_q);
-                }
-                // Remove the old shift storage when completion moves into EX.
-                // Keep amount/word metadata used by the separate Zbb/Zbs unit.
-                cm_shift_low_q = if EARLY_ALU ? 64'd0 : execute_bus.shift_result;
-                if ex_word_op_q {
-                    cm_shift_amount_q = {1'b0, alu_operand_b[4:3]};
-                } else {
-                    cm_shift_amount_q = alu_operand_b[5:3];
-                }
-                cm_shift_arithmetic_q = !EARLY_ALU && (ex_alu_op_q == 4'd8);
-                cm_logic_result_q     = execute_bus.logic_result;
-                if EARLY_ALU {
-                    cm_logic_result_q = early_alu_result;
-                }
-                if ex_early_bitmanip {
-                    cm_logic_result_q = early_bitmanip_result;
-                }
-                cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip
-                    || (EARLY_ALU && execute_bus.result_use_shift)) && !ex_is_csr_q;
-                cm_use_shift_q          = !EARLY_ALU && execute_bus.result_use_shift;
-                cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
-                cm_compare_less_q       = execute_bus.compare_less;
-                cm_compare_sign_a_q     = execute_bus.compare_sign_a;
-                cm_compare_sign_b_q     = execute_bus.compare_sign_b;
-                // Signed branch recovery still consumes this CM metadata.
-                cm_compare_signed_q     = ex_alu_op_q == 4'd9;
-                cm_use_compare_q        = !EARLY_ALU && execute_bus.result_use_compare;
-                cm_shift_left_q         = !EARLY_ALU && ((ex_alu_op_q == 4'd6) || (ex_alu_op_q == 6'd16));
-                cm_shift_word_q         = ex_word_op_q;
-                cm_lsu_address_q        = lsu_address;
-                cm_lsu_memory_address_q = lsu_address;
-                if STRICT_MEMORY && RELOCATE_LOW_DATA {
-                    // A permitted transfer belongs to exactly one physical
-                    // region. Reconstruct its private memory-port prefix from
-                    // the early region tags, without waiting for the upper
-                    // address carry and a second MMIO/relocation comparison.
-                    // Faulting/non-memory instructions issue no token; the
-                    // architectural address above remains full width for traps.
-                    cm_lsu_memory_address_q = {32'd0, 14'h2000, lsu_address[17:0]};
-                    if lsu_boot_region {
-                        cm_lsu_memory_address_q = {46'd0, 6'h3f, lsu_address[11:0]};
-                    } else if lsu_timer_region {
-                        cm_lsu_memory_address_q = {32'd0, 16'h0200, lsu_address[15:0]};
-                    }
-                } else if RELOCATE_LOW_DATA && !lsu_address[31]
-                    && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
-                    cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
-                }
-                cm_is_csr_q          = ex_is_csr_q;
-                cm_csr_op_q          = ex_csr_op_q;
-                cm_csr_write_q       = ex_csr_write_q;
-                cm_csr_index_q       = ex_csr_index_q;
-                cm_csr_source_q      = csr_source;
-                cm_exception_q       = ex_exception || lsu_access_fault;
-                cm_itlb_miss_q       = ENABLE_SV39 && ex_valid_q && ex_itlb_miss_q;
-                cm_fetch_second_q    = ex_fetch_second_q;
-                cm_exception_cause_q = ex_exception_cause;
-                cm_exception_delegated_q = ENABLE_S && ex_exception_delegated;
-                cm_atomic_delegated_q = {csr_bus.exception_delegated[6], csr_bus.exception_delegated[7]};
-                if ex_raw_instr_q[31:27] == 5'd2 {
-                    cm_atomic_delegated_q = {csr_bus.exception_delegated[4], csr_bus.exception_delegated[5]};
-                }
-                cm_exception_value_q = ex_exception_value;
-                // Check the full effective address before issuing the token.
-                // A data fault enters CM directly; it does not put the address
-                // adder/permission reduction onto EX's frontend flush fanout.
-                // Prepare the data-fault payload for every load/store. Only
-                // cm_exception_q makes it observable, so the late permission
-                // result need not select all 64 MTVAL bits. Instruction faults
-                // keep priority over any load/store bits in the fetched word.
-                // The data-fault MTVAL is chosen at trap entry from the CM
-                // address and two registered boundary flags, so the boundary
-                // decode reaches three FFs instead of all 64 value bits.
-                cm_data_fault_value_q = STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception;
-                cm_data_fault_boot_q = lsu_boot_boundary;
-                cm_data_fault_ram_q = lsu_ram_boundary;
-                if STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception {
-                    cm_exception_cause_q = 64'd5;
-                    if ex_is_store_q {
-                        cm_exception_cause_q = 64'd7;
-                    }
-                }
-                cm_is_mret_q           = ex_is_mret_q;
-                cm_is_sret_q           = ex_is_sret_q;
-                cm_is_fence_i_q        = ex_is_fence_i_q;
-                cm_control_kind_q      = ex_control_kind_q;
-                cm_prediction_token_q  = ex_prediction_token_q;
-                cm_fallthrough_pc_q    = ex_fallthrough_pc_q;
-
-                // Register only the consumer selectors. The producer value enters
-                // cm_arithmetic_q/cm_logic_result_q on this same edge and is the
-                // bypass source on the next cycle.
-                ex_bypass_q.operand_a  = !execution_hazard && ex_bypass_hit_rs1 && rx_use_rs1_q && !rx_is_jalr_q;
-                ex_bypass_q.operand_b  = !execution_hazard && ex_bypass_hit_rs2 && rx_use_rs2_q && !rx_use_immediate_q;
-                ex_bypass_q.store_data = !execution_hazard && ex_bypass_hit_rs2 && rx_is_store_q;
-                ex_bypass_q.redirect   = !execution_hazard && ex_bypass_hit_rs1 && rx_is_jalr_q;
-
                 ex_valid_q     = rx_valid_q;
-                ex_pc_q        = rx_pc_q;
-                ex_raw_instr_q = rx_raw_instr_q;
-                ex_rd_q        = rx_rd_q;
-                ex_alu_op_q    = rx_alu_op_q;
-                // Decode subtraction before EX so the carry-chain input does
-                // not start behind a four-bit opcode equality comparator.
-                ex_subtract_q            = rx_alu_op_q == 4'd1;
-                ex_write_enable_q        = rx_write_enable_q;
-                ex_can_bypass_q          = rx_result_can_bypass;
                 ex_pmp_pending_q = ENABLE_U && rx_valid_q && (rx_is_load_q || rx_is_store_q || rx_is_atomic_q)
                     && !(ENABLE_SV39 && csr_bus.translate_data);
-                ex_pmp_read_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd3 : rx_is_load_q);
-                ex_pmp_write_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd2 : rx_is_store_q);
-                ex_is_load_q             = rx_is_load_q;
-                ex_is_atomic_q = rx_is_atomic_q;
-                ex_load_size_q           = rx_load_size_q;
-                ex_load_unsigned_q       = rx_load_unsigned_q;
-                ex_is_store_q            = rx_is_store_q;
-                ex_store_size_q          = rx_store_size_q;
-                ex_word_op_q             = rx_word_op_q;
-                ex_is_branch_q           = rx_is_branch_q;
-                ex_branch_op_q           = rx_branch_op_q;
-                ex_link_q                = rx_is_jal_q || rx_is_jalr_q;
-                ex_static_redirect_q     = rx_is_jalr_q || (rx_is_jal_q && !rx_control_fallthrough);
-                ex_control_fallthrough_q = rx_control_fallthrough;
-                ex_is_csr_q              = rx_is_csr_q;
-                ex_is_muldiv_q           = rx_is_muldiv_q;
-                ex_csr_op_q              = rx_csr_op_q;
-                ex_csr_use_imm_q         = rx_csr_use_imm_q;
-                ex_csr_immediate_q       = rx_rs1_q;
-                ex_csr_write_q           = rx_csr_write_q;
-                ex_csr_index_q           = rx_csr_index_q;
-                ex_is_ecall_q            = rx_is_ecall_q;
-                ex_is_ebreak_q           = rx_is_ebreak_q;
-                ex_is_mret_q             = rx_is_mret_q;
-                ex_is_sret_q             = rx_is_sret_q;
-                ex_is_fence_i_q          = rx_is_fence_i_q;
-                // Capture the complete frontend-stop predicate with its EX
-                // payload. The exception cause and individual system tags
-                // remain separate; ex_valid_q qualifies this held predicate.
-                ex_frontend_block_q = rx_illegal_q || rx_user_illegal || !pmp_fetch_allowed || rx_is_ecall_q || rx_is_ebreak_q
-                    || (STRICT_MEMORY && rx_fetch_fault_q) || rx_translation_fault || rx_is_mret_q || rx_is_fence_i_q
-                    || ((ENABLE_INTERRUPTS || ENABLE_U) && rx_is_csr_q && rx_csr_write_q
-                        && ((rx_csr_index_q == 6'd1) || (rx_csr_index_q == 6'd16)
-                            || (rx_csr_index_q == 6'd17) || (ENABLE_U && (rx_csr_index_q >= 6'd18))));
-                ex_normal_memory_q = (rx_is_load_q || rx_is_store_q) && !rx_is_atomic_q
-                    && !(ENABLE_SV39 && csr_bus.translate_data)
-                    && !rx_illegal_q && !rx_user_illegal && pmp_fetch_allowed && !rx_is_ecall_q && !rx_is_ebreak_q
-                    && !(STRICT_MEMORY && rx_fetch_fault_q) && !rx_translation_fault;
-                ex_illegal_q             = rx_illegal_q || rx_user_illegal;
-                ex_pmp_fetch_fault_q = !pmp_fetch_allowed;
-                ex_pmp_second_parcel_q = pmp_first_parcel_allowed;
-                ex_fetch_fault_q         = rx_fetch_fault_q;
-                ex_fault_boundary_q      = rx_fault_boundary_q;
-                ex_itlb_miss_q            = rx_itlb_miss_q;
-                ex_fetch_page_fault_q     = rx_fetch_page_fault_q;
-                ex_fetch_second_q         = rx_fetch_second_q;
-                ex_physical_fetch_fault_q = ENABLE_SV39 && csr_bus.translate_fetch && !rx_first_pma_allowed;
-                ex_second_access_fault_q  = rx_straddle_q && !(rx_second_pma_allowed && rx_second_pmp_allowed);
-                ex_control_kind_q        = rx_control_kind;
-                ex_prediction_token_q    = rx_prediction_token_q;
-                ex_predicted_taken_q     = rx_predicted_taken_q;
-                ex_predicted_next_pc_q   = rx_predicted_next_pc_q;
-                ex_kind_match_q          = 1'b0;
-                if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
-                    ex_kind_match_q = rx_predicted_kind_q == rx_control_kind;
-                }
-                if rx_is_compressed_q {
-                    ex_fallthrough_pc_q = rx_pc_q + 32'd2;
-                } else {
-                    ex_fallthrough_pc_q = rx_pc_q + 32'd4;
-                }
-                if rx_is_jal_q || rx_is_jalr_q {
-                    ex_operand_a_q = rx_pc_q;
-                    if rx_is_compressed_q {
-                        ex_operand_b_q = 64'd2;
-                    } else {
-                        ex_operand_b_q = 64'd4;
-                    }
-                } else {
-                    ex_operand_a_q = rx_operand_a;
-                    ex_operand_b_q = rx_operand_b;
-                }
-                ex_store_data_q = forwarded_rs2;
-                if rx_is_jalr_q {
-                    ex_redirect_base_q = forwarded_rs1;
-                } else {
-                    ex_redirect_base_q = rx_pc_q;
-                }
-                ex_redirect_offset_q    = rx_immediate_q;
-                ex_redirect_clear_lsb_q = rx_is_jalr_q;
-
                 if redirect_pending_q {
                     fd_q.valid = 1'b0;
                     rx_valid_q = 1'b0;
@@ -2918,6 +2460,479 @@ module Core #(
                     fd_csr_writable_q = fetched_csr_writable;
                 }
             }
+        }
+    }
+
+    // Redirect registers.
+    always_ff (clk, rst_n) {
+        if_reset {
+            redirect_pending_q      = 1'b0;
+            redirect_preserve_cm_q  = 1'b0;
+            redirect_event_delay_q  = 1'b0;
+            redirect_flush_wb_q     = 1'b0;
+            redirect_target_q       = 64'h0000_0000_0000_0000;
+        } else {
+            // An EX-owned memory repair keeps its redirect transaction live
+            // while the owner waits in CM.  The completion edge below then
+            // advances that owner to WB and applies the saved frontend target.
+            // Older redirects never enter this hold case.
+            if backend_wait && redirect_pending_q && redirect_preserve_cm_q {
+                redirect_pending_q     = 1'b1;
+                redirect_preserve_cm_q = 1'b1;
+            } else {
+                redirect_event_delay_q = redirect_pending_q;
+                redirect_pending_q     = redirect_valid;
+                redirect_preserve_cm_q = redirect_preserve_cm;
+                // CM access faults can still have a younger EX follower.
+                // That follower must be discarded before it reaches WB.
+                redirect_flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event) || cm_replay_event;
+                // Only a CM-owned pending redirect exposes this payload.
+                // Refresh it on every advancing cycle to keep the late
+                // redirect-valid decision out of a wide old-value mux.
+                redirect_target_q = redirect_target;
+            }
+        }
+    }
+
+    // Commit trace and the debug x31 copy.
+    always_ff (clk, rst_n) {
+        if_reset {
+            debug_x31_q             = 64'h0000_0000_0000_0000;
+            commit_valid     = 1'b0;
+            commit_pc        = 64'h0000_0000_0000_0000;
+            commit_instr     = 32'h0000_0013;
+            commit_rd        = 5'd0;
+            commit_data      = 64'h0000_0000_0000_0000;
+            commit_mem_we    = 1'b0;
+            commit_mem_addr  = 64'h0000_0000_0000_0000;
+            commit_mem_wdata = 64'h0000_0000_0000_0000;
+            commit_mem_wmask = 8'h00;
+        } else {
+            commit_valid = wb_valid_q;
+            if COMMIT_PAYLOAD {
+                commit_pc    = wb_pc_q;
+                commit_instr = wb_raw_instr_q;
+                commit_rd    = 5'd0;
+                commit_data  = 64'h0000_0000_0000_0000;
+                if wb_write_enable_q && (wb_rd_q != 5'd0) {
+                    commit_rd   = wb_rd_q;
+                    commit_data = wb_result_q;
+                }
+                commit_mem_we    = wb_valid_q && wb_mem_we_q;
+                commit_mem_addr  = wb_mem_addr_q;
+                commit_mem_wdata = wb_mem_wdata_q;
+                commit_mem_wmask = wb_mem_wmask_q;
+            } else {
+                commit_pc        = 64'd0;
+                commit_instr     = 32'd0;
+                commit_rd        = 5'd0;
+                commit_data      = 64'd0;
+                commit_mem_we    = 1'b0;
+                commit_mem_addr  = 64'd0;
+                commit_mem_wdata = 64'd0;
+                commit_mem_wmask = 8'd0;
+            }
+
+            if rf_write_enable && (wb_rd_q == 5'd31) {
+                debug_x31_q = wb_result_q;
+            }
+        }
+    }
+
+    // WB payload: CM advances into WB.
+    always_ff (clk, rst_n) {
+        if_reset {
+            wb_pc_q           = 64'h0000_0000_0000_0000;
+            wb_raw_instr_q    = 32'h0000_0013;
+            wb_rd_q           = 5'd0;
+            wb_write_enable_q = 1'b0;
+            wb_result_q       = 64'h0000_0000_0000_0000;
+            wb_mem_we_q       = 1'b0;
+            wb_mem_addr_q     = 64'h0000_0000_0000_0000;
+            wb_mem_wdata_q    = 64'h0000_0000_0000_0000;
+            wb_mem_wmask_q    = 8'h00;
+        } else if !backend_wait {
+            if COMMIT_PAYLOAD {
+                wb_pc_q        = cm_pc_q;
+                wb_raw_instr_q = cm_raw_instr_q;
+                wb_mem_we_q    = data_we;
+                wb_mem_addr_q  = cm_lsu_address_q;
+                wb_mem_wdata_q = data_wdata;
+                wb_mem_wmask_q = completion_bus.store_mask;
+            } else {
+                wb_pc_q        = 32'd0;
+                wb_raw_instr_q = 32'd0;
+                wb_mem_we_q    = 1'b0;
+                wb_mem_addr_q  = 32'd0;
+                wb_mem_wdata_q = 64'd0;
+                wb_mem_wmask_q = 8'd0;
+            }
+            wb_rd_q           = cm_rd_q;
+            wb_write_enable_q = cm_write_enable_q;
+            wb_result_q       = cm_forward_data;
+            if (ENABLE_ZBB || ENABLE_ZBS) && cm_use_bitmanip_q {
+                wb_result_q = bitmanip_result;
+            }
+        }
+    }
+
+    // CM payload: EX advances into CM.
+    always_ff (clk, rst_n) {
+        if_reset {
+            cm_itlb_miss_q            = 1'b0;
+            cm_fetch_second_q         = 1'b0;
+            cm_system_block_q = 1'b0;
+            cm_pc_q                  = 64'h0000_0000_0000_0000;
+            cm_raw_instr_q           = 32'h0000_0013;
+            cm_rd_q                  = 5'd0;
+            cm_write_enable_q        = 1'b0;
+            cm_is_load_q             = 1'b0;
+            cm_is_atomic_q = 1'b0;
+            cm_load_size_q           = 2'b11;
+            cm_load_unsigned_q       = 1'b0;
+            cm_is_store_q            = 1'b0;
+            cm_store_size_q          = 2'b11;
+            cm_is_branch_q           = 1'b0;
+            cm_linear_match_q        = 1'b0;
+            cm_taken_match_q         = 1'b0;
+            cm_untaken_match_q       = 1'b0;
+            cm_branch_op_q           = 3'd0;
+            cm_control_fallthrough_q = 1'b0;
+            cm_branch_equal_q        = 4'b0000;
+            cm_redirect_target_q     = 32'h0000_0000;
+            cm_shift_low_q           = 64'h0000_0000_0000_0000;
+            cm_shift_amount_q        = 3'b000;
+            cm_shift_arithmetic_q    = 1'b0;
+            cm_logic_result_q        = 64'h0000_0000_0000_0000;
+            cm_use_logic_q           = 1'b0;
+            cm_use_shift_q           = 1'b0;
+            cm_use_bitmanip_q        = 1'b0;
+            cm_compare_less_q        = 4'b0000;
+            cm_compare_sign_a_q      = 1'b0;
+            cm_compare_sign_b_q      = 1'b0;
+            cm_compare_signed_q      = 1'b0;
+            cm_use_compare_q         = 1'b0;
+            cm_shift_left_q          = 1'b0;
+            cm_shift_word_q          = 1'b0;
+            cm_lsu_address_q         = 64'h0000_0000_0000_0000;
+            cm_lsu_memory_address_q  = 64'h0000_0000_0000_0000;
+            cm_is_csr_q              = 1'b0;
+            cm_csr_op_q              = 2'd0;
+            cm_csr_write_q           = 1'b0;
+            cm_csr_index_q           = 6'd0;
+            cm_csr_source_q          = 64'd0;
+            cm_exception_q           = 1'b0;
+            cm_exception_cause_q     = 64'd0;
+            cm_exception_value_q     = 64'd0;
+            cm_data_fault_value_q    = 1'b0;
+            cm_data_fault_boot_q     = 1'b0;
+            cm_data_fault_ram_q      = 1'b0;
+            cm_is_mret_q             = 1'b0;
+            cm_is_sret_q             = 1'b0;
+            cm_exception_delegated_q = 1'b0;
+            cm_atomic_delegated_q    = 2'd0;
+            cm_is_fence_i_q          = 1'b0;
+            cm_control_kind_q        = 3'd0;
+            cm_prediction_token_q    = 3'd0;
+            cm_fallthrough_pc_q      = 32'h0000_0004;
+        } else if !backend_wait {
+            cm_system_block_q = ex_frontend_block_q || lsu_access_fault || (ENABLE_U && ex_exception);
+            cm_pc_q             = ex_pc_q;
+            cm_raw_instr_q      = ex_raw_instr_q;
+            cm_rd_q             = ex_rd_q;
+            cm_write_enable_q   = ex_write_enable_q;
+            // Keep operation tags independent of the late address check.
+            // Faults issue no request token: after the older CM operation
+            // drains, its response already matches the unchanged token,
+            // so a faulting memory tag cannot introduce a memory wait.
+            // Trap/WB and data_we separately suppress all side effects.
+            cm_is_load_q       = ex_is_load_q;
+            cm_is_atomic_q = ex_is_atomic_q;
+            cm_load_size_q     = ex_load_size_q;
+            cm_load_unsigned_q = ex_load_unsigned_q;
+            cm_is_store_q      = ex_is_store_q;
+            // Only an older CM redirect makes the current EX memory
+            // instruction wrong-path.  A prediction-kind repair owned by
+            // this same load/store redirects younger fetch but must not
+            // suppress the architectural memory operation itself. Keeping
+            // ex_redirect_valid out of this CE also avoids routing the
+            // unrelated JALR target adder through the request token.
+
+            cm_store_size_q   = ex_store_size_q;
+            cm_is_branch_q    = ex_valid_q && ex_is_branch_q;
+            cm_branch_op_q           = ex_branch_op_q;
+            cm_control_fallthrough_q = ex_control_fallthrough_q;
+            cm_branch_equal_q        = execute_bus.compare_equal;
+            cm_redirect_target_q     = ex_redirect_target;
+            // Keep the late JALR sum local to 16-bit comparisons in EX.
+            // CM reduces their registered matches while choosing direction,
+            // at the same recovery edge as before.
+            cm_taken_match_q   = 1'b0;
+            cm_untaken_match_q = 1'b0;
+            cm_linear_match_q  = 1'b0;
+            if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+                for i in 0..TARGET_MATCH_SLICES {
+                    cm_taken_match_q[i]  = ex_kind_match_q && ex_predicted_taken_q && redirect_target_match[i];
+                    cm_linear_match_q[i] = ex_kind_match_q
+                        && ((ex_link_q && redirect_target_match[i])
+                            || (!ex_link_q
+                                && (ex_predicted_address[i * 16+:16] == ex_fallthrough_pc_q[i * 16+:16])));
+                }
+                cm_untaken_match_q = ex_kind_match_q && !ex_predicted_taken_q
+                    && (ex_predicted_next_pc_q == ex_fallthrough_pc_q);
+            }
+            // Remove the old shift storage when completion moves into EX.
+            // Keep amount/word metadata used by the separate Zbb/Zbs unit.
+            cm_shift_low_q = if EARLY_ALU ? 64'd0 : execute_bus.shift_result;
+            if ex_word_op_q {
+                cm_shift_amount_q = {1'b0, alu_operand_b[4:3]};
+            } else {
+                cm_shift_amount_q = alu_operand_b[5:3];
+            }
+            cm_shift_arithmetic_q = !EARLY_ALU && (ex_alu_op_q == 4'd8);
+            cm_logic_result_q     = execute_bus.logic_result;
+            if EARLY_ALU {
+                cm_logic_result_q = early_alu_result;
+            }
+            if ex_early_bitmanip {
+                cm_logic_result_q = early_bitmanip_result;
+            }
+            cm_use_logic_q          = (execute_bus.result_use_logic || ex_early_bitmanip
+                || (EARLY_ALU && execute_bus.result_use_shift)) && !ex_is_csr_q;
+            cm_use_shift_q          = !EARLY_ALU && execute_bus.result_use_shift;
+            cm_use_bitmanip_q       = (ENABLE_ZBB || ENABLE_ZBS) && ex_alu_op_q[5] && !ex_early_bitmanip;
+            cm_compare_less_q       = execute_bus.compare_less;
+            cm_compare_sign_a_q     = execute_bus.compare_sign_a;
+            cm_compare_sign_b_q     = execute_bus.compare_sign_b;
+            // Signed branch recovery still consumes this CM metadata.
+            cm_compare_signed_q     = ex_alu_op_q == 4'd9;
+            cm_use_compare_q        = !EARLY_ALU && execute_bus.result_use_compare;
+            cm_shift_left_q         = !EARLY_ALU && ((ex_alu_op_q == 4'd6) || (ex_alu_op_q == 6'd16));
+            cm_shift_word_q         = ex_word_op_q;
+            cm_lsu_address_q        = lsu_address;
+            cm_lsu_memory_address_q = lsu_address;
+            if STRICT_MEMORY && RELOCATE_LOW_DATA {
+                // A permitted transfer belongs to exactly one physical
+                // region. Reconstruct its private memory-port prefix from
+                // the early region tags, without waiting for the upper
+                // address carry and a second MMIO/relocation comparison.
+                // Faulting/non-memory instructions issue no token; the
+                // architectural address above remains full width for traps.
+                cm_lsu_memory_address_q = {32'd0, 14'h2000, lsu_address[17:0]};
+                if lsu_boot_region {
+                    cm_lsu_memory_address_q = {46'd0, 6'h3f, lsu_address[11:0]};
+                } else if lsu_timer_region {
+                    cm_lsu_memory_address_q = {32'd0, 16'h0200, lsu_address[15:0]};
+                }
+            } else if RELOCATE_LOW_DATA && !lsu_address[31]
+                && !(ENABLE_INTERRUPTS && (lsu_address[31:16] == 16'h0200)) {
+                cm_lsu_memory_address_q = {14'd0, 6'h3f, lsu_address[11:0]};
+            }
+            cm_is_csr_q          = ex_is_csr_q;
+            cm_csr_op_q          = ex_csr_op_q;
+            cm_csr_write_q       = ex_csr_write_q;
+            cm_csr_index_q       = ex_csr_index_q;
+            cm_csr_source_q      = csr_source;
+            cm_exception_q       = ex_exception || lsu_access_fault;
+            cm_itlb_miss_q       = ENABLE_SV39 && ex_valid_q && ex_itlb_miss_q;
+            cm_fetch_second_q    = ex_fetch_second_q;
+            cm_exception_cause_q = ex_exception_cause;
+            cm_exception_delegated_q = ENABLE_S && ex_exception_delegated;
+            cm_atomic_delegated_q = {csr_bus.exception_delegated[6], csr_bus.exception_delegated[7]};
+            if ex_raw_instr_q[31:27] == 5'd2 {
+                cm_atomic_delegated_q = {csr_bus.exception_delegated[4], csr_bus.exception_delegated[5]};
+            }
+            cm_exception_value_q = ex_exception_value;
+            // Check the full effective address before issuing the token.
+            // A data fault enters CM directly; it does not put the address
+            // adder/permission reduction onto EX's frontend flush fanout.
+            // Prepare the data-fault payload for every load/store. Only
+            // cm_exception_q makes it observable, so the late permission
+            // result need not select all 64 MTVAL bits. Instruction faults
+            // keep priority over any load/store bits in the fetched word.
+            // The data-fault MTVAL is chosen at trap entry from the CM
+            // address and two registered boundary flags, so the boundary
+            // decode reaches three FFs instead of all 64 value bits.
+            cm_data_fault_value_q = STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception;
+            cm_data_fault_boot_q = lsu_boot_boundary;
+            cm_data_fault_ram_q = lsu_ram_boundary;
+            if STRICT_MEMORY && (ex_is_load_q || ex_is_store_q) && !ex_exception {
+                cm_exception_cause_q = 64'd5;
+                if ex_is_store_q {
+                    cm_exception_cause_q = 64'd7;
+                }
+            }
+            cm_is_mret_q           = ex_is_mret_q;
+            cm_is_sret_q           = ex_is_sret_q;
+            cm_is_fence_i_q        = ex_is_fence_i_q;
+            cm_control_kind_q      = ex_control_kind_q;
+            cm_prediction_token_q  = ex_prediction_token_q;
+            cm_fallthrough_pc_q    = ex_fallthrough_pc_q;
+        }
+    }
+
+    // EX payload: RX advances into EX.
+    always_ff (clk, rst_n) {
+        if_reset {
+            ex_itlb_miss_q            = 1'b0;
+            ex_fetch_page_fault_q     = 1'b0;
+            ex_fetch_second_q         = 1'b0;
+            ex_physical_fetch_fault_q = 1'b0;
+            ex_second_access_fault_q  = 1'b0;
+            ex_fetch_fault_q       = 1'b0;
+            ex_pmp_fetch_fault_q = 1'b0;
+            ex_pmp_second_parcel_q = 1'b0;
+            ex_fault_boundary_q    = 1'b0;
+            ex_is_muldiv_q         = 1'b0;
+            ex_pc_q                  = 64'h0000_0000_0000_0000;
+            ex_raw_instr_q           = 32'h0000_0013;
+            ex_rd_q                  = 5'd0;
+            ex_alu_op_q              = 4'd0;
+            ex_subtract_q            = 1'b0;
+            ex_write_enable_q        = 1'b0;
+            ex_can_bypass_q          = 1'b0;
+            ex_pmp_read_q = 1'b0;
+            ex_pmp_write_q = 1'b0;
+            ex_is_load_q             = 1'b0;
+            ex_is_atomic_q = 1'b0;
+            ex_load_size_q           = 2'b11;
+            ex_load_unsigned_q       = 1'b0;
+            ex_is_store_q            = 1'b0;
+            ex_store_size_q          = 2'b11;
+            ex_word_op_q             = 1'b0;
+            ex_is_branch_q           = 1'b0;
+            ex_branch_op_q           = 3'b000;
+            ex_link_q                = 1'b0;
+            ex_static_redirect_q     = 1'b0;
+            ex_control_fallthrough_q = 1'b0;
+            ex_is_csr_q              = 1'b0;
+            ex_csr_op_q              = 2'b00;
+            ex_csr_use_imm_q         = 1'b0;
+            ex_csr_immediate_q       = 5'd0;
+            ex_csr_write_q           = 1'b0;
+            ex_csr_index_q           = 6'd0;
+            ex_is_ecall_q            = 1'b0;
+            ex_is_ebreak_q           = 1'b0;
+            ex_is_mret_q             = 1'b0;
+            ex_is_sret_q             = 1'b0;
+            ex_is_fence_i_q          = 1'b0;
+            ex_frontend_block_q      = 1'b0;
+            ex_normal_memory_q = 1'b0;
+            ex_illegal_q             = 1'b0;
+            ex_control_kind_q        = 3'd0;
+            ex_prediction_token_q    = 3'd0;
+            ex_predicted_taken_q     = 1'b0;
+            ex_predicted_next_pc_q   = 32'h0000_0004;
+            ex_fallthrough_pc_q      = 32'h0000_0004;
+            ex_operand_a_q           = 64'h0000_0000_0000_0000;
+            ex_operand_b_q           = 64'h0000_0000_0000_0000;
+            ex_store_data_q          = 64'h0000_0000_0000_0000;
+            ex_redirect_base_q       = 64'h0000_0000_0000_0000;
+            ex_redirect_offset_q     = 64'h0000_0000_0000_0000;
+            ex_redirect_clear_lsb_q  = 1'b0;
+            ex_bypass_q.operand_a    = 1'b0;
+            ex_bypass_q.operand_b    = 1'b0;
+            ex_bypass_q.store_data   = 1'b0;
+            ex_bypass_q.redirect     = 1'b0;
+            ex_kind_match_q          = 1'b0;
+        } else if !backend_wait {
+            // Register only the consumer selectors. The producer value enters
+            // cm_arithmetic_q/cm_logic_result_q on this same edge and is the
+            // bypass source on the next cycle.
+            ex_bypass_q.operand_a  = !execution_hazard && ex_bypass_hit_rs1 && rx_use_rs1_q && !rx_is_jalr_q;
+            ex_bypass_q.operand_b  = !execution_hazard && ex_bypass_hit_rs2 && rx_use_rs2_q && !rx_use_immediate_q;
+            ex_bypass_q.store_data = !execution_hazard && ex_bypass_hit_rs2 && rx_is_store_q;
+            ex_bypass_q.redirect   = !execution_hazard && ex_bypass_hit_rs1 && rx_is_jalr_q;
+
+            ex_pc_q        = rx_pc_q;
+            ex_raw_instr_q = rx_raw_instr_q;
+            ex_rd_q        = rx_rd_q;
+            ex_alu_op_q    = rx_alu_op_q;
+            // Decode subtraction before EX so the carry-chain input does
+            // not start behind a four-bit opcode equality comparator.
+            ex_subtract_q            = rx_alu_op_q == 4'd1;
+            ex_write_enable_q        = rx_write_enable_q;
+            ex_can_bypass_q          = rx_result_can_bypass;
+            ex_pmp_read_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd3 : rx_is_load_q);
+            ex_pmp_write_q = ENABLE_U && (if rx_is_atomic_q ? rx_raw_instr_q[31:27] != 5'd2 : rx_is_store_q);
+            ex_is_load_q             = rx_is_load_q;
+            ex_is_atomic_q = rx_is_atomic_q;
+            ex_load_size_q           = rx_load_size_q;
+            ex_load_unsigned_q       = rx_load_unsigned_q;
+            ex_is_store_q            = rx_is_store_q;
+            ex_store_size_q          = rx_store_size_q;
+            ex_word_op_q             = rx_word_op_q;
+            ex_is_branch_q           = rx_is_branch_q;
+            ex_branch_op_q           = rx_branch_op_q;
+            ex_link_q                = rx_is_jal_q || rx_is_jalr_q;
+            ex_static_redirect_q     = rx_is_jalr_q || (rx_is_jal_q && !rx_control_fallthrough);
+            ex_control_fallthrough_q = rx_control_fallthrough;
+            ex_is_csr_q              = rx_is_csr_q;
+            ex_is_muldiv_q           = rx_is_muldiv_q;
+            ex_csr_op_q              = rx_csr_op_q;
+            ex_csr_use_imm_q         = rx_csr_use_imm_q;
+            ex_csr_immediate_q       = rx_rs1_q;
+            ex_csr_write_q           = rx_csr_write_q;
+            ex_csr_index_q           = rx_csr_index_q;
+            ex_is_ecall_q            = rx_is_ecall_q;
+            ex_is_ebreak_q           = rx_is_ebreak_q;
+            ex_is_mret_q             = rx_is_mret_q;
+            ex_is_sret_q             = rx_is_sret_q;
+            ex_is_fence_i_q          = rx_is_fence_i_q;
+            // Capture the complete frontend-stop predicate with its EX
+            // payload. The exception cause and individual system tags
+            // remain separate; ex_valid_q qualifies this held predicate.
+            ex_frontend_block_q = rx_illegal_q || rx_user_illegal || !pmp_fetch_allowed || rx_is_ecall_q || rx_is_ebreak_q
+                || (STRICT_MEMORY && rx_fetch_fault_q) || rx_translation_fault || rx_is_mret_q || rx_is_fence_i_q
+                || ((ENABLE_INTERRUPTS || ENABLE_U) && rx_is_csr_q && rx_csr_write_q
+                    && ((rx_csr_index_q == 6'd1) || (rx_csr_index_q == 6'd16)
+                        || (rx_csr_index_q == 6'd17) || (ENABLE_U && (rx_csr_index_q >= 6'd18))));
+            ex_normal_memory_q = (rx_is_load_q || rx_is_store_q) && !rx_is_atomic_q
+                && !(ENABLE_SV39 && csr_bus.translate_data)
+                && !rx_illegal_q && !rx_user_illegal && pmp_fetch_allowed && !rx_is_ecall_q && !rx_is_ebreak_q
+                && !(STRICT_MEMORY && rx_fetch_fault_q) && !rx_translation_fault;
+            ex_illegal_q             = rx_illegal_q || rx_user_illegal;
+            ex_pmp_fetch_fault_q = !pmp_fetch_allowed;
+            ex_pmp_second_parcel_q = pmp_first_parcel_allowed;
+            ex_fetch_fault_q         = rx_fetch_fault_q;
+            ex_fault_boundary_q      = rx_fault_boundary_q;
+            ex_itlb_miss_q            = rx_itlb_miss_q;
+            ex_fetch_page_fault_q     = rx_fetch_page_fault_q;
+            ex_fetch_second_q         = rx_fetch_second_q;
+            ex_physical_fetch_fault_q = ENABLE_SV39 && csr_bus.translate_fetch && !rx_first_pma_allowed;
+            ex_second_access_fault_q  = rx_straddle_q && !(rx_second_pma_allowed && rx_second_pmp_allowed);
+            ex_control_kind_q        = rx_control_kind;
+            ex_prediction_token_q    = rx_prediction_token_q;
+            ex_predicted_taken_q     = rx_predicted_taken_q;
+            ex_predicted_next_pc_q   = rx_predicted_next_pc_q;
+            ex_kind_match_q          = 1'b0;
+            if (BRANCH_PREDICTOR_CONFIG & 8) != 0 {
+                ex_kind_match_q = rx_predicted_kind_q == rx_control_kind;
+            }
+            if rx_is_compressed_q {
+                ex_fallthrough_pc_q = rx_pc_q + 32'd2;
+            } else {
+                ex_fallthrough_pc_q = rx_pc_q + 32'd4;
+            }
+            if rx_is_jal_q || rx_is_jalr_q {
+                ex_operand_a_q = rx_pc_q;
+                if rx_is_compressed_q {
+                    ex_operand_b_q = 64'd2;
+                } else {
+                    ex_operand_b_q = 64'd4;
+                }
+            } else {
+                ex_operand_a_q = rx_operand_a;
+                ex_operand_b_q = rx_operand_b;
+            }
+            ex_store_data_q = forwarded_rs2;
+            if rx_is_jalr_q {
+                ex_redirect_base_q = forwarded_rs1;
+            } else {
+                ex_redirect_base_q = rx_pc_q;
+            }
+            ex_redirect_offset_q    = rx_immediate_q;
+            ex_redirect_clear_lsb_q = rx_is_jalr_q;
         }
     }
 }

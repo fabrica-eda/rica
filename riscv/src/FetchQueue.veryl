@@ -1,0 +1,176 @@
+/// Core's three-slot fetch queue between instruction fetch and decode.
+///
+/// Slots are head, lookahead and tail. Payload is masked by separately reset
+/// valid bits, so an empty slot may refresh from the incoming packet every
+/// cycle and only an occupied slot waits for the FIFO advance.
+module FetchQueue #(
+    param ADDRESS_BITS: u32 = 32,
+) (
+    clk  : input clock,
+    rst_n: input reset,
+
+    // The incoming packet.
+    packet_pc             : input logic<ADDRESS_BITS>,
+    packet_raw_instruction: input logic<32>          ,
+    packet_is_compressed  : input logic              ,
+    packet_access_fault   : input logic              ,
+    packet_fault_boundary : input logic              ,
+    packet_frame          : input logic<20>          ,
+    push_valid            : input logic              ,
+    // The head leaves for decode and every slot moves up.
+    advance: input logic,
+
+    // Occupancy control, in priority order.
+    backend_wait               : input logic,
+    redirect_pending_q         : input logic,
+    ex_frontend_block          : input logic,
+    predictor_wait             : input logic,
+    frontend_hold              : input logic,
+    predictor_frontend_redirect: input logic,
+
+    valid_q          : output logic,
+    lookahead_valid_q: output logic,
+    tail_valid_q     : output logic,
+
+    head_pc                  : output logic<ADDRESS_BITS>,
+    head_raw_instruction     : output logic<32>          ,
+    head_is_compressed       : output logic              ,
+    head_access_fault        : output logic              ,
+    head_fault_boundary      : output logic              ,
+    head_frame               : output logic<20>          ,
+    lookahead_pc             : output logic<ADDRESS_BITS>,
+    lookahead_raw_instruction: output logic<32>          ,
+    lookahead_is_compressed  : output logic              ,
+    lookahead_access_fault   : output logic              ,
+    lookahead_fault_boundary : output logic              ,
+    lookahead_frame          : output logic<20>          ,
+) {
+    struct Payload {
+        pc             : logic<ADDRESS_BITS>,
+        raw_instruction: logic<32>          ,
+        is_compressed  : logic              ,
+        access_fault   : logic              ,
+        fault_boundary : logic              ,
+        frame          : logic<20>          ,
+    }
+    var payload_q          : Payload;
+    var lookahead_payload_q: Payload;
+    var tail_payload_q     : Payload;
+    var payload_write      : logic  ;
+    var lookahead_write    : logic  ;
+    var tail_write         : logic  ;
+
+    always_comb {
+        // Keep packet data selection independent from the write enables.  A
+        // payload is non-architectural whenever its corresponding valid bit is
+        // clear, so every empty bank may refresh from the current input.  A
+        // populated bank writes only on the FIFO advance edge.  This exposes a
+        // short native-CE predicate while keeping memory waits and predictor
+        // decisions out of the payload D muxes.
+        payload_write   = !valid_q || advance;
+        lookahead_write = !lookahead_valid_q || advance;
+        tail_write      = !tail_valid_q || advance;
+
+        head_pc                   = payload_q.pc;
+        head_raw_instruction      = payload_q.raw_instruction;
+        head_is_compressed        = payload_q.is_compressed;
+        head_access_fault         = payload_q.access_fault;
+        head_fault_boundary       = payload_q.fault_boundary;
+        head_frame                = payload_q.frame;
+        lookahead_pc              = lookahead_payload_q.pc;
+        lookahead_raw_instruction = lookahead_payload_q.raw_instruction;
+        lookahead_is_compressed   = lookahead_payload_q.is_compressed;
+        lookahead_access_fault    = lookahead_payload_q.access_fault;
+        lookahead_fault_boundary  = lookahead_payload_q.fault_boundary;
+        lookahead_frame           = lookahead_payload_q.frame;
+    }
+
+    // Queue payload is masked by separately reset valid bits.  One clock-only
+    // process owns all three packet banks, avoiding packed-struct partial
+    // writes across processes.  Each bank has an explicit write enable so
+    // synthesis can use the native FF CE instead of putting the stall and
+    // predictor-decision predicates on an old-value D mux.  Old-value FF
+    // semantics make a simultaneous pop/push shift middle -> head and tail
+    // -> middle before appending the incoming packet to the newly opened
+    // slot.
+    always_ff (clk) {
+        if payload_write {
+            if lookahead_valid_q {
+                payload_q.pc              = lookahead_payload_q.pc;
+                payload_q.access_fault    = lookahead_payload_q.access_fault;
+                payload_q.fault_boundary  = lookahead_payload_q.fault_boundary;
+                payload_q.frame           = lookahead_payload_q.frame;
+                payload_q.raw_instruction = lookahead_payload_q.raw_instruction;
+                payload_q.is_compressed   = lookahead_payload_q.is_compressed;
+            } else {
+                payload_q.pc              = packet_pc;
+                payload_q.access_fault    = packet_access_fault;
+                payload_q.fault_boundary  = packet_fault_boundary;
+                payload_q.frame           = packet_frame;
+                payload_q.raw_instruction = packet_raw_instruction;
+                payload_q.is_compressed   = packet_is_compressed;
+            }
+        }
+        if lookahead_write {
+            if tail_valid_q {
+                lookahead_payload_q.pc              = tail_payload_q.pc;
+                lookahead_payload_q.access_fault    = tail_payload_q.access_fault;
+                lookahead_payload_q.fault_boundary  = tail_payload_q.fault_boundary;
+                lookahead_payload_q.frame           = tail_payload_q.frame;
+                lookahead_payload_q.raw_instruction = tail_payload_q.raw_instruction;
+                lookahead_payload_q.is_compressed   = tail_payload_q.is_compressed;
+            } else {
+                lookahead_payload_q.pc              = packet_pc;
+                lookahead_payload_q.access_fault    = packet_access_fault;
+                lookahead_payload_q.fault_boundary  = packet_fault_boundary;
+                lookahead_payload_q.frame           = packet_frame;
+                lookahead_payload_q.raw_instruction = packet_raw_instruction;
+                lookahead_payload_q.is_compressed   = packet_is_compressed;
+            }
+        }
+        if tail_write {
+            tail_payload_q.pc              = packet_pc;
+            tail_payload_q.access_fault    = packet_access_fault;
+            tail_payload_q.fault_boundary  = packet_fault_boundary;
+            tail_payload_q.frame           = packet_frame;
+            tail_payload_q.raw_instruction = packet_raw_instruction;
+            tail_payload_q.is_compressed   = packet_is_compressed;
+        }
+    }
+
+    // Occupancy is a prefix: tail implies middle, and middle implies head.
+    // Reset/redirect own only these valid bits; the payload bank above remains
+    // reset-free.  The normal equations are the complete three-slot FIFO
+    // pop/push truth table under that invariant.
+    always_ff (clk, rst_n) {
+        if_reset {
+            valid_q           = 1'b0;
+            lookahead_valid_q = 1'b0;
+            tail_valid_q      = 1'b0;
+        } else if !backend_wait {
+            if redirect_pending_q || ex_frontend_block {
+                valid_q           = 1'b0;
+                lookahead_valid_q = 1'b0;
+                tail_valid_q      = 1'b0;
+            } else if predictor_wait {
+                if push_valid {
+                    if !lookahead_valid_q {
+                        lookahead_valid_q = 1'b1;
+                    } else {
+                        tail_valid_q = 1'b1;
+                    }
+                }
+            } else if frontend_hold {
+                // Hold all three occupied slots.
+            } else if predictor_frontend_redirect {
+                valid_q           = 1'b0;
+                lookahead_valid_q = 1'b0;
+                tail_valid_q      = 1'b0;
+            } else {
+                valid_q           = lookahead_valid_q || push_valid;
+                lookahead_valid_q = tail_valid_q || (lookahead_valid_q && push_valid);
+                tail_valid_q      = tail_valid_q && push_valid;
+            }
+        }
+    }
+}

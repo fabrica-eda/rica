@@ -252,7 +252,11 @@ impl CoreDriver {
     }
 
     fn value(&mut self, name: &str) -> u64 {
-        let signal = self.simulator.signal(name);
+        let signal = if let Some((child, signal)) = name.split_once('.') {
+            self.simulator.child_signal(&[(child, 0)], signal)
+        } else {
+            self.simulator.signal(name)
+        };
         self.simulator
             .get(signal)
             .to_u64_digits()
@@ -668,13 +672,13 @@ fn memory_wait_refreshes_only_invalid_payload_slots() {
             continue;
         }
 
-        assert_eq!(driver.value("fetch_valid_q"), 0);
-        assert_eq!(driver.value("fetch_lookahead_valid_q"), 0);
-        assert_eq!(driver.value("fetch_tail_valid_q"), 0);
+        assert_eq!(driver.value("fetch_queue.valid_q"), 0);
+        assert_eq!(driver.value("fetch_queue.lookahead_valid_q"), 0);
+        assert_eq!(driver.value("fetch_queue.tail_valid_q"), 0);
 
         let payload = (
-            driver.value("fetch_lookahead_payload_q"),
-            driver.value("fetch_tail_payload_q"),
+            driver.value("fetch_queue.lookahead_payload_q"),
+            driver.value("fetch_queue.tail_payload_q"),
         );
         if let Some(previous) = first_wait_payload {
             assert_ne!(
@@ -729,9 +733,9 @@ fn check_exception_during_memory_wait(config: u64) {
             // The shorter static frontend can enter this stall before the
             // tail becomes valid. Only occupied entries must preserve data.
             let current_payload = [
-                ("fetch_valid_q", "fetch_payload_q"),
-                ("fetch_lookahead_valid_q", "fetch_lookahead_payload_q"),
-                ("fetch_tail_valid_q", "fetch_tail_payload_q"),
+                ("fetch_queue.valid_q", "fetch_queue.payload_q"),
+                ("fetch_queue.lookahead_valid_q", "fetch_queue.lookahead_payload_q"),
+                ("fetch_queue.tail_valid_q", "fetch_queue.tail_payload_q"),
             ]
             .map(|(valid, payload)| {
                 let occupied = driver.value(valid) != 0;
