@@ -101,6 +101,8 @@ hardware and do not trap.
 
 ### TLBs and the page-table walker
 
+The TLBs and the translation state machine are in `Sv39Translation.veryl`.
+
 - **DTLB:** one entry. Superpages are cached at 4 KiB granularity.
 - **ITLB:** two entries (page, page − 1, frame, permissions) with round-robin
   replacement, so both pages of a page-crossing instruction always coexist.

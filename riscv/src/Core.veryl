@@ -1123,445 +1123,93 @@ module Core #(
         assign dpc_page_write = 1'b0;
     }
 
-    // Sv39 data translation. A translated load/store issues no request from
-    // EX; it reaches CM, where it is the oldest instruction and owns the data
-    // port. There a one-entry DTLB (or the walker on a miss) supplies the
-    // physical page, the physical access is checked against PMA and PMP, and
-    // the request is issued from the registered physical address. Faults
-    // become CM traps with xtval set to the virtual address.
+    // Sv39 data and instruction translation (Sv39Translation.veryl).
     if ENABLE_SV39 :g_sv39 {
-        enum TranslationState: logic<3> {
-            Idle,
-            Walk,
-            Verdict,
-            Settle,
-            Decide,
-            Issue,
-            Done,
-        }
-        var state_q        : TranslationState;
-        var fault_q        : logic           ;
-        var fault_cause_q  : logic<4>        ;
-        var physical_q     : logic<20>       ;
-        var check_denied_q : logic           ;
-        var tlb_valid_q    : logic           ;
-        var tlb_page_q     : logic<27>       ;
-        var tlb_frame_q    : logic<20>       ;
-        var tlb_perms_q    : logic<5>        ;
-        var virtual_address: logic<64>       ;
-        var store_access   : logic           ;
-        var noncanonical   : logic           ;
-        var crosses_page   : logic           ;
-        var tlb_hit        : logic           ;
-        var hit_denied     : logic           ;
-        var walk_denied    : logic           ;
-        var walker_start   : logic           ;
-        var walker_busy    : logic           ;
-        var walker_done    : logic           ;
-        var walker_page_fault  : logic       ;
-        var walker_access_fault: logic       ;
-        var walker_page    : logic<20>       ;
-        var walker_perms   : logic<5>        ;
-        var walker_address : logic<32>       ;
-        var walker_request : logic           ;
-        var walker_response: logic           ;
-        var physical_address: logic<32>      ;
-        var pma_allowed    : logic           ;
-        var pma_cross_unused: logic          ;
-        var pma_fault_address_unused: logic<64>;
-        var restart        : logic           ;
-        // ITLB: two entries, each with its page minus one so that a lookup
-        // of a page's successor is an equality comparison.
-        var itlb_valid_q   : logic<2>        ;
-        var itlb_page_q    : logic<27>    [2];
-        var itlb_previous_q: logic<27>    [2];
-        var itlb_frame_q   : logic<20>    [2];
-        var itlb_perms_q   : logic<5>     [2];
-        var itlb_victim_q  : logic           ;
-        var itlb_fill_entry: logic           ;
-        var fetch_hit      : logic<2>        ;
-        var fetch_next_hit : logic<2>        ;
-        var fd_hit         : logic<2>        ;
-        var fd_next_hit    : logic<2>        ;
-        var fd_perms       : logic<5>        ;
-        var fd_next_perms  : logic<5>        ;
-        var fd_noncanonical: logic           ;
-        var fetch_walk     : logic           ;
-        var fetch_page_q   : logic<27>       ;
-        var fetch_frame_q  : logic<20>       ;
-        var fetch_next_frame_q: logic<20>    ;
-        var fetch_hit_q    : logic           ;
-        var fetch_consistent  : logic        ;
-        var fetch_consistent_q: logic<2>     ;
-        var itlb_written_q : logic           ;
-        var fetch_walk_address: logic<64>    ;
-        var walk_page      : logic<27>       ;
-        var walk_previous  : logic<27>       ;
-        var check_address_q: logic<32>       ;
-        var check_size_q   : logic<2>        ;
-        var check_read_q   : logic           ;
-        var check_write_q  : logic           ;
-        var first_pma_cross_unused : logic   ;
-        var first_pma_fault_unused : logic<64>;
-        var second_pma_cross_unused: logic   ;
-        var second_pma_fault_unused: logic<64>;
-
-        // Leaf permissions {D, U, X, W, R} against the access and the current
-        // effective privilege, SUM and MXR. Svade: a store needs D set.
-        function permission_denied (
-            perms    : input logic<5>,
-            store    : input logic   ,
-            user     : input logic   ,
-            sum      : input logic   ,
-            mxr      : input logic   ,
-        ) -> logic {
-            var denied: logic;
-            denied = if user ? !perms[3] : (perms[3] && !sum);
-            if store {
-                denied = denied || !perms[1] || !perms[4];
-            } else {
-                denied = denied || !(perms[0] || (mxr && perms[2]));
-            }
-            return denied;
-        }
-
-        // Fetch needs X, and U set exactly when fetching in U.
-        function execute_denied (
-            perms: input logic<5>,
-            user : input logic   ,
-        ) -> logic {
-            return !perms[2] || (perms[3] != user);
-        }
-
-        inst first_parcel_pma: PhysicalAccessCheck (
-            address      : {32'd0, rx_pmp_address_q}                     ,
-            size         : if rx_is_compressed_q || rx_straddle_q ? 2'd1 : 2'd2,
-            instruction  : 1'b1                                          ,
-            allowed      : rx_first_pma_allowed                          ,
-            crosses_bound: first_pma_cross_unused                        ,
-            fault_address: first_pma_fault_unused                        ,
+        inst translation: Sv39Translation #(
+            SPLIT_MEMORY_RESPONSES: SPLIT_MEMORY_RESPONSES,
+            ENABLE_INTERRUPTS     : ENABLE_INTERRUPTS     ,
+        ) (
+            clk                                                      ,
+            rst_n                                                    ,
+            translate_fetch         : csr_bus.translate_fetch         ,
+            fetch_user              : csr_bus.fetch_user              ,
+            data_user               : csr_bus.data_user               ,
+            translation_root        : csr_bus.translation_root        ,
+            supervisor_user_memory  : csr_bus.supervisor_user_memory  ,
+            make_executable_readable: csr_bus.make_executable_readable,
+            data_rdata                                               ,
+            data_response_sequence                                   ,
+            data_load_response_sequence                              ,
+            data_request_sequence_q                                  ,
+            fetch_virtual_pc                                         ,
+            fd_pc                   : fd_q.pc                         ,
+            fd_packet_frame         : fd_q.frame                      ,
+            fd_is_compressed        : fd_q.is_compressed              ,
+            rx_valid_q                                               ,
+            rx_pmp_address_q                                         ,
+            rx_is_compressed_q                                       ,
+            rx_straddle_q                                            ,
+            rx_next_frame_q                                          ,
+            rx_itlb_miss_q                                           ,
+            rx_fetch_page_fault_q                                    ,
+            rx_second_pmp_allowed                                    ,
+            ex_translate                                             ,
+            ex_exception                                             ,
+            lsu_access_size                                          ,
+            cm_valid_q                                               ,
+            cm_pc_q                                                  ,
+            cm_lsu_address_q                                         ,
+            cm_itlb_miss_q                                           ,
+            cm_fetch_second_q                                        ,
+            cm_is_load_q                                             ,
+            cm_is_store_q                                            ,
+            cm_is_atomic_q                                           ,
+            cm_exception_q                                           ,
+            cm_is_csr_q                                              ,
+            cm_csr_write_q                                           ,
+            cm_csr_index_q                                           ,
+            cm_fence_i_event                                         ,
+            cm_retire_event                                          ,
+            backend_wait                                             ,
+            backend_pending                                          ,
+            redirect_pending_q                                       ,
+            redirect_discards_cm                                     ,
+            sv39_pmp_allowed                                         ,
+            fetch_frame                                              ,
+            fetch_next_page                                          ,
+            fetch_page_same                                          ,
+            fetch_translation_hit                                    ,
+            fd_frame                                                 ,
+            fd_next_frame                                            ,
+            fd_pmp_address                                           ,
+            fd_translated_straddle                                   ,
+            fd_itlb_miss                                             ,
+            fd_fetch_page_fault                                      ,
+            fd_fetch_second                                          ,
+            rx_first_pma_allowed                                     ,
+            rx_second_pma_allowed                                    ,
+            rx_translation_fault                                     ,
+            cm_translated_q                                          ,
+            cm_access_size_q                                         ,
+            sv39_check_address                                       ,
+            sv39_check_size                                          ,
+            sv39_check_read                                          ,
+            sv39_check_write                                         ,
+            sv39_check_user                                          ,
+            walker_issue                                             ,
+            walker_owns_port                                         ,
+            port_override                                            ,
+            port_address                                             ,
+            port_memory_address                                      ,
+            translation_wait                                         ,
+            translation_fault                                        ,
+            translation_fault_cause                                  ,
+            translation_fault_value                                  ,
+            translation_issue                                        ,
+            translation_atomic_ready                                 ,
+            translation_flush                                        ,
+            cm_replay_event                                          ,
         );
-        inst second_parcel_pma: PhysicalAccessCheck (
-            address      : {32'd0, rx_next_frame_q, 12'h000},
-            size         : 2'd1                             ,
-            instruction  : 1'b1                             ,
-            allowed      : rx_second_pma_allowed            ,
-            crosses_bound: second_pma_cross_unused          ,
-            fault_address: second_pma_fault_unused          ,
-        );
-
-        inst walker: PageTableWalker (
-            clk, rst_n,
-            start         : walker_start            ,
-            virtual_page  : walk_page               ,
-            root          : csr_bus.translation_root,
-            request_address: walker_address         ,
-            request_denied: check_denied_q          ,
-            request_issue : walker_request          ,
-            response_valid: walker_response         ,
-            response_data : data_rdata              ,
-            busy          : walker_busy             ,
-            done          : walker_done             ,
-            page_fault    : walker_page_fault       ,
-            access_fault  : walker_access_fault     ,
-            physical_page : walker_page             ,
-            permissions   : walker_perms            ,
-        );
-
-        inst physical_check: PhysicalAccessCheck #(ENABLE_TIMER: ENABLE_INTERRUPTS) (
-            address      : {32'd0, sv39_check_address[31:0]},
-            size         : sv39_check_size                 ,
-            instruction  : 1'b0                            ,
-            allowed      : pma_allowed                     ,
-            crosses_bound: pma_cross_unused                ,
-            fault_address: pma_fault_address_unused        ,
-        );
-
-        always_comb {
-            // Frontend lookup for the I-cache's physical PC and its successor
-            // page, registered so that the I-cache's tag comparison starts
-            // from a register. The I-cache presents a line pair sampled two
-            // cycles earlier, so a fetch is valid only when the lookup has
-            // matched the current page and the current ITLB for the last
-            // three cycles: a page change or ITLB write costs up to three
-            // cycles, mostly hidden by redirect latency. Without a
-            // translation the packet carries no instruction and FD reports
-            // the miss.
-            for entry in 0..2 {
-                fetch_hit[entry] = itlb_valid_q[entry] && (itlb_page_q[entry] == fetch_virtual_pc[38:12]);
-                fetch_next_hit[entry] = itlb_valid_q[entry] && (itlb_previous_q[entry] == fetch_virtual_pc[38:12]);
-                fd_hit[entry] = itlb_valid_q[entry] && (itlb_page_q[entry] == fd_q.pc[38:12]);
-                fd_next_hit[entry] = itlb_valid_q[entry] && (itlb_previous_q[entry] == fd_q.pc[38:12]);
-            }
-            fetch_frame = fetch_frame_q;
-            fetch_next_page = fetch_next_frame_q;
-            fetch_consistent = (fetch_virtual_pc[38:12] == fetch_page_q) && !itlb_written_q;
-            fetch_page_same = fetch_consistent && (&fetch_consistent_q);
-            fetch_translation_hit = fetch_hit_q;
-            // The packet carries the frame it was fetched from.
-            fd_frame = fd_q.frame;
-            fd_perms = if fd_hit[1] ? itlb_perms_q[1] : itlb_perms_q[0];
-            fd_next_frame = if fd_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
-            fd_next_perms = if fd_next_hit[1] ? itlb_perms_q[1] : itlb_perms_q[0];
-            fd_pmp_address = fd_q.pc[31:0];
-            if csr_bus.translate_fetch { fd_pmp_address = {fd_frame, fd_q.pc[11:0]}; }
-
-            // FD's instruction: a miss or page fault on its first parcel, or,
-            // crossing pages, on its second parcel.
-            fd_noncanonical = fd_q.pc[63:39] != {fd_q.pc[38] repeat 25};
-            fd_translated_straddle = csr_bus.translate_fetch && !fd_q.is_compressed && (fd_q.pc[11:1] == 11'h7ff);
-            fd_itlb_miss = 1'b0;
-            fd_fetch_page_fault = 1'b0;
-            fd_fetch_second = 1'b0;
-            if csr_bus.translate_fetch {
-                if fd_noncanonical {
-                    fd_fetch_page_fault = 1'b1;
-                } else if fd_hit == 2'd0 {
-                    fd_itlb_miss = 1'b1;
-                } else if execute_denied(fd_perms, csr_bus.fetch_user) {
-                    fd_fetch_page_fault = 1'b1;
-                } else if fd_translated_straddle {
-                    fd_fetch_second = 1'b1;
-                    // The page after the last positive page is not canonical.
-                    if fd_q.pc[38:12] == 27'h3ffffff {
-                        fd_fetch_page_fault = 1'b1;
-                    } else if fd_next_hit == 2'd0 {
-                        fd_itlb_miss = 1'b1;
-                    } else if execute_denied(fd_next_perms, csr_bus.fetch_user) {
-                        fd_fetch_page_fault = 1'b1;
-                    }
-                }
-            }
-            rx_translation_fault = csr_bus.translate_fetch && rx_valid_q
-                && (rx_itlb_miss_q || rx_fetch_page_fault_q || !rx_first_pma_allowed
-                    || (rx_straddle_q && !(rx_second_pma_allowed && rx_second_pmp_allowed)));
-
-            // A CM walk for an ITLB miss translates the instruction's first
-            // or second parcel.
-            fetch_walk = cm_valid_q && cm_itlb_miss_q;
-            fetch_walk_address = cm_pc_q;
-            if cm_fetch_second_q { fetch_walk_address = cm_pc_q + 64'd2; }
-            // A second-parcel walk is for the page after the instruction's own
-            // (the instruction starts in its page's last halfword). The ITLB
-            // also stores the page minus one, so neither needs pc + 2.
-            walk_page = cm_lsu_address_q[38:12];
-            walk_previous = cm_pc_q[38:12] - 27'd1;
-            if fetch_walk {
-                walk_page = cm_pc_q[38:12];
-                if cm_fetch_second_q {
-                    walk_page     = cm_pc_q[38:12] + 27'd1;
-                    walk_previous = cm_pc_q[38:12];
-                }
-            }
-            // Round-robin replacement: a fill never evicts the entry filled
-            // just before it, so an instruction's two pages coexist.
-            itlb_fill_entry = itlb_victim_q;
-
-            virtual_address = cm_lsu_address_q;
-            // AMOs and SC are stores for permissions and causes; LR is a load.
-            store_access = cm_is_store_q;
-            noncanonical = virtual_address[63:39] != {virtual_address[38] repeat 25};
-            crosses_page = 1'b0;
-            case cm_access_size_q {
-                2'd1: crosses_page = virtual_address[11:0] == 12'hfff;
-                2'd2: crosses_page = (virtual_address[11:2] == 10'h3ff) && (virtual_address[1:0] != 2'd0);
-                2'd3: crosses_page = (virtual_address[11:3] == 9'h1ff) && (virtual_address[2:0] != 3'd0);
-                default: {}
-            }
-            tlb_hit = tlb_valid_q && (tlb_page_q == virtual_address[38:12]);
-            hit_denied = permission_denied(tlb_perms_q, store_access, csr_bus.data_user,
-                csr_bus.supervisor_user_memory, csr_bus.make_executable_readable);
-            walk_denied = permission_denied(walker_perms, store_access, csr_bus.data_user,
-                csr_bus.supervisor_user_memory, csr_bus.make_executable_readable);
-            restart = !backend_wait || redirect_discards_cm;
-            walker_start = (state_q == TranslationState::Idle) && !restart
-                && ((cm_valid_q && cm_translated_q && !noncanonical && !crosses_page && !tlb_hit) || fetch_walk);
-            walker_response = (if SPLIT_MEMORY_RESPONSES ? data_load_response_sequence : data_response_sequence)
-                == data_request_sequence_q;
-            physical_address = {physical_q, virtual_address[11:0]};
-
-            // One PMA/PMP checker serves the walker's PTE reads (S-level 8-byte
-            // reads) and the final access. Both its inputs and its verdict are
-            // registered: the verdict is used two cycles after the address
-            // changes (walker Settle, translation Settle).
-            sv39_check_user    = 1'b1;
-            sv39_check_address = {32'd0, check_address_q};
-            sv39_check_size    = check_size_q;
-            sv39_check_read    = check_read_q;
-            sv39_check_write   = check_write_q;
-
-            walker_issue     = walker_request;
-            walker_owns_port = walker_busy;
-            port_override    = cm_valid_q && (cm_translated_q || cm_itlb_miss_q);
-            port_address     = {32'd0, physical_address};
-            if walker_busy { port_address = {32'd0, walker_address}; }
-            // RAM and the timer are identity-mapped on the memory port; the
-            // boot ROM page is relocated as for untranslated accesses.
-            port_memory_address = port_address;
-            if port_address[31:12] == 20'd0 {
-                port_memory_address = {46'd0, 6'h3f, port_address[11:0]};
-            }
-
-            translation_wait = cm_valid_q && ((cm_translated_q && !cm_exception_q) || cm_itlb_miss_q)
-                && !redirect_discards_cm && (state_q != TranslationState::Done) && !fault_q;
-            translation_fault = cm_valid_q && (cm_translated_q || cm_itlb_miss_q) && fault_q;
-            translation_fault_cause = fault_cause_q;
-            translation_fault_value = if cm_itlb_miss_q ? fetch_walk_address : cm_lsu_address_q;
-            cm_replay_event = cm_valid_q && cm_itlb_miss_q && (state_q == TranslationState::Done)
-                && !backend_pending && !redirect_pending_q;
-            translation_issue = (state_q == TranslationState::Issue) && !cm_is_atomic_q;
-            translation_atomic_ready = !cm_translated_q || (state_q == TranslationState::Done);
-            translation_flush = cm_fence_i_event
-                || (cm_retire_event && cm_is_csr_q && cm_csr_write_q && (cm_csr_index_q == 6'd42));
-        }
-
-        always_ff (clk, rst_n) {
-            if_reset {
-                state_q        = TranslationState::Idle;
-                fault_q        = 1'b0;
-                fault_cause_q  = 4'd0;
-                physical_q     = 20'd0;
-                check_denied_q = 1'b0;
-                check_address_q = 32'd0;
-                check_size_q    = 2'd0;
-                check_read_q    = 1'b0;
-                check_write_q   = 1'b0;
-                tlb_valid_q    = 1'b0;
-                tlb_page_q     = 27'd0;
-                tlb_frame_q    = 20'd0;
-                tlb_perms_q    = 5'd0;
-                cm_translated_q  = 1'b0;
-                cm_access_size_q = 2'd0;
-                itlb_valid_q     = 2'd0;
-                itlb_victim_q    = 1'b0;
-                fetch_page_q       = 27'd0;
-                fetch_frame_q      = 20'd0;
-                fetch_next_frame_q = 20'd0;
-                fetch_hit_q        = 1'b0;
-                fetch_consistent_q = 2'd0;
-                itlb_written_q     = 1'b0;
-                for entry in 0..2 {
-                    itlb_page_q[entry]     = 27'd0;
-                    itlb_previous_q[entry] = 27'd0;
-                    itlb_frame_q[entry]    = 20'd0;
-                    itlb_perms_q[entry]    = 5'd0;
-                }
-            } else {
-                check_denied_q = !(pma_allowed && sv39_pmp_allowed);
-                if walker_busy {
-                    check_address_q = walker_address;
-                    check_size_q    = 2'd3;
-                    check_read_q    = 1'b1;
-                    check_write_q   = 1'b0;
-                } else {
-                    check_address_q = physical_address;
-                    check_size_q    = cm_access_size_q;
-                    check_read_q    = cm_is_load_q;
-                    check_write_q   = cm_is_store_q;
-                }
-                fetch_page_q       = fetch_virtual_pc[38:12];
-                fetch_frame_q      = if fetch_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
-                fetch_next_frame_q = if fetch_next_hit[1] ? itlb_frame_q[1] : itlb_frame_q[0];
-                fetch_hit_q        = fetch_hit != 2'd0;
-                fetch_consistent_q = {fetch_consistent_q[0], fetch_consistent};
-                itlb_written_q     = translation_flush;
-                if !backend_wait {
-                    cm_translated_q  = ex_translate && !ex_exception;
-                    cm_access_size_q = lsu_access_size;
-                }
-                if translation_flush {
-                    tlb_valid_q  = 1'b0;
-                    itlb_valid_q = 2'd0;
-                }
-                if restart {
-                    state_q = TranslationState::Idle;
-                    fault_q = 1'b0;
-                } else if fetch_walk && !fault_q {
-                    // Instruction faults: page fault 12, or access fault 1 for
-                    // a denied PTE read or a frame beyond 32 bits. Permissions
-                    // are checked by FD when the instruction is refetched.
-                    case state_q {
-                        TranslationState::Idle: state_q = TranslationState::Walk;
-                        TranslationState::Walk: if walker_done {
-                            if walker_page_fault {
-                                fault_q       = 1'b1;
-                                fault_cause_q = 4'd12;
-                            } else if walker_access_fault {
-                                fault_q       = 1'b1;
-                                fault_cause_q = 4'd1;
-                            } else {
-                                itlb_valid_q[itlb_fill_entry]    = 1'b1;
-                                itlb_page_q[itlb_fill_entry]     = walk_page;
-                                itlb_previous_q[itlb_fill_entry] = walk_previous;
-                                itlb_frame_q[itlb_fill_entry]    = walker_page;
-                                itlb_perms_q[itlb_fill_entry]    = walker_perms;
-                                itlb_victim_q                    = !itlb_fill_entry;
-                                itlb_written_q                   = 1'b1;
-                                state_q                          = TranslationState::Done;
-                            }
-                        }
-                        default: {}
-                    }
-                } else if cm_valid_q && cm_translated_q && !cm_exception_q && !fault_q {
-                    case state_q {
-                        TranslationState::Idle: {
-                            if noncanonical {
-                                fault_q       = 1'b1;
-                                fault_cause_q = if store_access ? 4'd15 : 4'd13;
-                            } else if crosses_page {
-                                fault_q       = 1'b1;
-                                fault_cause_q = if store_access ? 4'd6 : 4'd4;
-                            } else if tlb_hit {
-                                if hit_denied {
-                                    fault_q       = 1'b1;
-                                    fault_cause_q = if store_access ? 4'd15 : 4'd13;
-                                } else {
-                                    physical_q = tlb_frame_q;
-                                    state_q    = TranslationState::Verdict;
-                                }
-                            } else {
-                                state_q = TranslationState::Walk;
-                            }
-                        }
-                        TranslationState::Walk: if walker_done {
-                            if walker_page_fault {
-                                fault_q       = 1'b1;
-                                fault_cause_q = if store_access ? 4'd15 : 4'd13;
-                            } else if walker_access_fault {
-                                fault_q       = 1'b1;
-                                fault_cause_q = if store_access ? 4'd7 : 4'd5;
-                            } else {
-                                tlb_valid_q = 1'b1;
-                                tlb_page_q  = walk_page;
-                                tlb_frame_q = walker_page;
-                                tlb_perms_q = walker_perms;
-                                if walk_denied {
-                                    fault_q       = 1'b1;
-                                    fault_cause_q = if store_access ? 4'd15 : 4'd13;
-                                } else {
-                                    physical_q = walker_page;
-                                    state_q    = TranslationState::Verdict;
-                                }
-                            }
-                        }
-                        // The checker's inputs take the physical address in
-                        // Verdict; its registered result is used in Decide.
-                        TranslationState::Verdict: state_q = TranslationState::Settle;
-                        TranslationState::Settle : state_q = TranslationState::Decide;
-                        TranslationState::Decide : {
-                            if check_denied_q {
-                                fault_q       = 1'b1;
-                                fault_cause_q = if store_access ? 4'd7 : 4'd5;
-                            } else {
-                                state_q = TranslationState::Issue;
-                            }
-                        }
-                        TranslationState::Issue: state_q = TranslationState::Done;
-                        default                : {}
-                    }
-                }
-            }
-        }
     } else :g_no_sv39 {
         assign cm_translated_q          = 1'b0;
         assign cm_access_size_q         = 2'd0;
