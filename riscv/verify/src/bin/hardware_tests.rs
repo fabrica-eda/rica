@@ -1158,7 +1158,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut xvc_address = None::<String>;
     // The hardware-verified 112/56 MHz Sv39 image from the release assets
     // (riscv/tools/fetch-assets).
-    let mut bitstream = project.join("assets/riscv-hardware-compact-user-112-sv39-20261007.bit");
+    let mut bitstream = project.join("assets/riscv-hardware-compact-user-112-sv39-20261009.bit");
     let mut requested_elfs = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--run-tck" {

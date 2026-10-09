@@ -13,7 +13,7 @@ change that missed routed timing was rejected even if it saved cycles.
 
 | Date | Milestone |
 | --- | --- |
-| 2026-09-02 | A TAGE-based front end (two-way BTB, bimodal plus four tagged tables) did not close at 124.8 MHz (nextpnr reached 89.6 MHz). Kept as a comparison configuration until it was removed on 2026-10-08 |
+| 2026-09-02 | A TAGE-based front end (two-way BTB, bimodal plus four tagged tables) did not close at 124.8 MHz (nextpnr reached 89.6 MHz). Kept as a comparison configuration until it was removed on 2026-10-09 |
 | 2026-09-05 | Static predictor with a 4 KiB synchronous L1 instruction cache closes at 124.8 / 62.4 MHz |
 | 2026-09-06 | Compact predictor (64-entry BTB, 2-bit direction, 8-entry RAS): 100/100 ELFs on hardware, 1.22× geometric-mean speedup over the static predictor on four diagnostics |
 | 2026-09-06 | JTAG receiver moved to falling-edge sampling, fixing a placement-dependent load failure; 8-byte debug writes |
@@ -57,6 +57,7 @@ the same work rather than by frequency.
 | 2026-10-05 | S-mode with trap delegation: 270 ELFs. Closing it needed Texo's re-placement from routed timing |
 | 2026-10-06 | Sv39 (data and instruction translation, S-mode kernel with isolated U tasks): setup 0 ps, hold +1 ps at 112 / 56 MHz; 274 ELFs |
 | 2026-10-07 | Toolchain update (Struo `bee70eb`, Texo with probed re-placement); PMA/PMP checker inputs registered in the Sv39 path. Setup 0 ps, hold +1 ps; 274 ELFs |
+| 2026-10-09 | Texo 0.3.0; TAGE and bimodal predictors removed (80 dead registers left the compact image). Setup 0 ps, hold +1 ps with a 7,200 s setup budget; 274 ELFs, cycle counts within two cycles of 2026-10-07 |
 
 Selected cycle counts on the 112 / 56 MHz Sv39 image (hardware, matching the
 simultaneous-clock model within one cycle):

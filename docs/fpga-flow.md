@@ -49,7 +49,7 @@ riscv/tools/texo-measured pnr riscv --top HardwareCompactUserTestTop \
   --synthesis-goal-mhz 104 --jtagg-prefix jtag \
   --clock-constraints riscv/jtck-clock-constraints.json \
   --timing-exceptions riscv/timing-coverage-exceptions.json \
-  --setup-optimization-budget-seconds 3000 \
+  --setup-optimization-budget-seconds 7200 \
   --output riscv/build/user-112.txcp
 ```
 
@@ -70,8 +70,8 @@ and route ECOs. Hold is repaired afterwards. Checkpoints are written as `.txcp`
 
 The setup-optimization budget is wall-clock time. The same deterministic search
 reaches the same result if it has time to finish, but on a loaded machine a
-short budget can stop it early. The current image needed about 2,500 s; with an
-1,800 s budget on a busy machine it stopped at −20 ps on the same trajectory.
+short budget can stop it early. The current image needed about 7,500 s; with a
+3,000 s budget it stopped at −157 ps while setup was still improving.
 
 ### Timing exceptions
 
@@ -111,9 +111,9 @@ and verifies the pack on first use.
 | Item | Value |
 | --- | --- |
 | Profile | `HardwareCompactUserTestTop`, 112 / 56 MHz, Sv39 |
-| Native STA | setup 0 ps, hold +1 ps after the 194 ps guards; 24,523 checked endpoints |
+| Native STA | setup 0 ps, hold +1 ps after the 194 ps guards; 24,405 checked endpoints |
 | JTCK | 515 setup and 515 hold checks agree |
-| Run time | 2,544 s with a 3,000 s setup budget |
+| Run time | 7,542 s with a 7,200 s setup budget |
 | Hardware | 274 ELFs pass |
 
 ## Notes
