@@ -1,0 +1,136 @@
+/// Core's instruction fetch cursor and its taken-prediction preview.
+///
+/// The cursor is a line and a halfword parcel. Only an accepted predictor
+/// request advances it, so an invalid payload refresh cannot skip an
+/// address; a pending redirect or a taken prediction replaces it.
+module FetchCursor #(
+    param ADDRESS_BITS     : u32 = 32,
+    param ACTIVE_A         : bit = 0 ,
+    param EARLY_TAKEN_FETCH: bit = 0 ,
+) (
+    clk  : input clock,
+    rst_n: input reset,
+
+    // The length of the instruction at the cursor.
+    is_compressed: input logic,
+
+    // A pending redirect, applied once the backend no longer waits.
+    redirect_pending       : input logic              ,
+    backend_wait           : input logic              ,
+    pending_redirect_target: input logic<ADDRESS_BITS>,
+
+    // The predictor handshake.
+    fetch_valid                : input logic    ,
+    predictor_request_accept   : input logic    ,
+    predictor_response_valid   : input logic    ,
+    predictor_response_accept  : input logic    ,
+    predictor_response_taken   : input logic    ,
+    predictor_response_next_pc : input logic<32>,
+    predictor_frontend_redirect: input logic    ,
+    predictor_wait             : input logic    ,
+
+    // The cursor address, and the address driven to the instruction port.
+    address   : output logic<ADDRESS_BITS>,
+    virtual_pc: output logic<ADDRESS_BITS>,
+) {
+    var line_q       : logic<ADDRESS_BITS - 3>;
+    var parcel_q     : logic<2>               ;
+    var line_plus_one: logic<ADDRESS_BITS - 3>;
+    var next_parcel  : logic<2>               ;
+    var cross_line   : logic                  ;
+    var line_write   : logic                  ;
+    var parcel_write : logic                  ;
+    var line_next    : logic<ADDRESS_BITS - 3>;
+    var parcel_next  : logic<2>               ;
+    var taken_valid_q: logic                  ;
+    var taken_pc_q   : logic<ADDRESS_BITS>    ;
+
+    always_comb {
+        address                            = {line_q, parcel_q, 1'b0};
+        line_plus_one[7:0]                 = line_q[7:0] + 8'd1;
+        line_plus_one[15:8]                = line_q[15:8] + ((line_q[7:0] == 8'hff) as 8);
+        line_plus_one[23:16]               = line_q[23:16] + ((line_q[15:0] == 16'hffff) as 8);
+        line_plus_one[ADDRESS_BITS - 4:24] = line_q[ADDRESS_BITS - 4:24]
+            + ((line_q[23:0] == 24'hffffff) as 64);
+        if is_compressed {
+            next_parcel = parcel_q + 2'd1;
+            cross_line  = parcel_q == 2'd3;
+        } else {
+            next_parcel = parcel_q + 2'd2;
+            cross_line  = parcel_q[1];
+        }
+    }
+
+    // The accepted handshakes decide whether the cursor writes. Select
+    // its data using earlier predicates: while a write is enabled, these
+    // are equivalent to the corresponding accepted redirect. This keeps
+    // backend completion off the wide cursor data mux without changing
+    // any fetch/redirect edge or allowing an unaccepted request to advance.
+    always_comb {
+        line_write = (!backend_wait && redirect_pending) || (predictor_frontend_redirect && !predictor_wait)
+            || (predictor_request_accept && cross_line);
+        parcel_write = (!backend_wait && redirect_pending) || (predictor_frontend_redirect && !predictor_wait)
+            || predictor_request_accept;
+        line_next   = line_plus_one;
+        parcel_next = next_parcel;
+        if fetch_valid && predictor_response_valid && predictor_response_taken {
+            line_next   = predictor_response_next_pc[31:3];
+            parcel_next = predictor_response_next_pc[2:1];
+        }
+        if redirect_pending {
+            line_next   = pending_redirect_target[ADDRESS_BITS - 1:3];
+            parcel_next = pending_redirect_target[2:1];
+        }
+    }
+
+    always_comb {
+        virtual_pc = address;
+        // A registered held prediction prepares the synchronous lookup while
+        // its queue entry waits for the backend. Its accept edge clears the
+        // preview as the semantic cursor switches to the same target.
+        if EARLY_TAKEN_FETCH && taken_valid_q {
+            virtual_pc = taken_pc_q;
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            line_q   = 29'd0;
+            parcel_q = 2'd0;
+        } else {
+            // The semantic handshakes already exclude memory/dependency
+            // waits and architectural flushes. Do not repeat those predicates
+            // in a priority mux on the late instruction-valid -> PC path.
+            if ACTIVE_A {
+                if line_write { line_q = line_next; }
+                if parcel_write { parcel_q = parcel_next; }
+            } else if !backend_wait && redirect_pending {
+                line_q   = pending_redirect_target[ADDRESS_BITS - 1:3];
+                parcel_q = pending_redirect_target[2:1];
+            } else if predictor_frontend_redirect && !predictor_wait {
+                line_q   = predictor_response_next_pc[31:3];
+                parcel_q = predictor_response_next_pc[2:1];
+            } else if predictor_request_accept {
+                if cross_line {
+                    line_q = line_plus_one;
+                }
+                parcel_q = next_parcel;
+            }
+        }
+    }
+
+    // Do not extend recovery/token availability through the instruction-cache
+    // address mux. A prediction is held only when the frontend cannot accept
+    // another candidate. Acceptance or recovery clears the preview on the
+    // same edge that advances or flushes the corresponding queue entry.
+    always_ff (clk, rst_n) {
+        if_reset {
+            taken_valid_q = 1'b0;
+            taken_pc_q    = 32'd0;
+        } else {
+            taken_valid_q = EARLY_TAKEN_FETCH && fetch_valid && predictor_response_valid
+                && predictor_response_taken && !predictor_response_accept;
+            taken_pc_q = predictor_response_next_pc;
+        }
+    }
+}

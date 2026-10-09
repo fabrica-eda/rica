@@ -25,7 +25,8 @@ MRET restores it.
 Interrupts are precise. An enabled pending interrupt stops issue at RX, lets
 older EX/CM work finish (including acknowledged stores and multiply/divide),
 and only then enters the trap, so no store or retired instruction is replayed.
-A level withdrawn before acceptance does not produce a stale trap.
+A level withdrawn before acceptance does not produce a stale trap. Acceptance
+and the resume PC are in `InterruptControl.veryl`.
 
 ## User mode and PMP
 

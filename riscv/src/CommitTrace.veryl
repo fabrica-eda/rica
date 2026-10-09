@@ -1,0 +1,81 @@
+/// Core's registered commit trace and the debug copy of x31.
+///
+/// Each WB instruction is presented one edge later on the commit ports. With
+/// COMMIT_PAYLOAD clear only commit_valid is kept and every payload port is
+/// zero.
+module CommitTrace #(
+    param ADDRESS_BITS  : u32 = 32,
+    param COMMIT_PAYLOAD: bit = 1 ,
+) (
+    clk  : input clock,
+    rst_n: input reset,
+
+    // The WB instruction.
+    wb_valid       : input logic              ,
+    wb_pc          : input logic<ADDRESS_BITS>,
+    wb_raw_instr   : input logic<32>          ,
+    wb_write_enable: input logic              ,
+    wb_rd          : input logic<5>           ,
+    wb_result      : input logic<64>          ,
+    wb_mem_we      : input logic              ,
+    wb_mem_addr    : input logic<ADDRESS_BITS>,
+    wb_mem_wdata   : input logic<64>          ,
+    wb_mem_wmask   : input logic<8>           ,
+    // The register file write of that instruction.
+    rf_write_enable: input logic,
+
+    commit_valid    : output logic    ,
+    commit_pc       : output logic<64>,
+    commit_instr    : output logic<32>,
+    commit_rd       : output logic<5> ,
+    commit_data     : output logic<64>,
+    commit_mem_we   : output logic    ,
+    commit_mem_addr : output logic<64>,
+    commit_mem_wdata: output logic<64>,
+    commit_mem_wmask: output logic<8> ,
+    debug_x31       : output logic<64>,
+) {
+    always_ff (clk, rst_n) {
+        if_reset {
+            debug_x31        = 64'h0000_0000_0000_0000;
+            commit_valid     = 1'b0;
+            commit_pc        = 64'h0000_0000_0000_0000;
+            commit_instr     = 32'h0000_0013;
+            commit_rd        = 5'd0;
+            commit_data      = 64'h0000_0000_0000_0000;
+            commit_mem_we    = 1'b0;
+            commit_mem_addr  = 64'h0000_0000_0000_0000;
+            commit_mem_wdata = 64'h0000_0000_0000_0000;
+            commit_mem_wmask = 8'h00;
+        } else {
+            commit_valid = wb_valid;
+            if COMMIT_PAYLOAD {
+                commit_pc    = wb_pc;
+                commit_instr = wb_raw_instr;
+                commit_rd    = 5'd0;
+                commit_data  = 64'h0000_0000_0000_0000;
+                if wb_write_enable && (wb_rd != 5'd0) {
+                    commit_rd   = wb_rd;
+                    commit_data = wb_result;
+                }
+                commit_mem_we    = wb_valid && wb_mem_we;
+                commit_mem_addr  = wb_mem_addr;
+                commit_mem_wdata = wb_mem_wdata;
+                commit_mem_wmask = wb_mem_wmask;
+            } else {
+                commit_pc        = 64'd0;
+                commit_instr     = 32'd0;
+                commit_rd        = 5'd0;
+                commit_data      = 64'd0;
+                commit_mem_we    = 1'b0;
+                commit_mem_addr  = 64'd0;
+                commit_mem_wdata = 64'd0;
+                commit_mem_wmask = 8'd0;
+            }
+
+            if rf_write_enable && (wb_rd == 5'd31) {
+                debug_x31 = wb_result;
+            }
+        }
+    }
+}

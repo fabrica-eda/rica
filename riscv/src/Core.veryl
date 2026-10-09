@@ -115,22 +115,8 @@ module Core #(
         fault_boundary   : logic              ,
         frame            : logic<20>          ,
     }
-    var fetch_line_q             : logic       <ADDRESS_BITS - 3>;
-    var fetch_parcel_q           : logic       <2>               ;
     var fetch_address            : logic       <ADDRESS_BITS>    ;
-    var taken_fetch_valid_q      : logic                         ;
-    var taken_fetch_pc_q         : logic       <ADDRESS_BITS>    ;
-    var fetch_line_write: logic;
-    var fetch_parcel_write: logic;
-    var fetch_cursor_prediction: logic;
-    var fetch_cursor_redirect: logic;
-    var fetch_line_next: logic<ADDRESS_BITS - 3>;
-    var fetch_parcel_next: logic<2>;
-    var fetch_line_plus_one      : logic       <ADDRESS_BITS - 3>;
-    var fetch_next_parcel        : logic       <2>               ;
-    var fetch_cross_line         : logic                         ;
     var fetch_fallthrough        : logic       <ADDRESS_BITS>    ;
-    var debug_x31_q              : logic       <64>              ;
     var fetch_packet             : FetchPacket                   ;
     var fetch_valid_q            : logic                         ;
     var fetch_lookahead_valid_q  : logic                         ;
@@ -432,9 +418,7 @@ module Core #(
     var ex_system_barrier       : logic                  ;
     var ex_frontend_block       : logic                  ;
     var cm_irq_fence_event      : logic                  ;
-    var interrupt_drain         : logic                  ;
     var interrupt_drain_q       : logic                  ;
-    var interrupt_accept        : logic                  ;
     var interrupt_claimed_q     : logic                  ;
     var interrupt_cause_q       : logic<4>               ;
     var interrupt_delegated_q   : logic                  ;
@@ -1146,14 +1130,8 @@ module Core #(
         decode_bus.instr = fd_q.instruction;
     }
 
-    // Fetch: the cursor, the incoming packet and the queue views.
+    // Fetch: the incoming packet and the queue views.
     always_comb {
-        fetch_address                            = {fetch_line_q, fetch_parcel_q, 1'b0};
-        fetch_line_plus_one[7:0]                 = fetch_line_q[7:0] + 8'd1;
-        fetch_line_plus_one[15:8]                = fetch_line_q[15:8] + ((fetch_line_q[7:0] == 8'hff) as 8);
-        fetch_line_plus_one[23:16]               = fetch_line_q[23:16] + ((fetch_line_q[15:0] == 16'hffff) as 8);
-        fetch_line_plus_one[ADDRESS_BITS - 4:24] = fetch_line_q[ADDRESS_BITS - 4:24]
-            + ((fetch_line_q[23:0] == 24'hffffff) as 64);
         fetch_packet.pc                          = fetch_address;
         fetch_packet.raw_instruction             = instr;
         fetch_packet.is_compressed               = instr_is_compressed;
@@ -1197,11 +1175,6 @@ module Core #(
         fetch_fallthrough = fetch_packet.pc + 32'd4;
         if fetch_packet.is_compressed {
             fetch_fallthrough = fetch_packet.pc + 32'd2;
-            fetch_next_parcel = fetch_parcel_q + 2'd1;
-            fetch_cross_line  = fetch_parcel_q == 2'd3;
-        } else {
-            fetch_next_parcel = fetch_parcel_q + 2'd2;
-            fetch_cross_line  = fetch_parcel_q[1];
         }
     }
 
@@ -1693,10 +1666,6 @@ module Core #(
         // This cuts the pending-level path to fetch/predictor/CSR payloads;
         // a level withdrawn before acceptance cannot cause a stale trap.
         csr_bus.machine_interrupts = machine_interrupts;
-        interrupt_drain            = ENABLE_INTERRUPTS && csr_bus.interrupt_pending;
-        interrupt_accept           = interrupt_drain_q && interrupt_drain && !ex_valid_q && !cm_valid_q
-            && !redirect_pending_q && !interrupt_claimed_q;
-        interrupt_event            = ENABLE_INTERRUPTS && interrupt_claimed_q;
         // Changes to the interrupt predicate serialize younger work. Their
         // CM write is followed by a redirect to fallthrough, so the new state
         // is evaluated before a successor can execute, just as after MRET.
@@ -1797,43 +1766,44 @@ module Core #(
         }
     }
 
-    // Redirect selection.
-    always_comb {
-        redirect_valid = !backend_pending && !redirect_pending_q
-            && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
-        // An EX-owned prediction repair redirects only younger frontend work.
-        // Its instruction becomes the next CM owner and must retain memory or
-        // CSR side effects while the registered redirect is pending. A branch
-        // or system redirect originates from older CM state instead.
-        // The source bit also selects between a saved CM redirect target and
-        // an EX owner's target that has advanced into the CM register bank.
-        redirect_preserve_cm = !branch_redirect_valid && !cm_system_redirect;
-        if branch_redirect_valid {
-            redirect_target = cm_actual_next_pc;
-        } else if cm_trap_event || interrupt_event {
-            redirect_target = csr_bus.trap_vector;
-        } else if cm_mret_event {
-            redirect_target = csr_bus.return_pc;
-            if ENABLE_S && cm_is_sret_q { redirect_target = csr_bus.supervisor_return_pc; }
-        } else if ENABLE_SV39 && cm_replay_event {
-            redirect_target = cm_pc_q;
-        } else if cm_fence_i_event {
-            redirect_target = cm_fallthrough_pc_q;
-        } else {
-            redirect_target = cm_fallthrough_pc_q;
-        }
-        // An EX repair's payload crosses into CM on the same edge as its
-        // pending bit. Reuse that register bank instead of extending JALR's
-        // adder through the older CM target-priority mux. Memory waits hold
-        // this CM owner until the redirect can be applied.
-        pending_redirect_target = redirect_target_q;
-        if redirect_preserve_cm_q {
-            pending_redirect_target = cm_fallthrough_pc_q;
-            if cm_control_kind_q != 3'd0 {
-                pending_redirect_target = cm_redirect_target_q;
-            }
-        }
-    }
+    // Redirect selection and the registered redirect request.
+    inst redirect: RedirectUnit #(
+        ADDRESS_BITS : ADDRESS_BITS ,
+        ENABLE_S     : ENABLE_S     ,
+        ENABLE_SV39  : ENABLE_SV39  ,
+        STRICT_MEMORY: STRICT_MEMORY,
+    ) (
+        clk                                                   ,
+        rst_n                                                 ,
+        backend_pending                                       ,
+        backend_wait                                          ,
+        ex_redirect_valid                                     ,
+        branch_redirect_valid                                 ,
+        cm_system_redirect                                    ,
+        cm_trap_event                                         ,
+        interrupt_event                                       ,
+        cm_mret_event                                         ,
+        cm_replay_event                                       ,
+        cm_fence_i_event                                      ,
+        cm_actual_next_pc                                     ,
+        trap_vector         : csr_bus.trap_vector             ,
+        return_pc           : csr_bus.return_pc               ,
+        supervisor_return_pc: csr_bus.supervisor_return_pc    ,
+        cm_is_sret          : cm_is_sret_q                    ,
+        cm_pc               : cm_pc_q                         ,
+        cm_fallthrough_pc   : cm_fallthrough_pc_q             ,
+        cm_control_kind     : cm_control_kind_q               ,
+        cm_redirect_target  : cm_redirect_target_q            ,
+        redirect_valid                                        ,
+        redirect_preserve_cm                                  ,
+        redirect_target                                       ,
+        pending_redirect_target                               ,
+        pending_q           : redirect_pending_q              ,
+        preserve_cm_q       : redirect_preserve_cm_q          ,
+        event_delay_q       : redirect_event_delay_q          ,
+        flush_wb_q          : redirect_flush_wb_q             ,
+        target_q            : redirect_target_q               ,
+    );
 
     // FD/RX hazards and the frontend hold.
     always_comb {
@@ -1868,7 +1838,7 @@ module Core #(
         frontend_hold    = execution_hazard || interrupt_drain_q || interrupt_claimed_q || ipc_miss_hold;
     }
 
-    // Predictor handshake and the fetch cursor.
+    // Predictor handshake and the fetch queue controls.
     always_comb {
         predictor_wait = !predictor_ready || (fetch_q.valid && !predictor_response_valid);
         // A redirect/exception detected in this cycle may consume one younger
@@ -1896,28 +1866,6 @@ module Core #(
         predictor_request_valid = fetch_packet.valid && fetch_candidate_offer;
         fetch_queue_advance     = !backend_pending && !redirect_pending_q && !ex_frontend_block
             && !predictor_wait && !frontend_hold && !predictor_frontend_redirect;
-
-        // The accepted handshakes decide whether the cursor writes. Select
-        // its data using earlier predicates: while a write is enabled, these
-        // are equivalent to the corresponding accepted redirect. This keeps
-        // backend completion off the wide cursor data mux without changing
-        // any fetch/redirect edge or allowing an unaccepted request to advance.
-        fetch_cursor_redirect = !backend_wait && redirect_pending_q;
-        fetch_cursor_prediction = predictor_frontend_redirect && !predictor_wait;
-        fetch_line_write = fetch_cursor_redirect || fetch_cursor_prediction
-            || (predictor_request_accept && fetch_cross_line);
-        fetch_parcel_write = fetch_cursor_redirect || fetch_cursor_prediction
-            || predictor_request_accept;
-        fetch_line_next = fetch_line_plus_one;
-        fetch_parcel_next = fetch_next_parcel;
-        if fetch_q.valid && predictor_response_valid && predictor_response_taken {
-            fetch_line_next = predictor_response_next_pc[31:3];
-            fetch_parcel_next = predictor_response_next_pc[2:1];
-        }
-        if redirect_pending_q {
-            fetch_line_next = pending_redirect_target[ADDRESS_BITS - 1:3];
-            fetch_parcel_next = pending_redirect_target[2:1];
-        }
     }
 
     // Predictor maintenance and performance events.
@@ -1964,13 +1912,6 @@ module Core #(
 
     // Fetch PC and data port outputs.
     always_comb {
-        fetch_virtual_pc = fetch_address;
-        // A registered held prediction prepares the synchronous lookup while
-        // its queue entry waits for the backend. Its accept edge clears the
-        // preview as the semantic cursor switches to the same target.
-        if EARLY_TAKEN_FETCH && taken_fetch_valid_q {
-            fetch_virtual_pc = taken_fetch_pc_q;
-        }
         // A translated PC stays virtual; the I-cache combines the
         // registered frame with its page offset.
         pc = fetch_virtual_pc;
@@ -2018,54 +1959,42 @@ module Core #(
         // There is no architectural halt instruction. This output remains for
         // the board debug ABI and will be used by a future debug halt request.
         halted    = 1'b0;
-        debug_x31 = debug_x31_q;
     }
 
 
-    // Hold the frontend through the accepted interrupt even if its external
-    // level changes. No EX/CM instruction can enter between acceptance and
-    // trap entry, so the saved architectural resume PC below remains stable.
-    // CSR writes/MRET already redirect and flush younger work: the registered
-    // request is visible before their successor can enter EX.
-    always_ff (clk, rst_n) {
-        if_reset {
-            interrupt_drain_q   = 1'b0;
-            interrupt_claimed_q = 1'b0;
-            interrupt_cause_q   = 4'd0;
-            interrupt_delegated_q = 1'b0;
-        } else if ENABLE_INTERRUPTS {
-            interrupt_drain_q   = interrupt_drain && !csr_bus.trap_enter;
-            interrupt_claimed_q = interrupt_accept;
-            if interrupt_accept {
-                interrupt_cause_q = csr_bus.interrupt_cause;
-                interrupt_delegated_q = csr_bus.interrupt_to_supervisor;
-            }
-        }
-    }
-
-    // Record the first instruction that has not retired. This remains valid
-    // during cache misses, taken branches, and an empty frontend. Interrupts
-    // use it only after EX/CM drain, while any older WB write still completes.
-    always_ff (clk, rst_n) {
-        if_reset {
-            interrupt_resume_pc_q = 32'd0;
-        } else if ENABLE_INTERRUPTS {
-            if cm_trap_event {
-                interrupt_resume_pc_q = csr_bus.trap_vector;
-            } else if cm_retire_event {
-                if cm_mret_event {
-                    interrupt_resume_pc_q = csr_bus.return_pc;
-                    if ENABLE_S && cm_is_sret_q { interrupt_resume_pc_q = csr_bus.supervisor_return_pc; }
-                } else if cm_is_branch_q {
-                    interrupt_resume_pc_q = cm_actual_next_pc;
-                } else if cm_control_kind_q != 3'd0 {
-                    interrupt_resume_pc_q = cm_redirect_target_q;
-                } else {
-                    interrupt_resume_pc_q = cm_fallthrough_pc_q;
-                }
-            }
-        }
-    }
+    inst interrupt: InterruptControl #(
+        ADDRESS_BITS     : ADDRESS_BITS     ,
+        ENABLE_S         : ENABLE_S         ,
+        ENABLE_INTERRUPTS: ENABLE_INTERRUPTS,
+    ) (
+        clk                                                     ,
+        rst_n                                                   ,
+        interrupt_pending      : csr_bus.interrupt_pending      ,
+        interrupt_cause        : csr_bus.interrupt_cause        ,
+        interrupt_to_supervisor: csr_bus.interrupt_to_supervisor,
+        trap_enter             : csr_bus.trap_enter             ,
+        ex_valid               : ex_valid_q                     ,
+        cm_valid               : cm_valid_q                     ,
+        redirect_pending       : redirect_pending_q             ,
+        cm_trap_event                                           ,
+        cm_retire_event                                         ,
+        cm_mret_event                                           ,
+        cm_is_sret             : cm_is_sret_q                   ,
+        cm_is_branch           : cm_is_branch_q                 ,
+        cm_actual_next_pc                                       ,
+        cm_control_kind        : cm_control_kind_q              ,
+        cm_redirect_target     : cm_redirect_target_q           ,
+        cm_fallthrough_pc      : cm_fallthrough_pc_q            ,
+        trap_vector            : csr_bus.trap_vector            ,
+        return_pc              : csr_bus.return_pc              ,
+        supervisor_return_pc   : csr_bus.supervisor_return_pc   ,
+        trap                   : interrupt_event                ,
+        drain_q                : interrupt_drain_q              ,
+        claimed_q              : interrupt_claimed_q            ,
+        cause_q                : interrupt_cause_q              ,
+        delegated_q            : interrupt_delegated_q          ,
+        resume_pc_q            : interrupt_resume_pc_q          ,
+    );
 
     // The valid bits are reset while the retire payload refreshes from
     // already-registered CM state every cycle; retire validity masks it.
@@ -2117,48 +2046,29 @@ module Core #(
         }
     }
 
-    // Only an accepted semantic predictor request advances the instruction
-    // cursor.  Invalid payload refreshes therefore cannot skip an address.
-    always_ff (clk, rst_n) {
-        if_reset {
-            fetch_line_q   = 29'd0;
-            fetch_parcel_q = 2'd0;
-        } else {
-            // The semantic handshakes already exclude memory/dependency
-            // waits and architectural flushes. Do not repeat those predicates
-            // in a priority mux on the late instruction-valid -> PC path.
-            if ACTIVE_A {
-                if fetch_line_write { fetch_line_q = fetch_line_next; }
-                if fetch_parcel_write { fetch_parcel_q = fetch_parcel_next; }
-            } else if !backend_wait && redirect_pending_q {
-                fetch_line_q   = pending_redirect_target[ADDRESS_BITS - 1:3];
-                fetch_parcel_q = pending_redirect_target[2:1];
-            } else if predictor_frontend_redirect && !predictor_wait {
-                fetch_line_q   = predictor_response_next_pc[31:3];
-                fetch_parcel_q = predictor_response_next_pc[2:1];
-            } else if predictor_request_accept {
-                if fetch_cross_line {
-                    fetch_line_q = fetch_line_plus_one;
-                }
-                fetch_parcel_q = fetch_next_parcel;
-            }
-        }
-    }
-
-    // Do not extend recovery/token availability through the instruction-cache
-    // address mux. A prediction is held only when the frontend cannot accept
-    // another candidate. Acceptance or recovery clears the preview on the
-    // same edge that advances or flushes the corresponding queue entry.
-    always_ff (clk, rst_n) {
-        if_reset {
-            taken_fetch_valid_q = 1'b0;
-            taken_fetch_pc_q    = 32'd0;
-        } else {
-            taken_fetch_valid_q = EARLY_TAKEN_FETCH && fetch_q.valid && predictor_response_valid
-                && predictor_response_taken && !predictor_response_accept;
-            taken_fetch_pc_q    = predictor_response_next_pc;
-        }
-    }
+    // The fetch cursor and its taken-prediction preview.
+    inst fetch_cursor: FetchCursor #(
+        ADDRESS_BITS     : ADDRESS_BITS     ,
+        ACTIVE_A         : ACTIVE_A         ,
+        EARLY_TAKEN_FETCH: EARLY_TAKEN_FETCH,
+    ) (
+        clk                                                ,
+        rst_n                                              ,
+        is_compressed              : fetch_packet.is_compressed,
+        redirect_pending           : redirect_pending_q    ,
+        backend_wait                                       ,
+        pending_redirect_target                            ,
+        fetch_valid                : fetch_q.valid         ,
+        predictor_request_accept                           ,
+        predictor_response_valid                           ,
+        predictor_response_accept                          ,
+        predictor_response_taken                           ,
+        predictor_response_next_pc                         ,
+        predictor_frontend_redirect                        ,
+        predictor_wait                                     ,
+        address                    : fetch_address         ,
+        virtual_pc                 : fetch_virtual_pc      ,
+    );
 
     inst fetch_queue: FetchQueue #(
         ADDRESS_BITS: ADDRESS_BITS,
@@ -2463,81 +2373,35 @@ module Core #(
         }
     }
 
-    // Redirect registers.
-    always_ff (clk, rst_n) {
-        if_reset {
-            redirect_pending_q      = 1'b0;
-            redirect_preserve_cm_q  = 1'b0;
-            redirect_event_delay_q  = 1'b0;
-            redirect_flush_wb_q     = 1'b0;
-            redirect_target_q       = 64'h0000_0000_0000_0000;
-        } else {
-            // An EX-owned memory repair keeps its redirect transaction live
-            // while the owner waits in CM.  The completion edge below then
-            // advances that owner to WB and applies the saved frontend target.
-            // Older redirects never enter this hold case.
-            if backend_wait && redirect_pending_q && redirect_preserve_cm_q {
-                redirect_pending_q     = 1'b1;
-                redirect_preserve_cm_q = 1'b1;
-            } else {
-                redirect_event_delay_q = redirect_pending_q;
-                redirect_pending_q     = redirect_valid;
-                redirect_preserve_cm_q = redirect_preserve_cm;
-                // CM access faults can still have a younger EX follower.
-                // That follower must be discarded before it reaches WB.
-                redirect_flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event) || cm_replay_event;
-                // Only a CM-owned pending redirect exposes this payload.
-                // Refresh it on every advancing cycle to keep the late
-                // redirect-valid decision out of a wide old-value mux.
-                redirect_target_q = redirect_target;
-            }
-        }
-    }
-
     // Commit trace and the debug x31 copy.
-    always_ff (clk, rst_n) {
-        if_reset {
-            debug_x31_q             = 64'h0000_0000_0000_0000;
-            commit_valid     = 1'b0;
-            commit_pc        = 64'h0000_0000_0000_0000;
-            commit_instr     = 32'h0000_0013;
-            commit_rd        = 5'd0;
-            commit_data      = 64'h0000_0000_0000_0000;
-            commit_mem_we    = 1'b0;
-            commit_mem_addr  = 64'h0000_0000_0000_0000;
-            commit_mem_wdata = 64'h0000_0000_0000_0000;
-            commit_mem_wmask = 8'h00;
-        } else {
-            commit_valid = wb_valid_q;
-            if COMMIT_PAYLOAD {
-                commit_pc    = wb_pc_q;
-                commit_instr = wb_raw_instr_q;
-                commit_rd    = 5'd0;
-                commit_data  = 64'h0000_0000_0000_0000;
-                if wb_write_enable_q && (wb_rd_q != 5'd0) {
-                    commit_rd   = wb_rd_q;
-                    commit_data = wb_result_q;
-                }
-                commit_mem_we    = wb_valid_q && wb_mem_we_q;
-                commit_mem_addr  = wb_mem_addr_q;
-                commit_mem_wdata = wb_mem_wdata_q;
-                commit_mem_wmask = wb_mem_wmask_q;
-            } else {
-                commit_pc        = 64'd0;
-                commit_instr     = 32'd0;
-                commit_rd        = 5'd0;
-                commit_data      = 64'd0;
-                commit_mem_we    = 1'b0;
-                commit_mem_addr  = 64'd0;
-                commit_mem_wdata = 64'd0;
-                commit_mem_wmask = 8'd0;
-            }
-
-            if rf_write_enable && (wb_rd_q == 5'd31) {
-                debug_x31_q = wb_result_q;
-            }
-        }
-    }
+    inst commit_trace: CommitTrace #(
+        ADDRESS_BITS  : ADDRESS_BITS  ,
+        COMMIT_PAYLOAD: COMMIT_PAYLOAD,
+    ) (
+        clk                                ,
+        rst_n                              ,
+        wb_valid       : wb_valid_q        ,
+        wb_pc          : wb_pc_q           ,
+        wb_raw_instr   : wb_raw_instr_q    ,
+        wb_write_enable: wb_write_enable_q ,
+        wb_rd          : wb_rd_q           ,
+        wb_result      : wb_result_q       ,
+        wb_mem_we      : wb_mem_we_q       ,
+        wb_mem_addr    : wb_mem_addr_q     ,
+        wb_mem_wdata   : wb_mem_wdata_q    ,
+        wb_mem_wmask   : wb_mem_wmask_q    ,
+        rf_write_enable                    ,
+        commit_valid                       ,
+        commit_pc                          ,
+        commit_instr                       ,
+        commit_rd                          ,
+        commit_data                        ,
+        commit_mem_we                      ,
+        commit_mem_addr                    ,
+        commit_mem_wdata                   ,
+        commit_mem_wmask                   ,
+        debug_x31                          ,
+    );
 
     // WB payload: CM advances into WB.
     always_ff (clk, rst_n) {

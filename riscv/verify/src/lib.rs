@@ -10,7 +10,7 @@ pub mod console_host;
 pub mod platform;
 pub mod timed_memory;
 
-const CORE_SOURCES: [&str; 28] = [
+const CORE_SOURCES: [&str; 32] = [
     "UserPlatform.veryl",
     "PipelineInterfaces.veryl",
     "RegisterFile.veryl",
@@ -36,6 +36,10 @@ const CORE_SOURCES: [&str; 28] = [
     "Sv39Translation.veryl",
     "PmpUnit.veryl",
     "FetchQueue.veryl",
+    "CommitTrace.veryl",
+    "RedirectUnit.veryl",
+    "InterruptControl.veryl",
+    "FetchCursor.veryl",
     "Core.veryl",
     "StaticBranchPredictor.veryl",
     "CompactBranchPredictor.veryl",

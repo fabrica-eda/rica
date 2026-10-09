@@ -1,0 +1,102 @@
+/// Core's interrupt acceptance and the architectural resume PC.
+///
+/// A pending interrupt first drains the pipeline. At the empty boundary the
+/// live predicate is checked again before the interrupt is claimed, and its
+/// cause is held until trap entry on the next edge, so a level withdrawn
+/// before acceptance cannot cause a stale trap.
+module InterruptControl #(
+    param ADDRESS_BITS     : u32 = 32,
+    param ENABLE_S         : bit = 0 ,
+    param ENABLE_INTERRUPTS: bit = 0 ,
+) (
+    clk  : input clock,
+    rst_n: input reset,
+
+    // From CsrFile.
+    interrupt_pending      : input logic   ,
+    interrupt_cause        : input logic<4>,
+    interrupt_to_supervisor: input logic   ,
+    trap_enter             : input logic   ,
+
+    // The pipeline is empty when neither stage is valid and no redirect
+    // is pending.
+    ex_valid        : input logic,
+    cm_valid        : input logic,
+    redirect_pending: input logic,
+
+    // The CM instruction and its successor PC.
+    cm_trap_event       : input logic              ,
+    cm_retire_event     : input logic              ,
+    cm_mret_event       : input logic              ,
+    cm_is_sret          : input logic              ,
+    cm_is_branch        : input logic              ,
+    cm_actual_next_pc   : input logic<ADDRESS_BITS>,
+    cm_control_kind     : input logic<3>           ,
+    cm_redirect_target  : input logic<ADDRESS_BITS>,
+    cm_fallthrough_pc   : input logic<ADDRESS_BITS>,
+    trap_vector         : input logic<64>          ,
+    return_pc           : input logic<64>          ,
+    supervisor_return_pc: input logic<64>          ,
+
+    // The claimed interrupt enters its trap.
+    trap       : output logic              ,
+    drain_q    : output logic              ,
+    claimed_q  : output logic              ,
+    cause_q    : output logic<4>           ,
+    delegated_q: output logic              ,
+    resume_pc_q: output logic<ADDRESS_BITS>,
+) {
+    var drain : logic;
+    var accept: logic;
+
+    always_comb {
+        drain  = ENABLE_INTERRUPTS && interrupt_pending;
+        accept = drain_q && drain && !ex_valid && !cm_valid && !redirect_pending && !claimed_q;
+        trap   = ENABLE_INTERRUPTS && claimed_q;
+    }
+
+    // Hold the frontend through the accepted interrupt even if its external
+    // level changes. No EX/CM instruction can enter between acceptance and
+    // trap entry, so the saved architectural resume PC below remains stable.
+    // CSR writes/MRET already redirect and flush younger work: the registered
+    // request is visible before their successor can enter EX.
+    always_ff (clk, rst_n) {
+        if_reset {
+            drain_q     = 1'b0;
+            claimed_q   = 1'b0;
+            cause_q     = 4'd0;
+            delegated_q = 1'b0;
+        } else if ENABLE_INTERRUPTS {
+            drain_q   = drain && !trap_enter;
+            claimed_q = accept;
+            if accept {
+                cause_q     = interrupt_cause;
+                delegated_q = interrupt_to_supervisor;
+            }
+        }
+    }
+
+    // Record the first instruction that has not retired. This remains valid
+    // during cache misses, taken branches, and an empty frontend. Interrupts
+    // use it only after EX/CM drain, while any older WB write still completes.
+    always_ff (clk, rst_n) {
+        if_reset {
+            resume_pc_q = 32'd0;
+        } else if ENABLE_INTERRUPTS {
+            if cm_trap_event {
+                resume_pc_q = trap_vector;
+            } else if cm_retire_event {
+                if cm_mret_event {
+                    resume_pc_q = return_pc;
+                    if ENABLE_S && cm_is_sret { resume_pc_q = supervisor_return_pc; }
+                } else if cm_is_branch {
+                    resume_pc_q = cm_actual_next_pc;
+                } else if cm_control_kind != 3'd0 {
+                    resume_pc_q = cm_redirect_target;
+                } else {
+                    resume_pc_q = cm_fallthrough_pc;
+                }
+            }
+        }
+    }
+}

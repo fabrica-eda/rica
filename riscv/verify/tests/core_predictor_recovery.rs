@@ -2567,7 +2567,7 @@ fn interrupt_acceptance_preserves_cause_and_pc_when_pending_levels_change() {
             let mut entered = 0;
             let mut inspected = false;
             for _ in 0..300 {
-                let accepting = driver.value("interrupt_accept") != 0;
+                let accepting = driver.value("interrupt.accept") != 0;
                 if accepting {
                     accepted += 1;
                 }
@@ -2620,11 +2620,11 @@ fn interrupt_withdrawn_at_empty_boundary_is_not_accepted() {
         let mut withdrawn = false;
         let mut resumed = false;
         for _ in 0..300 {
-            if driver.value("interrupt_accept") != 0 {
+            if driver.value("interrupt.accept") != 0 {
                 assert!(!withdrawn);
                 // Remove the level before the accepting edge, after draining.
                 driver.set_interrupts(0);
-                assert_eq!(driver.value("interrupt_accept"), 0);
+                assert_eq!(driver.value("interrupt.accept"), 0);
                 withdrawn = true;
             }
             assert_eq!(driver.value("interrupt_event"), 0);
@@ -2728,7 +2728,7 @@ fn interrupt_predicate_is_rechecked_after_an_inflight_disabling_csr_write() {
                 for _ in 0..400 {
                     if driver.value("ex_valid_q") != 0 && driver.value("ex_pc_q") == 20 {
                         driver.set_interrupts(1);
-                        assert_eq!(driver.value("interrupt_drain"), 1);
+                        assert_eq!(driver.value("interrupt.drain"), 1);
                         injected = true;
                     }
                     assert_eq!(driver.value("interrupt_event"), 0);
@@ -2744,7 +2744,7 @@ fn interrupt_predicate_is_rechecked_after_an_inflight_disabling_csr_write() {
                     injected && done,
                     "config={config}, CSR={csr:x}, form={form}"
                 );
-                assert_eq!(driver.value("interrupt_drain"), 0);
+                assert_eq!(driver.value("interrupt.drain"), 0);
             }
         }
     }

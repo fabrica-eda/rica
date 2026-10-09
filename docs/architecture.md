@@ -4,9 +4,21 @@ Rica is a single-issue, in-order RV64 core. Throughput is measured as work per
 unit time (IPC × clock), so features are only adopted when they close routed
 timing at the target clock **and** do not cost more cycles than they save.
 
-The RTL is in `riscv/src/`. `Core.veryl` holds the pipeline; the board wrappers
-(`HardwareTestTop.veryl`, `HardwareCompactTestTop.veryl`) add memory, PLL, debug
-transport and peripherals.
+The RTL is in `riscv/src/`. `Core.veryl` holds the pipeline registers and
+their control; the board wrappers (`HardwareTestTop.veryl`,
+`HardwareCompactTestTop.veryl`) add memory, PLL, debug transport and
+peripherals. Self-contained parts of the pipeline are separate modules that
+Core instantiates:
+
+| Module | Contents |
+| --- | --- |
+| `FetchCursor.veryl` | Fetch address cursor and the taken-prediction preview |
+| `FetchQueue.veryl` | Three-slot queue between fetch and decode |
+| `RedirectUnit.veryl` | Redirect target selection and the registered redirect request |
+| `InterruptControl.veryl` | Interrupt drain, acceptance and the resume PC |
+| `PmpUnit.veryl` | PMP checkers and their permission caches |
+| `Sv39Translation.veryl` | TLBs and the translation state machine |
+| `CommitTrace.veryl` | Registered commit trace and the debug copy of x31 |
 
 ## Pipeline
 

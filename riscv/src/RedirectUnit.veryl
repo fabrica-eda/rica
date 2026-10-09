@@ -1,0 +1,117 @@
+/// Core's frontend redirect: chooses the target and registers the request.
+///
+/// A branch or system redirect originates from older CM state; an EX-owned
+/// prediction repair redirects only younger frontend work and keeps its
+/// instruction as the next CM owner. The registered request is applied to
+/// the fetch cursor on the following edge.
+module RedirectUnit #(
+    param ADDRESS_BITS : u32 = 32,
+    param ENABLE_S     : bit = 0 ,
+    param ENABLE_SV39  : bit = 0 ,
+    param STRICT_MEMORY: bit = 0 ,
+) (
+    clk  : input clock,
+    rst_n: input reset,
+
+    backend_pending: input logic,
+    backend_wait   : input logic,
+
+    // Redirect sources.
+    ex_redirect_valid    : input logic,
+    branch_redirect_valid: input logic,
+    cm_system_redirect   : input logic,
+    cm_trap_event        : input logic,
+    interrupt_event      : input logic,
+    cm_mret_event        : input logic,
+    cm_replay_event      : input logic,
+    cm_fence_i_event     : input logic,
+
+    // Targets.
+    cm_actual_next_pc   : input logic<ADDRESS_BITS>,
+    trap_vector         : input logic<64>          ,
+    return_pc           : input logic<64>          ,
+    supervisor_return_pc: input logic<64>          ,
+    cm_is_sret          : input logic              ,
+    cm_pc               : input logic<ADDRESS_BITS>,
+    cm_fallthrough_pc   : input logic<ADDRESS_BITS>,
+    cm_control_kind     : input logic<3>           ,
+    cm_redirect_target  : input logic<ADDRESS_BITS>,
+
+    redirect_valid         : output logic              ,
+    redirect_preserve_cm   : output logic              ,
+    redirect_target        : output logic<ADDRESS_BITS>,
+    pending_redirect_target: output logic<ADDRESS_BITS>,
+
+    pending_q    : output logic              ,
+    preserve_cm_q: output logic              ,
+    event_delay_q: output logic              ,
+    flush_wb_q   : output logic              ,
+    target_q     : output logic<ADDRESS_BITS>,
+) {
+    always_comb {
+        redirect_valid = !backend_pending && !pending_q
+            && (ex_redirect_valid || cm_system_redirect || branch_redirect_valid);
+        // An EX-owned prediction repair redirects only younger frontend work.
+        // Its instruction becomes the next CM owner and must retain memory or
+        // CSR side effects while the registered redirect is pending. A branch
+        // or system redirect originates from older CM state instead.
+        // The source bit also selects between a saved CM redirect target and
+        // an EX owner's target that has advanced into the CM register bank.
+        redirect_preserve_cm = !branch_redirect_valid && !cm_system_redirect;
+        if branch_redirect_valid {
+            redirect_target = cm_actual_next_pc;
+        } else if cm_trap_event || interrupt_event {
+            redirect_target = trap_vector;
+        } else if cm_mret_event {
+            redirect_target = return_pc;
+            if ENABLE_S && cm_is_sret { redirect_target = supervisor_return_pc; }
+        } else if ENABLE_SV39 && cm_replay_event {
+            redirect_target = cm_pc;
+        } else if cm_fence_i_event {
+            redirect_target = cm_fallthrough_pc;
+        } else {
+            redirect_target = cm_fallthrough_pc;
+        }
+        // An EX repair's payload crosses into CM on the same edge as its
+        // pending bit. Reuse that register bank instead of extending JALR's
+        // adder through the older CM target-priority mux. Memory waits hold
+        // this CM owner until the redirect can be applied.
+        pending_redirect_target = target_q;
+        if preserve_cm_q {
+            pending_redirect_target = cm_fallthrough_pc;
+            if cm_control_kind != 3'd0 {
+                pending_redirect_target = cm_redirect_target;
+            }
+        }
+    }
+
+    always_ff (clk, rst_n) {
+        if_reset {
+            pending_q     = 1'b0;
+            preserve_cm_q = 1'b0;
+            event_delay_q = 1'b0;
+            flush_wb_q    = 1'b0;
+            target_q      = 64'h0000_0000_0000_0000;
+        } else {
+            // An EX-owned memory repair keeps its redirect transaction live
+            // while the owner waits in CM.  The completion edge below then
+            // advances that owner to WB and applies the saved frontend target.
+            // Older redirects never enter this hold case.
+            if backend_wait && pending_q && preserve_cm_q {
+                pending_q     = 1'b1;
+                preserve_cm_q = 1'b1;
+            } else {
+                event_delay_q = pending_q;
+                pending_q     = redirect_valid;
+                preserve_cm_q = redirect_preserve_cm;
+                // CM access faults can still have a younger EX follower.
+                // That follower must be discarded before it reaches WB.
+                flush_wb_q = branch_redirect_valid || (STRICT_MEMORY && cm_trap_event) || cm_replay_event;
+                // Only a CM-owned pending redirect exposes this payload.
+                // Refresh it on every advancing cycle to keep the late
+                // redirect-valid decision out of a wide old-value mux.
+                target_q = redirect_target;
+            }
+        }
+    }
+}
