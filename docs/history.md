@@ -58,6 +58,7 @@ the same work rather than by frequency.
 | 2026-10-06 | Sv39 (data and instruction translation, S-mode kernel with isolated U tasks): setup 0 ps, hold +1 ps at 112 / 56 MHz; 274 ELFs |
 | 2026-10-07 | Toolchain update (Struo `bee70eb`, Texo with probed re-placement); PMA/PMP checker inputs registered in the Sv39 path. Setup 0 ps, hold +1 ps; 274 ELFs |
 | 2026-10-09 | Texo 0.3.0; TAGE and bimodal predictors removed (80 dead registers left the compact image). Setup 0 ps, hold +1 ps with a 7,200 s setup budget; 274 ELFs, cycle counts within two cycles of 2026-10-07 |
+| 2026-10-09 | Sv39 translation, PMP checking and the fetch queue moved out of `Core`, whose processes are split per stage; Struo 0.2.1 so that the split synthesizes to the same netlist as before it. Setup 0 ps, hold +1 ps; 274 ELFs, cycle counts within one cycle of the earlier 2026-10-09 image |
 
 Selected cycle counts on the 112 / 56 MHz Sv39 image (hardware, matching the
 simultaneous-clock model within one cycle):

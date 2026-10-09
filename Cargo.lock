@@ -3147,9 +3147,9 @@ dependencies = [
 
 [[package]]
 name = "struo-celox"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41ae823b5b4a98d4ececc5083407ee8d56f1160ebb6cd636a33a25db72904e8f"
+checksum = "68457808f55dd0ef9ae3c74d33fd544407392545863fc8cdb693b9c83560be16"
 dependencies = [
  "celox",
  "struo-ir",
@@ -3158,18 +3158,18 @@ dependencies = [
 
 [[package]]
 name = "struo-formal"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "113044b603e693e98de8768f0d4699495c1f81afd0776df6eb18caf32ebb4ad2"
+checksum = "15cec3fbbddc8f0a83cb68e092864ec3552004b04eea8e7ec9239300c04a19b7"
 dependencies = [
  "struo-ir",
 ]
 
 [[package]]
 name = "struo-frontend-veryl"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d51b21e4d98056431aeb3ed36f43f1484f34f5ab6f049f867d29acb4e00ecda0"
+checksum = "b60fb455e7518a5579c92d8c15d3a66a790384efb2001c7daab175a625724974"
 dependencies = [
  "struo-rtl",
  "veryl-analyzer",
@@ -3179,27 +3179,27 @@ dependencies = [
 
 [[package]]
 name = "struo-ir"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e2f4750ab8c5f0900ee4079001af4c2a146b02c19b11983d1e9a95fb3b81097"
+checksum = "69f0bea31111c66bca6812b30e2370c9aac1728a28a796343e2ba36e8ff1e811"
 
 [[package]]
 name = "struo-rtl"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5021efe0273a74b7db10676921363ae2e6ccbd8dc7fc2b407323345eda54768d"
+checksum = "d118f26ceeb98837a1c0cb3f2600cdda533e0fd4b6db06e8a04c8d05c7aedb3c"
 
 [[package]]
 name = "struo-sim"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "094c0ebb933bb701306c5e4af9a1308a36d4b5182f21102b2519a8a0e081b7ed"
+checksum = "ce3ac66c05330b246530cc9786a0e0a7cab80ecf4b10e40df319dc3eaf8d80e0"
 
 [[package]]
 name = "struo-synth"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f9d5c59e8b401cbbc618ba54cb0f820e984f96504d07eb6f50e1a2e22dd1f9e"
+checksum = "fa7e1cee28938739bc4209461dd85cbdc1dad88de3a1217d1bc1cae9a17955e4"
 dependencies = [
  "struo-ir",
  "struo-rtl",
@@ -3207,9 +3207,9 @@ dependencies = [
 
 [[package]]
 name = "struo-target-ecp5"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e471d515bb971b956667d67d88a6fc55ce34c2f8e8c5b08796094b039a274656"
+checksum = "47505cd0a01c8bafd08d789b3c0eaece1d3318eaa3cd5299f67443c8892ec7b2"
 dependencies = [
  "ciborium",
  "serde",

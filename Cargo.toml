@@ -14,10 +14,10 @@ object = { version = "0.37", default-features = false, features = ["read_core", 
 # Current simulator and compressed-artifact synthesis stack.
 celox = "=0.10.1"
 # Keep direct and Texo-transitive Struo dependencies aligned.
-struo-celox = "0.2.0"
-struo-frontend-veryl = "0.2.0"
-struo-synth = "0.2.0"
-struo-target-ecp5 = "0.2.0"
+struo-celox = "0.2.1"
+struo-frontend-veryl = "0.2.1"
+struo-synth = "0.2.1"
+struo-target-ecp5 = "0.2.1"
 texo-cli = "0.3.0"
 texo-flow = "0.3.0"
 texo-model = "0.3.0"

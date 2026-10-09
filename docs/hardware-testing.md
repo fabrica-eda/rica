@@ -7,7 +7,7 @@ and reads results through the JTAG debug transport
 
 Bitstreams are not stored in the repository. `riscv/tools/fetch-assets`
 downloads the hardware-verified image to
-`riscv/assets/riscv-hardware-compact-user-112-sv39-20261009.bit`, which is
+`riscv/assets/riscv-hardware-compact-user-112-sv39-20261009b.bit`, which is
 also `hardware-riscv-tests`' default `--bitstream`; build your own with
 [fpga-flow.md](fpga-flow.md).
 

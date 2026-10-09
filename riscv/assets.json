@@ -24,9 +24,9 @@
       "description": "Texo ECP5 architecture cache with DSP timing (decompressed on fetch)"
     },
     {
-      "asset": "riscv-hardware-compact-user-112-sv39-20261009.bit",
-      "asset_sha256": "4db16188dd7c58cf6fa484f6828164d9330ff2a8aa205bbbe4e97f0e3fffbd1f",
-      "path": "riscv-hardware-compact-user-112-sv39-20261009.bit",
+      "asset": "riscv-hardware-compact-user-112-sv39-20261009b.bit",
+      "asset_sha256": "ca94f357afc7329971532f8f35944112f506f935fce9046866f25d1bd60b0c84",
+      "path": "riscv-hardware-compact-user-112-sv39-20261009b.bit",
       "description": "Hardware-verified 112 MHz Sv39 bitstream (274/274 ELFs)"
     },
     {

@@ -70,8 +70,10 @@ and route ECOs. Hold is repaired afterwards. Checkpoints are written as `.txcp`
 
 The setup-optimization budget is wall-clock time. The same deterministic search
 reaches the same result if it has time to finish, but on a loaded machine a
-short budget can stop it early. The current image needed about 7,500 s; with a
-3,000 s budget it stopped at −157 ps while setup was still improving.
+short budget can stop it early. The current image needed about 3,500 s on a
+loaded machine. Small netlist changes can move the result a long way: before
+Struo 0.2.1, the same core with its `always_ff` split per stage mapped slightly
+differently and stopped at −245 ps after the full 7,200 s budget.
 
 ### Timing exceptions
 
@@ -113,7 +115,7 @@ and verifies the pack on first use.
 | Profile | `HardwareCompactUserTestTop`, 112 / 56 MHz, Sv39 |
 | Native STA | setup 0 ps, hold +1 ps after the 194 ps guards; 24,405 checked endpoints |
 | JTCK | 515 setup and 515 hold checks agree |
-| Run time | 7,542 s with a 7,200 s setup budget |
+| Run time | 3,483 s with a 7,200 s setup budget |
 | Hardware | 274 ELFs pass |
 
 ## Notes
