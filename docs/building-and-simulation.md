@@ -51,9 +51,9 @@ cargo build --locked --release -p verify-riscv
   with coincident CPU/memory edges evaluated memory-first and once CPU-first, so
   that neither order can hide a handshake bug.
 - **Simultaneous-clock model** (`--hardware-memory-rtl --timed-clocks`): Celox's
-  timed scheduler evaluates coincident edges together. Its `mcycle`/`minstret`
-  match the FPGA, so use it for cycle counts. It compiles one model per ELF and
-  needs explicit ELF paths.
+  `tick_events` evaluates coincident edges together on the native backend. Its
+  `mcycle`/`minstret` match the FPGA, so use it for cycle counts. It compiles one
+  model per ELF and needs explicit ELF paths.
 
 ### Feature flags
 

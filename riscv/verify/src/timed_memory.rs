@@ -1,18 +1,21 @@
 //! Performance diagnostics with atomic coincident CPU/memory edges.
 //!
-//! Celox's timed scheduler evaluates all triggered FF domains before publishing
-//! their updates. The manual `Simulator::tick` API cannot express this grouping.
+//! `Simulator::tick_events` evaluates all triggered FF domains against the
+//! pre-edge state before publishing their updates, as coincident edges do in
+//! hardware. Serialized `Simulator::tick` calls cannot express this grouping.
 use std::error::Error;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use celox::Simulation;
+use celox::{NativeBackend, SignalRef, Simulator, SimulatorBuilder};
 
 use crate::{ElfImage, IsaExtensions};
 
-fn value(sim: &mut Simulation, name: &str) -> u64 {
-    sim.get(if let Some((instances, leaf)) = name.rsplit_once('.') {
+type Sim = Simulator<NativeBackend>;
+
+fn resolve(sim: &Sim, name: &str) -> SignalRef {
+    if let Some((instances, leaf)) = name.rsplit_once('.') {
         sim.child_signal(
             &instances
                 .split('.')
@@ -22,20 +25,26 @@ fn value(sim: &mut Simulation, name: &str) -> u64 {
         )
     } else {
         sim.signal(name)
-    })
-    .to_u64_digits()
-    .first()
-    .copied()
-    .unwrap_or(0)
+    }
 }
 
-fn edge(sim: &mut Simulation, clocks: &[&str]) -> Result<(), Box<dyn Error>> {
-    let time = sim.time();
-    for clock in clocks {
-        sim.schedule(clock, time + 1, 0)?;
-        sim.schedule(clock, time + 2, 1)?;
-    }
-    sim.run_until(time + 2)?;
+/// Read a signal of at most 64 bits.
+fn read(sim: &mut Sim, signal: SignalRef) -> u64 {
+    sim.get_as::<u64>(signal)
+}
+
+fn value(sim: &mut Sim, name: &str) -> u64 {
+    let signal = resolve(sim, name);
+    read(sim, signal)
+}
+
+/// Advance one rising edge of every clock in `clocks` at once.
+fn edge(sim: &mut Sim, clocks: &[&str]) -> Result<(), Box<dyn Error>> {
+    let events = clocks
+        .iter()
+        .map(|clock| sim.event(clock))
+        .collect::<Vec<_>>();
+    sim.tick_events(&events)?;
     Ok(())
 }
 
@@ -154,7 +163,7 @@ pub fn run(
             project.join(format!("src/{name}.veryl")),
         )?);
     }
-    let mut sim = Simulation::builder(&source, "HardwareCoreTestTop")
+    let mut sim = SimulatorBuilder::new(&source, "HardwareCoreTestTop")
         .param("PMP_DATA_STAGES", platform.pmp_data_stages)
         .param("EARLY_ALU", u64::from(platform.early_alu))
         .param("DIRECT_LOAD_RETURN", u64::from(platform.direct_load_return))
@@ -177,7 +186,7 @@ pub fn run(
         .param("ENABLE_S", u64::from(execution.enable_s))
         .param("ENABLE_SV39", u64::from(execution.enable_sv39))
         .param("ENABLE_CONSOLE", u64::from(execution.machine_console))
-        .build()?;
+        .build_native()?;
     let reset = sim.signal("rst_n");
     let run = sim.signal("run");
     let debug_write = sim.signal("debug_write");
@@ -192,6 +201,8 @@ pub fn run(
     })?;
     edge(&mut sim, &["clk_cpu", "clk_mem"])?;
     sim.modify(|io| io.set(reset, 1_u8))?;
+    // Reset, one edge per loaded byte and the final load edge precede cycle 1.
+    let image_edges = image.load_bytes().count() + 1;
     for (address, byte) in image.load_bytes() {
         if address >= 0x1000 && !(0x8000_0000..0x8003_f000).contains(&address) {
             return Err(format!("hardware RTL address {address:#x} is out of range").into());
@@ -221,12 +232,47 @@ pub fn run(
     let mut muldiv_wait = 0;
     let mut mailbox_low = 0;
     let mut trace = std::collections::VecDeque::new();
+    // Resolve the per-cycle observations once; name lookups dominate the loop.
+    let clk_cpu = sim.event("clk_cpu");
+    let clk_mem = sim.event("clk_mem");
+    let [
+        console_response_sequence,
+        console_response,
+        memory_wait_signal,
+        muldiv_wait_signal,
+        data_we,
+        data_store_retire_ready,
+        data_request_sequence,
+        data_response_sequence,
+        data_addr,
+        data_wdata,
+        data_wmask,
+        commit_valid,
+        commit_pc,
+        commit_instr,
+    ] = [
+        "console_host_response_sequence",
+        "console_host_response",
+        "core.memory_wait",
+        "core.muldiv_wait",
+        "data_we",
+        "data_store_retire_ready",
+        "data_request_sequence",
+        "data_response_sequence",
+        "data_addr",
+        "data_wdata",
+        "data_wmask",
+        "commit_valid",
+        "commit_pc",
+        "commit_instr",
+    ]
+    .map(|name| resolve(&sim, name));
     for cycle in 1..=max_cycles {
         if let Some(host) = &mut console {
             if console_pending
-                && value(&mut sim, "console_host_response_sequence") == u64::from(console_sequence)
+                && read(&mut sim, console_response_sequence) == u64::from(console_sequence)
             {
-                let response = value(&mut sim, "console_host_response") as u16;
+                let response = read(&mut sim, console_response) as u16;
                 host.accept(response)?;
                 console_pending = false;
                 if console_terminal && response & (1 << 8) == 0 {
@@ -253,10 +299,11 @@ pub fn run(
         if let Some((config, output)) = &mut diagnostic
             && (config.start_cycle..=config.end_cycle).contains(&cycle)
         {
+            // Two time units per cycle, as the former timed-scheduler edges.
             write!(
                 output,
                 "{cycle},{},{}",
-                sim.time(),
+                2 * (cycle + image_edges),
                 u8::from(cycle % platform.memory_divisor() == 0)
             )?;
             for signal in TRACE_SIGNALS {
@@ -264,17 +311,16 @@ pub fn run(
             }
             writeln!(output)?;
         }
-        memory_wait += usize::from(value(&mut sim, "core.memory_wait") != 0);
-        muldiv_wait += usize::from(value(&mut sim, "core.muldiv_wait") != 0);
-        let store = value(&mut sim, "data_we") != 0
-            && value(&mut sim, "data_store_retire_ready") != 0
-            && value(&mut sim, "data_request_sequence")
-                == value(&mut sim, "data_response_sequence");
+        memory_wait += usize::from(read(&mut sim, memory_wait_signal) != 0);
+        muldiv_wait += usize::from(read(&mut sim, muldiv_wait_signal) != 0);
+        let store = read(&mut sim, data_we) != 0
+            && read(&mut sim, data_store_retire_ready) != 0
+            && read(&mut sim, data_request_sequence) == read(&mut sim, data_response_sequence);
         let mut mailbox = None;
         if store {
-            let address = value(&mut sim, "data_addr");
-            let data = value(&mut sim, "data_wdata");
-            let mask = value(&mut sim, "data_wmask");
+            let address = read(&mut sim, data_addr);
+            let data = read(&mut sim, data_wdata);
+            let mask = read(&mut sim, data_wmask);
             if address == image.tohost && mask == 0xff {
                 mailbox = Some(data);
             }
@@ -285,17 +331,16 @@ pub fn run(
                 mailbox = Some(mailbox_low);
             }
         }
-        let clocks: &[&str] = if cycle % platform.memory_divisor() == 0 {
-            &["clk_cpu", "clk_mem"]
+        if cycle % platform.memory_divisor() == 0 {
+            sim.tick_events(&[clk_cpu, clk_mem])?;
         } else {
-            &["clk_cpu"]
-        };
-        edge(&mut sim, clocks)?;
-        if value(&mut sim, "commit_valid") != 0 {
+            sim.tick_events(&[clk_cpu])?;
+        }
+        if read(&mut sim, commit_valid) != 0 {
             commits += 1;
             trace.push_back((
-                value(&mut sim, "commit_pc"),
-                value(&mut sim, "commit_instr"),
+                read(&mut sim, commit_pc),
+                read(&mut sim, commit_instr),
             ));
             if trace.len() > 20 {
                 trace.pop_front();
@@ -356,7 +401,9 @@ mod tests {
             }
         "#;
         for clocks in [["clk_a", "clk_b"], ["clk_b", "clk_a"]] {
-            let mut sim = Simulation::builder(source, "Edges").build().unwrap();
+            let mut sim = SimulatorBuilder::new(source, "Edges")
+                .build_native()
+                .unwrap();
             let reset = sim.signal("rst_n");
             sim.modify(|io| io.set(reset, 0_u8)).unwrap();
             edge(&mut sim, &clocks).unwrap();
