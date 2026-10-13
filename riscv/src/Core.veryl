@@ -25,6 +25,8 @@ module Core #(
     param EARLY_DIVIDE     : bit = 0,
     param ENABLE_INTERRUPTS: bit = 0,
     param STRICT_MEMORY    : bit = 0,
+    // Exclusive RAM end; default retains the FPGA BRAM platform.
+    param RAM_END: u64 = 64'h8003_f000,
     // The board can format a load before its existing CPU response register.
     // Raw asynchronous/direct model ports keep formatting in CompletionUnit.
     param FORMATTED_LOAD_DATA: bit = 0,
@@ -651,7 +653,7 @@ module Core #(
                     || (cm_retire_event && cm_is_store_q && !cm_is_atomic_q);
             }
         }
-        inst lsu: AtomicLsu (
+        inst lsu: AtomicLsu #(RAM_END: RAM_END) (
             clk, rst_n,
             start: cm_atomic_active_q && !redirect_discards_cm && translation_atomic_ready,
             cancel: redirect_discards_cm,
@@ -979,6 +981,7 @@ module Core #(
     // Sv39 data and instruction translation (Sv39Translation.veryl).
     if ENABLE_SV39 :g_sv39 {
         inst translation: Sv39Translation #(
+            RAM_END: RAM_END,
             SPLIT_MEMORY_RESPONSES: SPLIT_MEMORY_RESPONSES,
             ENABLE_INTERRUPTS     : ENABLE_INTERRUPTS     ,
         ) (
@@ -1101,7 +1104,7 @@ module Core #(
     }
 
 
-    inst fetch_access: PhysicalAccessCheck (
+    inst fetch_access: PhysicalAccessCheck #(RAM_END: RAM_END) (
         address      : fetch_address        ,
         size         : fetch_access_size    ,
         instruction  : 1'b1                 ,
@@ -1111,6 +1114,7 @@ module Core #(
     );
     for source in 0..3 :g_lsu_access {
         inst check: PhysicalOffsetAccessCheck #(
+            RAM_END: RAM_END,
             ENABLE_TIMER: ENABLE_INTERRUPTS,
         ) (
             base         : lsu_access_bases[source]      ,
@@ -1427,7 +1431,7 @@ module Core #(
             if ex_fault_boundary_q {
                 ex_exception_value = 64'h0000_0000_0000_1000;
                 if ex_pc_q[31] {
-                    ex_exception_value = 64'h0000_0000_8003_f000;
+                    ex_exception_value = RAM_END;
                 }
             }
         }
@@ -1611,6 +1615,11 @@ module Core #(
                     || (cm_is_branch_q && cm_branch_taken && !(&cm_taken_match_q))
                     || (cm_is_branch_q && !cm_branch_taken && !cm_untaken_match_q));
         }
+        // Translation and atomic faults arise in CM, after the EX exception
+        // tag was captured. They must also outrank prediction repair, or a
+        // faulting load can set xEPC yet redirect to its fallthrough instead
+        // of the trap vector (notably at Linux's high virtual addresses).
+        if translation_fault || atomic_fault { cm_prediction_mismatch = 1'b0; }
         ex_redirect_valid     = ex_prediction_mismatch;
         branch_redirect_valid = cm_prediction_mismatch;
         redirect_discards_cm  = redirect_pending_q && !redirect_preserve_cm_q;
@@ -1743,7 +1752,7 @@ module Core #(
             if cm_data_fault_boot_q {
                 csr_bus.trap_value = 64'h0000_0000_0000_1000;
             } else if cm_data_fault_ram_q {
-                csr_bus.trap_value = 64'h0000_0000_8003_f000;
+                csr_bus.trap_value = RAM_END;
             }
         }
         csr_bus.mret         = cm_mret_event && !cm_is_sret_q;

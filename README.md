@@ -30,9 +30,13 @@ including an S-mode kernel that runs isolated user tasks in their own page table
 On hardware, `mcycle` matches the simultaneous-clock simulation model within one
 cycle for the Sv39 tests and kernels.
 
-Not implemented: F/D/V, hypervisor, multiple harts, PLIC/AIA, an SBI
-implementation, and Linux compatibility. See [docs/history.md](docs/history.md)
-for the milestones and their measurements.
+Not implemented on the FPGA: F/D/V, hypervisor, multiple harts, PLIC/AIA,
+production SBI firmware, and Linux boot. A separate
+[Linux RTL simulation harness](docs/building-and-simulation.md#linux-in-the-core-rtl-simulator)
+provides 128 MiB of host-backed RAM and minimal SBI firmware. Linux 6.12 has
+booted through a static userspace `/init`, console output and normal poweroff
+on this RTL simulation platform.
+See [docs/history.md](docs/history.md) for the hardware milestones and measurements.
 
 ## Documentation
 

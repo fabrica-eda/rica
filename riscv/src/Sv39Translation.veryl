@@ -11,6 +11,7 @@
 /// the I-cache and checks FD's instruction; a miss is walked from CM and the
 /// instruction replayed.
 module Sv39Translation #(
+    param RAM_END: u64 = 64'h8003_f000,
     param SPLIT_MEMORY_RESPONSES: bit = 0,
     param ENABLE_INTERRUPTS     : bit = 0,
 ) (
@@ -211,7 +212,7 @@ module Sv39Translation #(
         return !perms[2] || (perms[3] != user);
     }
 
-    inst first_parcel_pma: PhysicalAccessCheck (
+    inst first_parcel_pma: PhysicalAccessCheck #(RAM_END: RAM_END) (
         address      : {32'd0, rx_pmp_address_q}                     ,
         size         : if rx_is_compressed_q || rx_straddle_q ? 2'd1 : 2'd2,
         instruction  : 1'b1                                          ,
@@ -219,7 +220,7 @@ module Sv39Translation #(
         crosses_bound: first_pma_cross_unused                        ,
         fault_address: first_pma_fault_unused                        ,
     );
-    inst second_parcel_pma: PhysicalAccessCheck (
+    inst second_parcel_pma: PhysicalAccessCheck #(RAM_END: RAM_END) (
         address      : {32'd0, rx_next_frame_q, 12'h000},
         size         : 2'd1                             ,
         instruction  : 1'b1                             ,
@@ -246,7 +247,7 @@ module Sv39Translation #(
         permissions   : walker_perms            ,
     );
 
-    inst physical_check: PhysicalAccessCheck #(ENABLE_TIMER: ENABLE_INTERRUPTS) (
+    inst physical_check: PhysicalAccessCheck #(ENABLE_TIMER: ENABLE_INTERRUPTS, RAM_END: RAM_END) (
         address      : {32'd0, sv39_check_address[31:0]},
         size         : sv39_check_size                 ,
         instruction  : 1'b0                            ,

@@ -2,6 +2,7 @@
 /// Decode the three possible 4 KiB pages in parallel with the low address sum.
 module PhysicalOffsetAccessCheck #(
     param ENABLE_TIMER: bit = 0,
+    param RAM_END: u64 = 64'h8003_f000,
 ) (
     base         : input  logic<64>,
     offset       : input  logic<12>,
@@ -54,6 +55,14 @@ module PhysicalOffsetAccessCheck #(
         end_current    = base[31:12] == 20'h8_003e;
         end_next       = base[31:12] == 20'h8_003d;
         end_previous   = base[31:12] == 20'h8_003f;
+        if RAM_END != 64'h8003_f000 {
+            ram_current  = (base[31:12] >= 20'h80000) && (base[31:12] <: (RAM_END >> 12));
+            ram_next     = (base[31:12] >= 20'h7ffff) && (base[31:12] <: ((RAM_END >> 12) - 64'd1));
+            ram_previous = (base[31:12] >= 20'h80001) && (base[31:12] <= (RAM_END >> 12));
+            end_current  = base[31:12] == ((RAM_END >> 12) - 64'd1);
+            end_next     = base[31:12] == ((RAM_END >> 12) - 64'd2);
+            end_previous = base[31:12] == (RAM_END >> 12);
+        }
         timer_current  = ENABLE_TIMER && (base[31:16] == 16'h0200);
         timer_next     = ENABLE_TIMER
             && (((base[31:16] == 16'h0200) && (base[15:12] != 4'hf)) || (base[31:12] == 20'h1fff));

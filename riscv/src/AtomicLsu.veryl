@@ -2,7 +2,7 @@
 /// done; issue toggles the ordinary memory token. No other master writes RAM
 /// while this CPU runs (debug writes require reset). All memory is ordered.
 /// Core starts only Decoder-validated A operations and holds operation until done.
-module AtomicLsu (
+module AtomicLsu #(param RAM_END: u64 = 64'h8003_f000) (
     clk: input clock, rst_n: input reset_async_low,
     start: input logic, cancel: input logic, consume: input logic,
     invalidate: input logic,
@@ -25,8 +25,10 @@ module AtomicLsu (
     var state_q: logic<3>;
     var reserved_q: logic;
     // Both LR and SC first pass the full address/alignment checks below.
-    // All permitted addresses share bits 63:18 and have zero bits 1:0.
-    var reserved_address_q: logic<16>;
+    // BRAM addresses share bits 63:18. Expanded RAM must retain all
+    // physical word-address bits to avoid aliasing distinct reservations.
+    const RESERVATION_BITS: u32 = if RAM_END == 64'h8003_f000 ? 16 : 30;
+    var reserved_address_q: logic<RESERVATION_BITS>;
     var reserved_word_q: logic;
     var is_lr: logic;
     var is_sc: logic;
@@ -57,10 +59,13 @@ module AtomicLsu (
         is_lr = operation[1:0] == 2'd2;
         is_sc = operation[1:0] == 2'd3;
         aligned = (address[1:0] == 2'd0) && (word_op || !address[2]);
-        // Atomic PMA: only the high 252 KiB RAM, never reset aliases or MMIO.
+        // Atomic PMA: only main RAM, never reset aliases or MMIO.
         ram = (address[63:18] == 46'h2000) && (address[17:12] != 6'h3f);
+        if RAM_END != 64'h8003_f000 {
+            ram = (address >= 64'h8000_0000) && (address <: RAM_END);
+        }
         reservation_matches = reserved_q && !invalidate
-            && (reserved_address_q == address[17:2]) && (reserved_word_q == word_op);
+            && (reserved_address_q == address[RESERVATION_BITS + 1:2]) && (reserved_word_q == word_op);
         result_update = !cancel && (((state_q == IDLE) && start)
             || ((state_q == READ_WAIT) && memory_done));
         result_next = memory_value;
@@ -101,7 +106,7 @@ module AtomicLsu (
         if_reset {
             state_q = IDLE;
             reserved_q = 1'b0;
-            reserved_address_q = 16'd0;
+            reserved_address_q = '0;
             reserved_word_q = 1'b0;
             written = 1'b0;
             fault = 1'b0;
@@ -142,7 +147,7 @@ module AtomicLsu (
                     READ_WAIT: if memory_done {
                         if is_lr {
                             reserved_q = !invalidate;
-                            reserved_address_q = address[17:2];
+                            reserved_address_q = address[RESERVATION_BITS + 1:2];
                             reserved_word_q = word_op;
                             state_q = DONE;
                         } else { state_q = ALU_START; }

@@ -17,3 +17,6 @@ __pycache__/
 /result
 /result-*/
 /riscv/assets/
+
+# Downloaded kernels and local Linux simulation evidence
+/work/linux-boot/

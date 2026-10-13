@@ -224,3 +224,31 @@ fn native_and_mapped_lsu_reservations_faults_and_transaction_boundaries() {
         }
     }
 }
+
+#[test]
+fn expanded_ram_reservation_does_not_alias_at_bram_size() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src");
+    let source = ["AtomicAlu.veryl", "AtomicLsu.veryl"]
+        .map(|n| fs::read_to_string(root.join(n)).unwrap())
+        .join("\n");
+    let mut s = SimulatorBuilder::new(&source, "AtomicLsu")
+        .param("RAM_END", 0x8800_0000u64)
+        .build_native()
+        .unwrap();
+    set(&mut s, "rst_n", 0);
+    tick(&mut s);
+    set(&mut s, "rst_n", 1);
+    let a = 0x8020_1000;
+    let b = a + 0x40000;
+    let mut memory = BTreeMap::from([(a, 17), (b, 29)]);
+    assert_eq!(transaction(&mut s, &mut memory, 2, false, a, 0), (17, 0, 1));
+    assert_eq!(transaction(&mut s, &mut memory, 3, false, b, 42), (1, 0, 0));
+    assert_eq!(memory[&b], 29);
+    assert_eq!(transaction(&mut s, &mut memory, 2, false, b, 0), (29, 0, 1));
+    assert_eq!(transaction(&mut s, &mut memory, 3, false, b, 42), (0, 0, 1));
+    assert_eq!(memory[&b], 42);
+    assert_eq!(
+        transaction(&mut s, &mut memory, 2, false, 0x8800_0000, 0).1,
+        5
+    );
+}
