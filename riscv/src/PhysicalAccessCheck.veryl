@@ -4,6 +4,7 @@
 /// peripheral transfer is not supported. Instruction fetch never selects MMIO.
 module PhysicalAccessCheck #(
     param ENABLE_TIMER: bit = 0,
+    param RAM_END: u64 = 64'h8003_f000,
 ) (
     address      : input  logic<64>,
     size         : input  logic<2> ,
@@ -23,6 +24,9 @@ module PhysicalAccessCheck #(
     always_comb {
         boot_region  = address[63:12] == 52'd0;
         ram_region   = (address[63:18] == 46'h0000_0000_2000) && (address[17:12] != 6'h3f);
+        if RAM_END != 64'h8003_f000 {
+            ram_region = (address >= 64'h8000_0000) && (address <: RAM_END);
+        }
         timer_region = ENABLE_TIMER && !instruction && (address[63:16] == 48'h0000_0000_0200);
         lane_cross   = 1'b0;
         aligned      = 1'b1;
@@ -46,13 +50,16 @@ module PhysicalAccessCheck #(
         // decoder followed by a carry chain on the fetch-valid path.
         boot_cross    = boot_region && (address[11:3] == 9'h1ff) && lane_cross;
         ram_cross     = ram_region && (address[17:3] == 15'h7dff) && lane_cross;
+        if RAM_END != 64'h8003_f000 {
+            ram_cross = ram_region && (address[63:3] == ((RAM_END - 64'd1) >> 3)) && lane_cross;
+        }
         crosses_bound = boot_cross || ram_cross;
         allowed       = ((boot_region || ram_region) && !crosses_bound) || (timer_region && aligned);
         fault_address = address;
         if boot_cross {
             fault_address = 64'h0000_0000_0000_1000;
         } else if ram_cross {
-            fault_address = 64'h0000_0000_8003_f000;
+            fault_address = RAM_END;
         }
     }
 }

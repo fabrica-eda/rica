@@ -160,3 +160,84 @@ cargo run --locked --release -p verify-i2c
 ```
 
 See [i2c/README.md](../i2c/README.md).
+
+## Linux in the core RTL simulator
+
+`linux-sim` runs a single-hart RV64IMAC/Sv39 Linux Image on Rica's `Core`
+through Celox. Its platform has 128 MiB of host-backed RAM and immediate
+instruction memory, with acknowledged data transactions. This is a separate
+simulation platform: the FPGA's 252 KiB RAM, board memory timing and hardware
+image are not enlarged by this harness.
+
+The CPU executes the firmware, kernel and userspace instructions. The host
+supplies memory, a timer and a byte console; it does not emulate instructions
+or intercept Linux system calls. `riscv/linux/firmware.c` provides the minimal
+single-hart SBI services needed here, forwards machine timer interrupts to S,
+and emulates `rdtime` in an M-mode illegal-instruction handler. Other unexpected
+firmware traps stop the run. This firmware is a bring-up fixture, not a general
+SBI implementation.
+
+Use Linux 6.12 source and Clang/LLD with the RISC-V backend, plus the kernel's
+usual host build dependencies (make, flex, bison and bc). On Nix, point
+`RISCV_CLANG` at the unwrapped Clang binary and `RISCV_LLD` at `ld.lld`;
+`LLVM` may be set to the LLVM bin directory with a trailing slash when the
+LLVM utilities are not on PATH. Build output belongs in `work/`, outside
+Cargo's managed `target/`.
+
+```sh
+mkdir -p work/linux-boot
+curl -fL https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz \
+  -o work/linux-boot/linux-6.12.tar.xz
+tar -xJf work/linux-boot/linux-6.12.tar.xz -C work/linux-boot
+bash riscv/linux/build-kernel.sh work/linux-boot/linux-6.12 work/linux-boot/kernel-build
+python3 riscv/linux/prepare.py work/linux-boot
+cargo build --locked --release -p verify-riscv --bin linux-sim
+target/release/linux-sim work/linux-boot/kernel-build/arch/riscv/boot/Image \
+  work/linux-boot/firmware.elf work/linux-boot/platform.dtb \
+  work/linux-boot/initramfs.cpio 200000000 \
+  > work/linux-boot/console.log 2> work/linux-boot/simulation.log
+```
+
+The kernel config starts from `tinyconfig` and enables Sv39, ELF loading,
+initramfs and SBI console support, with FPU, vector, SMP and tracing disabled.
+The crypto framework is enabled so `CRYPTO_MANAGER_DISABLE_TESTS` can disable
+long startup hash self-tests during repeated RTL bring-up runs.
+`prepare.py` creates a DTB, a minimal static `/init`, a newc initramfs and a
+manifest of firmware/toolchain hashes. The init program writes
+`RICA_LINUX_USERSPACE_OK` through Linux's `write` syscall, then requests poweroff.
+The verified Linux 6.12 run reached this marker and normal poweroff in
+67,035,047 cycles (about four minutes on the bring-up host). The string is
+first accessed by the kernel's user-copy routine, exercising demand paging.
+The runner returns success only after observing that marker and a successful
+SBI shutdown. A cycle limit, unexpected firmware trap or shutdown without the
+marker is a failure; a Linux banner alone is not success.
+
+The fixed physical layout is firmware at `0x80000000` (first 2 MiB reserved),
+Linux at `0x80200000`, initramfs at `0x86000000`, and DTB at `0x87e00000`.
+The timer is 1 MHz, advancing once every 100 simulated CPU cycles (a
+100 MHz simulated CPU). Set `LINUX_SIM_TIMER_DIVISOR` identically for
+`prepare.py` and the runner to change this ratio. `LINUX_SIM_TRACE_EVERY=N`
+logs architectural register observations and recent commits every N cycles.
+`LINUX_SIM_TRACE_AFTER_USER=1` logs each retirement and data transaction after
+the first userspace instruction for fault diagnosis (potentially large logs).
+Very low CPU/timer ratios can leave Linux spending most of its time servicing
+timer interrupts. MMIO at
+`0x02001000` writes console bytes and `0x02001008` reports firmware termination;
+these host fixture registers are not the FPGA JTAG-console register map.
+The `RAM_END` RTL parameter defaults to the existing FPGA bound; the runner
+sets it to `0x88000000`. It must be a 4 KiB-aligned exclusive end within the
+32-bit physical space. Expanded RAM also widens LR/SC reservation addresses.
+
+Regression checks for both the default and expanded bounds:
+
+```sh
+cargo test --locked --release -p verify-riscv \
+  --test physical_access --test offset_access --test atomic_lsu \
+  --test sv39_fault_recovery
+```
+
+Linux bring-up exposed a late-fault recovery bug: a data page fault at a high
+virtual PC could lose redirect priority to compact-predictor repair, skipping
+the load and continuing with stale register data. CM translation and atomic
+faults now suppress prediction repair. The focused recovery test checks load,
+store and atomic faults, saved exception state and discarded younger work.

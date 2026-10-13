@@ -108,3 +108,46 @@ fn native_and_mapped_access_checks_cover_boundaries_aliases_and_every_width() {
         }
     }
 }
+
+#[test]
+fn expanded_ram_checks_full_addresses_and_last_byte() {
+    let source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/PhysicalAccessCheck.veryl"),
+    )
+    .unwrap();
+    let end = 0x8800_0000_u64;
+    let mut sim = SimulatorBuilder::new(&source, "PhysicalAccessCheck")
+        .param("RAM_END", end)
+        .build_native()
+        .unwrap();
+    let a = sim.signal("address");
+    let s = sim.signal("size");
+    let i = sim.signal("instruction");
+    for boundary in [0x8000_0000, 0x8003_f000, 0x8020_0000, end] {
+        for delta in -16..16 {
+            for upper in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+                let address = boundary.wrapping_add_signed(delta) | upper;
+                for size in 0..4_u8 {
+                    sim.modify(|io| {
+                        io.set(a, address);
+                        io.set(s, size);
+                        io.set(i, 1u8);
+                    })
+                    .unwrap();
+                    let in_ram = (0x8000_0000..end).contains(&address);
+                    let fits =
+                        (0..1_u64 << size).all(|n| (0x8000_0000..end).contains(&(address + n)));
+                    assert_eq!(
+                        value(&mut sim, "allowed") != 0,
+                        fits,
+                        "address={address:#x} size={size}"
+                    );
+                    assert_eq!(value(&mut sim, "crosses_bound") != 0, in_ram && !fits);
+                    if in_ram && !fits {
+                        assert_eq!(value(&mut sim, "fault_address"), end);
+                    }
+                }
+            }
+        }
+    }
+}

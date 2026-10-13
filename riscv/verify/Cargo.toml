@@ -27,3 +27,7 @@ path = "src/bin/rv64_tests.rs"
 [[bin]]
 name = "hardware-riscv-tests"
 path = "src/bin/hardware_tests.rs"
+
+[[bin]]
+name = "linux-sim"
+path = "src/bin/linux_sim.rs"

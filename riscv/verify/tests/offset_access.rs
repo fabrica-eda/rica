@@ -143,3 +143,57 @@ fn native_and_mapped_offset_permissions_match_bytewise_effective_addresses() {
         }
     }
 }
+
+#[test]
+fn expanded_ram_offsets_match_effective_address_oracle() {
+    let source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/PhysicalOffsetAccessCheck.veryl"),
+    )
+    .unwrap();
+    let end = 0x8800_0000_u64;
+    let mut sim = SimulatorBuilder::new(&source, "PhysicalOffsetAccessCheck")
+        .param("RAM_END", end)
+        .build_native()
+        .unwrap();
+    let a = sim.signal("base");
+    let o = sim.signal("offset");
+    let s = sim.signal("size");
+    let allowed = sim.signal("allowed");
+    let boundary = sim.signal("ram_boundary");
+    for base in [
+        0x7fff_ffff_u64,
+        0x8000_0000,
+        0x8003_ffff,
+        0x8020_0000,
+        end - 4096,
+        end - 1,
+        end,
+        end + 4095,
+    ] {
+        for upper in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+            let base = base | upper;
+            for offset in -2048_i64..2048 {
+                let address = base.wrapping_add_signed(offset);
+                for size in 0..4_u8 {
+                    sim.modify(|io| {
+                        io.set(a, base);
+                        io.set(o, (offset as u16) & 4095);
+                        io.set(s, size);
+                    })
+                    .unwrap();
+                    let fits =
+                        (0..1_u64 << size).all(|n| (0x8000_0000..end).contains(&(address + n)));
+                    assert_eq!(
+                        sim.get_as::<u8>(allowed) != 0,
+                        fits,
+                        "base={base:#x} offset={offset} size={size}"
+                    );
+                    assert_eq!(
+                        sim.get_as::<u8>(boundary) != 0,
+                        (0x8000_0000..end).contains(&address) && !fits
+                    );
+                }
+            }
+        }
+    }
+}
